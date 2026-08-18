@@ -1,0 +1,356 @@
+# Критерии приёмки I-1 (см. spec.md). Все проверяются против локальных моков (respx, in-memory KV, SQLite).
+criteria:
+  # --- Конфигурация (R-K1..R-K4) ---
+  - id: AC-01
+    text: "Отсутствие обязательной переменной HUB_PUBLIC_URL (или HUB_LITELLM_BASE_URL, HUB_SECRET_KEY, HUB_ENCRYPTION_KEY) делает старт приложения невозможным с сообщением, содержащим имя переменной"
+    given: "окружение без HUB_PUBLIC_URL, остальные обязательные заданы"
+    when: "вызывается create_app()"
+    then: "выбрасывается исключение, текст которого содержит 'HUB_PUBLIC_URL'; для каждой из остальных обязательных переменных — аналогично"
+  - id: AC-02
+    text: "HUB_ENCRYPTION_KEY валидируется как ключ Fernet"
+    given: "HUB_ENCRYPTION_KEY = 'not-a-key'"
+    when: "вызывается create_app()"
+    then: "ошибка старта с упоминанием 'HUB_ENCRYPTION_KEY'; при корректном ключе Fernet приложение создаётся"
+  - id: AC-03
+    text: "Значения по умолчанию применяются, если переменные не заданы"
+    given: "заданы только обязательные HUB_* переменные и валидный каталог"
+    when: "запрашивается GET /.well-known/opencode"
+    then: "config.enabled_providers == ['magnit_prod']; provider.magnit_prod.name == 'LiteLLM Copilot prod'; models содержит 'MagnitCopilot' с limit {context: 250000, output: 8192}; auth.env == 'MAGNIT_COPILOT_KEY'"
+  - id: AC-04
+    text: "HUB_WELLKNOWN_AUTH_COMMAND разбирается как JSON-массив строк с подстановкой <HUB_PUBLIC_URL>"
+    given: "HUB_PUBLIC_URL = 'https://hub.test/' (со слэшем); HUB_WELLKNOWN_AUTH_COMMAND не задана"
+    when: "запрашивается GET /.well-known/opencode"
+    then: "auth.command == ['opencode','corp','login','--hub','https://hub.test'] (без завершающего слэша); при HUB_WELLKNOWN_AUTH_COMMAND='not json' create_app() завершается ошибкой с именем переменной"
+  - id: AC-05
+    text: "Секреты не попадают в логи"
+    given: "включён перехват логов; HUB_SECRET_KEY='S3CR3T-HUB'; выполнен полный вход (start → poll → ready с ключом 'sk-test-abc' и JWT)"
+    when: "просматриваются все записи логов приложения"
+    then: "ни одна запись не содержит 'S3CR3T-HUB', 'sk-test-abc', JWT, poll_secret Hub и poll_secret LiteLLM ('ll-secret')"
+  - id: AC-06
+    text: "create_app принимает готовые настройки и не требует переменных окружения"
+    given: "окружение очищено от HUB_*; объект Settings создан программно с обязательными полями"
+    when: "вызывается create_app(settings=settings)"
+    then: "приложение создаётся; GET /health отвечает 200"
+
+  # --- Каталог (R-C1..R-C6) ---
+  - id: AC-07
+    text: "Валидный каталог репозитория загружается при старте"
+    given: "HUB_CATALOG_PATH указывает на copy catalog.yaml репозитория; переменные ${…} из него заданы"
+    when: "вызывается create_app() и GET /health"
+    then: "приложение создаётся; /health возвращает catalog_version == 1"
+  - id: AC-08
+    text: "Отсутствие обязательного поля сервера — ошибка старта с путём к полю"
+    given: "каталог, у второго сервера отсутствует title"
+    when: "вызывается create_app()"
+    then: "ошибка старта; сообщение содержит 'servers[1].title'"
+  - id: AC-09
+    text: "Некорректный или повторяющийся alias — ошибка загрузки"
+    given: "каталог с alias 'Bad_Alias' (не по регэкспу) либо с двумя серверами alias 'gitlab'"
+    when: "вызывается create_app()"
+    then: "ошибка старта; для дубликата сообщение содержит 'gitlab'; для некорректного — путь 'servers[0].alias'"
+  - id: AC-10
+    text: "Поля, обязательные по режиму, проверяются: native без mcp_url и facade без upstream_url/auth/credential_headers невалидны"
+    given: "каталог с native-сервером без mcp_url; каталог с facade-сервером без auth"
+    when: "вызывается create_app() для каждого"
+    then: "в обоих случаях ошибка старта с путём к отсутствующему полю (например 'servers[0].mcp_url', 'servers[0].auth')"
+  - id: AC-11
+    text: "Недопустимые значения перечислений отклоняются"
+    given: "каталог со status: 'alpha' (или mode: 'proxy', или permission_model.kind: 'magic')"
+    when: "вызывается create_app()"
+    then: "ошибка старта; сообщение содержит путь к полю ('servers[0].status' и т.п.)"
+  - id: AC-12
+    text: "${VAR} подставляется из окружения; отсутствие переменной у ga-сервера — ошибка с именем переменной"
+    given: "каталог с ga-сервером, у которого mcp_url: '${TEST_MCP_URL}'"
+    when: "TEST_MCP_URL='https://x.test/mcp' → create_app(); затем TEST_MCP_URL не задана → create_app()"
+    then: "в первом случае /api/catalog отдаёт mcp_url 'https://x.test/mcp'; во втором — ошибка старта, содержащая 'TEST_MCP_URL' и путь к полю"
+  - id: AC-13
+    text: "Отсутствие ${VAR} у beta-сервера делает его unconfigured: каталог валиден, сервер скрыт"
+    given: "каталог: beta-сервер 'tag' с mcp_url '${TAG_MCP_URL}' (переменная не задана) и ga-сервер 'gitlab'"
+    when: "create_app(); GET /api/catalog (Bearer) и GET /.well-known/opencode"
+    then: "приложение стартует; в servers /api/catalog нет alias 'tag', есть 'gitlab'; в config.mcp well-known нет ключа 'tag'"
+  - id: AC-14
+    text: "Ссылки env:VAR не требуют переменной при загрузке и никогда не сериализуются наружу"
+    given: "каталог с facade-сервером, client_secret: 'env:GL_SECRET'; переменная GL_SECRET не задана"
+    when: "create_app(); GET /api/catalog, GET /.well-known/opencode, POST /admin/catalog/reload"
+    then: "старт успешен; ни одно тело ответа не содержит подстроки 'GL_SECRET' и 'client_secret'"
+  - id: AC-15
+    text: "env:VAR вне разрешённых полей — ошибка схемы"
+    given: "каталог, где mcp_url: 'env:SOME_URL'"
+    when: "вызывается create_app()"
+    then: "ошибка старта с путём 'servers[0].mcp_url'"
+  - id: AC-16
+    text: "$ref внутри файла разрешается (одна ступень)"
+    given: "каталог: сервер 'gitlab' с permission_model header_groups и сервер 'gitlab-platform' с permission_model: {$ref: '#/servers/gitlab/permission_model'}"
+    when: "GET /api/catalog (Bearer)"
+    then: "permission_model у 'gitlab-platform' равен permission_model у 'gitlab' (kind, groups, always)"
+  - id: AC-17
+    text: "Некорректный $ref — ошибка загрузки"
+    given: "каталог со ссылкой на несуществующий alias ('#/servers/nope/permission_model') либо со ссылкой на поле, которое само является $ref"
+    when: "вызывается create_app()"
+    then: "ошибка старта; сообщение содержит путь к полю и текст ссылки"
+  - id: AC-18
+    text: "Без HUB_ADMIN_TOKEN эндпоинт перезагрузки отключён; с неверным токеном — запрещён"
+    given: "приложение без HUB_ADMIN_TOKEN; приложение с HUB_ADMIN_TOKEN='adm'"
+    when: "POST /admin/catalog/reload без заголовка / с X-Admin-Token: 'wrong' / с 'adm' на первом; без заголовка и с 'wrong' на втором"
+    then: "первое приложение всегда 404 {error:'not_found'}; второе — 403 {error:'forbidden'} без заголовка и с неверным токеном"
+  - id: AC-19
+    text: "Успешная перезагрузка атомарно заменяет каталог и пишет аудит"
+    given: "HUB_ADMIN_TOKEN='adm'; каталог загружен с одним сервером; файл на диске изменён (добавлен второй сервер, version: 2)"
+    when: "POST /admin/catalog/reload с X-Admin-Token: adm; затем GET /api/catalog и GET /health"
+    then: "200 {status:'ok', catalog_version: 2, servers: 2}; /api/catalog содержит оба сервера; /health.catalog_version == 2; в audit_log есть запись action='catalog_reloaded'"
+  - id: AC-20
+    text: "Невалидный файл при перезагрузке не заменяет действующий каталог"
+    given: "HUB_ADMIN_TOKEN='adm'; каталог загружен; файл на диске заменён на невалидный (нет title) либо удалён"
+    when: "POST /admin/catalog/reload с верным токеном; затем GET /api/catalog"
+    then: "400 {error:'catalog_invalid', message содержит путь к полю или указание на файл}; /api/catalog отдаёт прежний каталог без изменений"
+  - id: AC-21
+    text: "CLI `mcp-hub catalog validate` возвращает 0 для валидного и 1 для невалидного каталога"
+    given: "два файла: валидный каталог и каталог с ошибкой схемы"
+    when: "запускается mcp-hub catalog validate --path <файл> для каждого (без остальных HUB_* переменных)"
+    then: "валидный: код выхода 0, вывод содержит 'OK'; невалидный: код 1, вывод содержит путь к полю; несуществующий путь: код 1"
+  - id: AC-22
+    text: "Публичное представление сервера содержит разрешённые поля и не содержит секретов/внутренних URL"
+    given: "каталог с facade 'gitlab' (upstream_url, auth, credential_headers) и native 'tag' (mcp_url 'https://tag.test/mcp'); HUB_PUBLIC_URL='https://hub.test'"
+    when: "GET /api/catalog (Bearer)"
+    then: "у каждого сервера есть alias,title,description,owner,contact,docs_url,status,mode,mcp_url,permission_model,auth_kind=='oauth2'; у 'gitlab' mcp_url=='https://hub.test/mcp/gitlab'; у 'tag' mcp_url=='https://tag.test/mcp'; нигде нет ключей upstream_url, auth, client_id, client_secret, credential_headers, static_headers, header"
+  - id: AC-23
+    text: "Пустой каталог валиден"
+    given: "каталог {version: 1, servers: []}"
+    when: "create_app(); GET /api/catalog (Bearer); GET /.well-known/opencode"
+    then: "старт успешен; /api/catalog → {version: 1, servers: []}; well-known config.mcp == {}"
+
+  # --- Вход (R-L1..R-L10) ---
+  - id: AC-24
+    text: "POST /cli/start создаёт собственную сессию Hub и возвращает данные для браузера"
+    given: "мок LiteLLM POST /sso/cli/start → {login_id:'ll-1', poll_secret:'ll-secret', user_code:'ABCD-1234', expires_in: 600}; HUB_LOGIN_SESSION_TTL=600"
+    when: "POST /cli/start с телом {client:'opencode-fork/1.17.9'}"
+    then: "200 с login_id (≠'ll-1'), poll_secret (≠'ll-secret'), browser_url == '<LITELLM>/sso/key/generate?source=litellm-cli&key=ll-1', user_code=='ABCD-1234', expires_in==600; мок вызван 1 раз; в audit_log запись 'login_started' с details.client"
+  - id: AC-25
+    text: "expires_in сессии — минимум из TTL Hub и expires_in LiteLLM"
+    given: "HUB_LOGIN_SESSION_TTL=600; мок /sso/cli/start отдаёт expires_in: 120"
+    when: "POST /cli/start"
+    then: "expires_in == 120; при отсутствии expires_in в ответе LiteLLM — expires_in == 600"
+  - id: AC-26
+    text: "Недоступность LiteLLM при старте входа — 502 без создания сессии"
+    given: "мок /sso/cli/start → 500 (вариант: сетевая ошибка; вариант: 200 без login_id)"
+    when: "POST /cli/start"
+    then: "502 {status:'error', error:'litellm_unavailable'}; hub_login_sessions_active не увеличилась"
+  - id: AC-27
+    text: "Некорректное тело /cli/start отклоняется"
+    given: "тело '{\"client\": 123}' или строка длиннее 128 символов"
+    when: "POST /cli/start"
+    then: "400 {error:'invalid_request'}; LiteLLM не вызывался; при пустом теле — 200"
+  - id: AC-28
+    text: "Rate-limit /cli/start: 30 запросов в минуту на IP, скользящее окно"
+    given: "один IP, подменяемые часы, LiteLLM-мок отвечает 200"
+    when: "31 запрос POST /cli/start подряд; затем часы сдвигаются на 61 с и выполняется ещё один запрос"
+    then: "первые 30 → 200; 31-й → 429 {error:'rate_limited'} с заголовком Retry-After ≥ 1, LiteLLM для него не вызывался; после сдвига времени → 200"
+  - id: AC-29
+    text: "Poll неизвестного или истёкшего login_id → 404 login_expired"
+    given: "сессия не создавалась (вариант: создана, часы сдвинуты за TTL)"
+    when: "GET /cli/poll/<id> с любым X-Hub-Poll-Secret"
+    then: "404 {status:'error', error:'login_expired'}; LiteLLM не вызывался"
+  - id: AC-30
+    text: "Poll с неверным или отсутствующим секретом → 403"
+    given: "живая сессия"
+    when: "GET /cli/poll/<login_id> без X-Hub-Poll-Secret; затем с X-Hub-Poll-Secret: 'wrong'; затем с poll_secret LiteLLM 'll-secret'"
+    then: "все три ответа 403 {status:'error', error:'forbidden'}; LiteLLM не вызывался"
+  - id: AC-31
+    text: "Poll в состоянии ожидания подтверждения в браузере → pending"
+    given: "живая сессия; мок GET /sso/cli/poll/ll-1 → {status:'pending'}"
+    when: "GET /cli/poll/<login_id> с верным секретом"
+    then: "200 {status:'pending'}; мок вызван с заголовком x-litellm-cli-poll-secret == 'll-secret'"
+  - id: AC-32
+    text: "Опрос LiteLLM дросселируется до 1 раза в 2 с на сессию"
+    given: "живая сессия; мок poll → pending; подменяемые часы"
+    when: "GET /cli/poll трижды в течение 1 с; затем часы +2 с и ещё один GET /cli/poll"
+    then: "после первых трёх мок вызван 1 раз, все ответы {status:'pending'}; после сдвига времени мок вызван 2 раза"
+  - id: AC-33
+    text: "Несколько команд → team_selection_required, LiteLLM больше не опрашивается до выбора"
+    given: "мок poll → {status:'ready', requires_team_selection:true, teams:['t1','t2'], team_details:[{team_id:'t1',team_alias:'A'},{team_id:'t2',team_alias:'B'}]}"
+    when: "GET /cli/poll; часы +3 с; GET /cli/poll повторно"
+    then: "оба ответа 200 {status:'team_selection_required', teams:[{team_id:'t1',team_alias:'A'},{team_id:'t2',team_alias:'B'}]}; мок вызван 1 раз"
+  - id: AC-34
+    text: "Выбор команды из списка принимается и передаётся в LiteLLM"
+    given: "сессия в состоянии team_selection_required (t1,t2); мок poll с ?team_id=t2 → ready с JWT; мок /key/generate → 200 {key:'sk-test-1'}"
+    when: "POST /cli/poll/<id>/team {team_id:'t2'} с верным секретом; затем GET /cli/poll"
+    then: "POST → 200 {status:'pending'}; poll → 200 {status:'ready', team_id:'t2', key:'sk-test-1', key_kind:'persistent'}; мок poll вызван с параметром team_id=t2; /key/generate получил team_id 't2'"
+  - id: AC-35
+    text: "Команда вне списка отклоняется"
+    given: "сессия в состоянии team_selection_required (t1,t2)"
+    when: "POST /cli/poll/<id>/team {team_id:'t9'}; затем POST с телом {} "
+    then: "первый → 400 {status:'error', error:'invalid_team'}; второй → 400 {error:'invalid_request'}; состояние сессии не изменилось (poll снова team_selection_required)"
+  - id: AC-36
+    text: "Ошибки доступа и состояния для POST …/team"
+    given: "сессия в состоянии pending (выбор не требуется); неизвестный login_id"
+    when: "POST /cli/poll/<id>/team {team_id:'t1'} с неверным секретом; с верным секретом на pending-сессии; на неизвестном id"
+    then: "403 forbidden; 409 {status:'error', error:'team_selection_not_required'}; 404 login_expired соответственно"
+  - id: AC-37
+    text: "Единственная команда выбирается автоматически без участия клиента"
+    given: "мок poll без team_id → requires_team_selection с одной командой t1; мок poll с ?team_id=t1 → ready с JWT; /key/generate → 200"
+    when: "GET /cli/poll один раз"
+    then: "200 {status:'ready', team_id:'t1', key_kind:'persistent'}; клиент не получал team_selection_required; мок poll вызван дважды (без и с team_id) в рамках одного запроса"
+  - id: AC-38
+    text: "Пустой список команд при requires_team_selection — некорректный ответ LiteLLM"
+    given: "мок poll → {status:'ready', requires_team_selection:true, teams:[], team_details:[]}"
+    when: "GET /cli/poll"
+    then: "502 {status:'error', error:'litellm_invalid_response'}; сессия жива (повторный poll через 2 с — не 404)"
+  - id: AC-39
+    text: "Пользователь без команд получает ключ без team_id"
+    given: "мок poll → {status:'ready', key:<JWT>, user_id:'u1', teams:[]} без team_id; /key/generate → 200 {key:'sk-test-2'}"
+    when: "GET /cli/poll"
+    then: "200 {status:'ready', key:'sk-test-2', team_id: null}; тело запроса к /key/generate не содержит team_id"
+  - id: AC-40
+    text: "Получив JWT, Hub создаёт постоянный ключ и возвращает его клиенту"
+    given: "сессия создана с client 'opencode-fork/1.17.9'; HUB_KEY_ALIAS_PREFIX='opencode'; мок poll → ready с JWT (claims sub:'u1', email:'u1@corp.test', exp в будущем), user_id 'u1', team_id 't1'; мок /key/generate → 200 {key:'sk-test-3'}"
+    when: "GET /cli/poll"
+    then: "200 {status:'ready', key:'sk-test-3', key_kind:'persistent', user:{user_id:'u1', email:'u1@corp.test'}, team_id:'t1'} без expires_in; запрос к /key/generate имел Authorization 'Bearer <JWT>', key_alias по маске 'opencode-u1-YYYYMMDD-HHMM', metadata {source:'opencode-mcp-hub', client:'opencode-fork/1.17.9'}, team_id 't1'"
+  - id: AC-41
+    text: "4xx от /key/generate → возвращается JWT как ключ, это не ошибка"
+    given: "мок poll → ready с JWT (exp = now+3600); мок /key/generate → 403"
+    when: "GET /cli/poll"
+    then: "200 {status:'ready', key:<JWT>, key_kind:'jwt', expires_in ≈ 3600 (±5)}; в логах ровно одно предупреждение о fallback для этой сессии; в api_keys запись с key_kind 'jwt' и expires_at"
+  - id: AC-42
+    text: "5xx/сетевая ошибка /key/generate → 502, сессия жива, повторный poll повторяет только /key/generate"
+    given: "мок poll → ready с JWT; мок /key/generate → 500 (затем переключается на 200 {key:'sk-test-4'}); подменяемые часы"
+    when: "GET /cli/poll; часы +2 с; GET /cli/poll"
+    then: "первый → 502 {status:'error', error:'litellm_unavailable'}; второй → 200 ready key 'sk-test-4'; мок poll LiteLLM вызван 1 раз, /key/generate — 2 раза"
+  - id: AC-43
+    text: "Сессия входа одноразовая"
+    given: "сессия завершена ответом ready"
+    when: "GET /cli/poll/<id> и POST /cli/poll/<id>/team с верным секретом"
+    then: "оба → 404 {status:'error', error:'login_expired'}; hub_login_sessions_active уменьшилась на 1"
+  - id: AC-44
+    text: "Ключ и пользователь сохраняются: хеш вместо ключа, upsert пользователя, аудит"
+    given: "вход завершён с ключом 'sk-test-3' пользователя u1/u1@corp.test, client 'c1'"
+    when: "читаются таблицы users, api_keys, audit_log"
+    then: "users содержит одну строку u1 с email; api_keys содержит строку с key_sha256 == sha256('sk-test-3') hex в нижнем регистре, key_kind 'persistent', key_alias по маске, client 'c1', created_at; ни в одной таблице нет подстроки 'sk-test-3'; audit_log содержит action 'login_completed' с details.key_kind == 'persistent'"
+  - id: AC-45
+    text: "Повторный вход того же пользователя добавляет ключ, старые остаются валидными"
+    given: "пользователь u1 дважды прошёл вход (ключи 'sk-a' и 'sk-b')"
+    when: "GET /api/me с Bearer sk-a и с Bearer sk-b"
+    then: "оба → 200 user_id 'u1'; в api_keys две строки для u1; в users одна строка"
+  - id: AC-46
+    text: "Ошибки LiteLLM при SSO-poll обрабатываются по типу"
+    given: "живая сессия; мок poll → 500 (вариант: сетевая ошибка); другая живая сессия; мок poll → 404"
+    when: "GET /cli/poll для каждой; часы +2 с; повторный GET /cli/poll для первой"
+    then: "первая: 502 {status:'error', error:'litellm_unavailable'}, повторный poll не 404 (сессия жива); вторая: 404 {status:'error', error:'login_expired'}, повторный poll тоже 404 (сессия удалена)"
+  - id: AC-47
+    text: "Ответы /cli/* не раскрывают poll_secret и login_id LiteLLM"
+    given: "мок LiteLLM с login_id 'll-1' и poll_secret 'll-secret'; полный сценарий start → poll (pending, team_selection_required, ready)"
+    when: "просматриваются тела всех ответов /cli/*"
+    then: "ни одно тело не содержит 'll-secret'; поле login_id в /cli/start ≠ 'll-1'"
+  - id: AC-48
+    text: "Аутентификация Bearer: валидный ключ пропускается, отсутствие/неверный — 401 с подсказкой"
+    given: "в api_keys есть ключ 'sk-ok' пользователя u1"
+    when: "GET /api/me с 'Authorization: Bearer sk-ok'; без заголовка; с 'Bearer sk-bad'; с 'Basic xxx'"
+    then: "первый → 200; остальные → 401 {error:'unauthorized', hint:'выполните вход: opencode corp login'} и заголовок WWW-Authenticate: Bearer"
+  - id: AC-49
+    text: "Заголовок x-litellm-api-key принимается для совместимости"
+    given: "в api_keys есть ключ 'sk-ok'"
+    when: "GET /api/me с заголовком x-litellm-api-key: sk-ok (без Authorization)"
+    then: "200 с user_id владельца ключа"
+  - id: AC-50
+    text: "Результат аутентификации кэшируется на 60 с"
+    given: "ключ 'sk-ok' аутентифицирован один раз; затем строка удалена из api_keys напрямую; подменяемые часы"
+    when: "GET /api/me с sk-ok в течение 60 с; затем часы +61 с и снова GET /api/me"
+    then: "первый → 200 (из кэша); после сдвига → 401"
+
+  # --- API (R-A1..R-A8) ---
+  - id: AC-51
+    text: "/health и /ready доступны без аутентификации и отражают состояние"
+    given: "приложение запущено с каталогом version 1"
+    when: "GET /health; GET /ready; затем /ready при недоступной БД (движок закрыт/подменён на ошибочный)"
+    then: "/health → 200 {status:'ok', version:<строка>, catalog_version:1, time:<ISO-8601>}; /ready → 200 {status:'ready'}; при недоступной БД /ready → 503 {status:'not_ready', error:'not_ready'}"
+  - id: AC-52
+    text: "/api/me возвращает данные пользователя и ключа, которым выполнен запрос"
+    given: "u1 имеет ключ 'sk-p' (persistent) и ключ 'jwt-1' (jwt)"
+    when: "GET /api/me с каждым ключом"
+    then: "оба → 200 {user_id:'u1', email, key_kind, created_at}, где key_kind соответствует использованному ключу ('persistent' и 'jwt')"
+  - id: AC-53
+    text: "/api/catalog требует аутентификации и отдаёт серверы с блоком connection"
+    given: "каталог с 'gitlab' и 'tag'; пользователь u1 без подключений"
+    when: "GET /api/catalog без ключа; затем с Bearer u1"
+    then: "без ключа → 401; с ключом → 200 {version:1, servers:[…]}, у каждого сервера connection == {status:'not_connected', preset:null, updated_at:null}; порядок серверов как в файле"
+  - id: AC-54
+    text: "Фильтр include_deprecated"
+    given: "каталог с ga-сервером 'a' и deprecated-сервером 'old'"
+    when: "GET /api/catalog; GET /api/catalog?include_deprecated=false; ?include_deprecated=0; ?include_deprecated=true"
+    then: "по умолчанию и при true — оба сервера, у 'old' status=='deprecated'; при false и 0 — только 'a'"
+  - id: AC-55
+    text: "Фильтр по audience: сервер виден, если audience содержит all или пересекается с группами пользователя"
+    given: "каталог: 'a' audience ['all'], 'b' audience ['devs'], 'c' audience ['devs','all']; у пользователя группы ['all']"
+    when: "GET /api/catalog (Bearer)"
+    then: "в servers присутствуют 'a' и 'c', отсутствует 'b'"
+  - id: AC-56
+    text: "/api/me/connections отдаёт подключения пользователя (пустой список по умолчанию)"
+    given: "пользователь u1 без строк в connections; пользователь u2 со строкой {alias:'gitlab', status:'connected', preset:'readonly', groups:['core']} (вставлена напрямую)"
+    when: "GET /api/me/connections с ключом u1 и с ключом u2; без ключа"
+    then: "u1 → 200 []; u2 → 200 [{alias:'gitlab', status:'connected', preset:'readonly', groups:['core'], created_at, updated_at}]; без ключа → 401"
+  - id: AC-57
+    text: "Блок connection в /api/catalog отражает строки connections пользователя"
+    given: "у u2 строка connections {alias:'gitlab', status:'needs_reauth', preset:'readwrite'}"
+    when: "GET /api/catalog с ключом u2"
+    then: "у 'gitlab' connection == {status:'needs_reauth', preset:'readwrite', updated_at:<не null>}; у остальных серверов status 'not_connected'"
+  - id: AC-58
+    text: "/.well-known/opencode отдаёт auth, config провайдера и remote_config без аутентификации"
+    given: "HUB_PUBLIC_URL='https://hub.test', HUB_LITELLM_BASE_URL='https://litellm.test', HUB_WELLKNOWN_ENV_NAME='MAGNIT_COPILOT_KEY'"
+    when: "GET /.well-known/opencode без заголовков"
+    then: "200; заголовок Cache-Control == 'public, max-age=300' и есть ETag; auth == {command:[…], env:'MAGNIT_COPILOT_KEY'}; config.$schema == 'https://opencode.ai/config.json'; config.autoupdate == false; provider.magnit_prod.npm == '@ai-sdk/openai-compatible'; options.baseURL == 'https://litellm.test/v1'; options.apiKey == '{env:MAGNIT_COPILOT_KEY}'; remote_config == {url:'https://hub.test/remote-config', headers:{Authorization:'Bearer {env:MAGNIT_COPILOT_KEY}'}}"
+  - id: AC-59
+    text: "well-known содержит mcp-запись для каждого видимого сервера без секретов"
+    given: "каталог: facade 'gitlab' (audience all), native 'tag' (audience all, mcp_url 'https://tag.test/mcp'), сервер 'b' (audience ['devs']), deprecated 'old' (audience all), beta 'u' unconfigured"
+    when: "GET /.well-known/opencode"
+    then: "config.mcp имеет ключи 'gitlab', 'tag', 'old' и не имеет 'b', 'u'; mcp.gitlab == {type:'remote', url:'https://hub.test/mcp/gitlab', enabled:false, oauth:{}}; mcp.tag.url == 'https://tag.test/mcp'; ни у одной записи нет ключа headers; тело не содержит 'upstream', 'client_secret', 'env:'"
+  - id: AC-60
+    text: "ETag well-known: 304 при совпадении If-None-Match, новый ETag после изменения каталога"
+    given: "HUB_ADMIN_TOKEN='adm'; GET /.well-known/opencode вернул ETag E1 (формат: 16 hex-символов в кавычках)"
+    when: "GET с If-None-Match: E1; затем каталог перезагружен с новым сервером; GET снова"
+    then: "первый → 304 без тела, с заголовком ETag E1; после перезагрузки → 200 с ETag E2 ≠ E1; повторный GET с If-None-Match: E1 → 200"
+  - id: AC-61
+    text: "/remote-config требует Bearer и отдаёт пустые объекты при отсутствии подключений"
+    given: "пользователь u1 без подключений"
+    when: "GET /remote-config без ключа; затем с ключом u1"
+    then: "без ключа → 401; с ключом → 200 {config:{mcp:{}, permission:{}, tools:{}}}; заголовок Cache-Control == 'private, no-store'"
+  - id: AC-62
+    text: "/remote-config включает подключённые серверы"
+    given: "у u2 строки connections: {alias:'gitlab', status:'connected'}, {alias:'jira', status:'needs_reauth'}"
+    when: "GET /remote-config с ключом u2"
+    then: "config.mcp == {gitlab:{enabled:true}}; 'jira' отсутствует"
+  - id: AC-63
+    text: "Единый формат ошибок и заголовок nosniff на всех ответах"
+    given: "приложение запущено"
+    when: "GET /nope; GET /api/me без ключа; POST /cli/start с невалидным телом; GET /health"
+    then: "404 {error:'not_found'}; 401 {error:'unauthorized', …}; 400 {error:'invalid_request', message}; все четыре ответа имеют Content-Type application/json и X-Content-Type-Options: nosniff; ответ не содержит заголовков Access-Control-*"
+  - id: AC-64
+    text: "X-Request-ID возвращается: переданный сохраняется, отсутствующий генерируется"
+    given: "приложение запущено; перехват логов"
+    when: "GET /health с X-Request-ID: 'req-123'; GET /health без заголовка"
+    then: "первый ответ содержит X-Request-ID == 'req-123', и запись лога о запросе содержит request_id 'req-123'; второй содержит непустой X-Request-ID (формат uuid)"
+
+  # --- Хранилище и наблюдаемость (R-S1..R-S5) ---
+  - id: AC-65
+    text: "Схема БД создаётся при старте"
+    given: "HUB_DATABASE_URL указывает на пустую SQLite"
+    when: "create_app() и инициализация приложения (lifespan)"
+    then: "в БД существуют таблицы users, api_keys, connections, audit_log с полями из spec.md §6 (в том числе api_keys.key_sha256 уникален, connections уникален по (user_id, alias))"
+  - id: AC-66
+    text: "In-memory KeyValueStore соблюдает TTL"
+    given: "in-memory реализация KeyValueStore с подменяемыми часами"
+    when: "set('k', v, ttl=5); get('k'); часы +6 с; get('k'); set без последующего delete/expire; delete('k2') после set"
+    then: "первый get → v; после истечения → None; после delete → None"
+  - id: AC-67
+    text: "/metrics отдаёт метрики Prometheus: счётчик запросов, гистограмму латентности, активные сессии входа"
+    given: "выполнены GET /health и один POST /cli/start (сессия жива)"
+    when: "GET /metrics без аутентификации"
+    then: "200 text/plain; тело содержит 'hub_http_requests_total{' с method='GET', path='/health', status='200'; 'hub_http_request_duration_seconds_bucket'; 'hub_login_sessions_active 1'"
+  - id: AC-68
+    text: "Записи audit_log не содержат секретов"
+    given: "выполнены полный вход (ключ 'sk-test-5', JWT, poll_secret) и перезагрузка каталога"
+    when: "читаются все строки audit_log"
+    then: "есть actions login_started, login_completed, catalog_reloaded; сериализованные details ни одной строки не содержат 'sk-test-5', JWT, poll_secret Hub/LiteLLM, HUB_ADMIN_TOKEN"
+  - id: AC-69
+    text: "CLI предоставляет команды serve и catalog validate"
+    given: "пакет установлен (entrypoint mcp-hub)"
+    when: "запускается mcp-hub --help и mcp-hub catalog --help"
+    then: "код выхода 0; вывод содержит 'serve' и 'catalog'; для catalog — 'validate' и опцию '--path'"
