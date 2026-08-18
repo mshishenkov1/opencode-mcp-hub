@@ -1,0 +1,15 @@
+# Локальный стенд: TLS на самоподписанном/корпоративном сертификате из ./certs.
+# В продуктиве — ingress k8s с корпоративным сертификатом.
+{
+  auto_https off
+}
+
+https://localhost:8443 {
+  tls /certs/server.crt /certs/server.key
+  handle_path /tag/* {
+    reverse_proxy tag-mcp:8000
+  }
+  handle {
+    reverse_proxy hub:8000
+  }
+}

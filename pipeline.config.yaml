@@ -1,0 +1,54 @@
+# ============================================================
+# Конфигурация конвейера агентной разработки (OpenCode MCP Hub).
+# ИЗМЕНЕНИЕ ЭТОГО ФАЙЛА — ТОЛЬКО ЧЕЛОВЕКОМ.
+# Агентам запись запрещена (hook guard_write + CI-проверка).
+# Ни один агент не имеет права понижать пороги гейтов.
+# ============================================================
+
+stack: python
+base_branch: main
+
+limits:
+  max_iterations_per_bug: 3
+
+thresholds:
+  coverage_diff: 90
+  mutation_score: 70
+
+commands:
+  test: ".venv/bin/python -m pytest -q -rs --tb=short"
+  test_single: ".venv/bin/python -m pytest -q --tb=long {test_id}"
+  coverage: ".venv/bin/python -m pytest -q --cov=src --cov-report=xml:reports/coverage.xml --cov-report=term"
+  coverage_diff: ".venv/bin/diff-cover reports/coverage.xml --compare-branch={base} --fail-under={threshold}"
+  mutation: ".venv/bin/mutmut run"
+  lint: ".venv/bin/ruff check src tests"
+  typecheck: ".venv/bin/mypy src"
+
+zones:
+  orchestrator:
+    allow: ["state.json", "reports/", "bugs/", "examples/", "docs/"]
+    deny: ["src/", "tests/"]
+  spec:
+    allow: ["spec.md", "acceptance-criteria.yaml", "reports/"]
+    deny: []
+  dev:
+    allow: ["src/", "disputes/", "pyproject.toml", "deploy/", "installers/"]
+    deny: ["tests/"]
+  test:
+    allow: ["tests/", "bugs/", "reports/"]
+    deny: ["src/"]
+  review:
+    allow: ["reports/", "disputes/"]
+    deny: ["src/", "tests/"]
+
+protected:
+  - "pipeline.config.yaml"
+  - ".claude/"
+  - ".github/"
+
+# Агенты не обращаются к боевым системам; тесты — только против локальных моков.
+network_allowlist:
+  - "pypi.org"
+  - "files.pythonhosted.org"
+
+autonomy_level: L1

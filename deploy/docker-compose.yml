@@ -1,0 +1,79 @@
+# Стенд Hub. Один и тот же файл для macOS (Colima/Docker Desktop), Windows (Docker Desktop/WSL2) и Linux.
+# Продуктив — те же образы через deploy/helm.
+services:
+  hub:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.hub
+    image: opencode-mcp-hub/hub:dev
+    env_file: [.env]
+    environment:
+      HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://localhost:8443}
+      HUB_DATABASE_URL: postgresql+asyncpg://hub:${POSTGRES_PASSWORD:-hub}@postgres:5432/hub
+      HUB_REDIS_URL: redis://redis:6379/0
+      HUB_CATALOG_PATH: /app/catalog.yaml
+    volumes:
+      - ../catalog.yaml:/app/catalog.yaml:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    deploy:
+      replicas: ${HUB_REPLICAS:-2}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hub
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hub}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hub -d hub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Эталонный нативный OAuth MCP-сервер ТЭГ (magnit-tag-mcp, режим MM_HTTP_AUTH=oauth).
+  tag-mcp:
+    image: ${TAG_MCP_IMAGE:-ghcr.io/mshishenkov1/magnit-tag-mcp:dev}
+    env_file: [.env]
+    environment:
+      MM_URL: ${MM_URL:-https://tag.magnit.ru}
+      MM_HTTP_AUTH: oauth
+      TAG_MCP_PUBLIC_URL: ${TAG_MCP_PUBLIC_URL:-https://localhost:8443/tag}
+      TAG_MCP_REDIS_URL: redis://redis:6379/1
+    depends_on:
+      redis: { condition: service_healthy }
+    profiles: ["tag"]
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - caddydata:/data
+    depends_on: [hub]
+
+volumes:
+  pgdata:
+  redisdata:
+  caddydata:

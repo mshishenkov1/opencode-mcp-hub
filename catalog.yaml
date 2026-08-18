@@ -1,0 +1,151 @@
+# Каталог корпоративных MCP-серверов (источник истины для Hub).
+# Меняется через merge request; CI валидирует схему и доступность upstream.
+# Секреты (client_secret и т.п.) — НЕ здесь: ссылки вида env:VAR.
+version: 1
+
+defaults:
+  permission_presets:
+    readonly: { label: "Только чтение", default: true }
+    readwrite: { label: "Чтение и запись" }
+
+servers:
+  - alias: tag
+    title: "ТЭГ (Mattermost)"
+    description: "Сообщения, каналы, треды, поиск, файлы корпоративного мессенджера ТЭГ."
+    owner: "Мирослав Шишенков"
+    contact: "https://tag.magnit.ru"
+    docs_url: "https://github.com/mshishenkov1/magnit-tag-mcp"
+    status: beta
+    audience: ["all"]
+    mode: native                     # сервер сам реализует MCP-авторизацию (FastMCP OAuthProxy)
+    mcp_url: "${TAG_MCP_URL}"        # напр. https://tag-mcp.<domain>/mcp
+    permission_model:
+      kind: consent                  # права выбираются на экране согласия сервера
+      presets:
+        readonly: { write_mode: readonly }
+        readwrite: { write_mode: confirm }
+
+  - alias: gitlab
+    title: "GitLab (coderepo.corp.tander.ru)"
+    description: "Репозитории, merge requests, issues, пайплайны GitLab coderepo."
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
+    status: ga
+    audience: ["all"]
+    mode: facade
+    upstream_url: "https://mcp-gitlab.ailab-copilot-prod.corp.tander.ru/mcp"
+    auth:
+      type: oauth2
+      authorize_url: "https://coderepo.corp.tander.ru/oauth/authorize"
+      token_url: "https://coderepo.corp.tander.ru/oauth/token"
+      revoke_url: "https://coderepo.corp.tander.ru/oauth/revoke"
+      client_id: "${GITLAB_OAUTH_CLIENT_ID}"
+      client_secret: "env:GITLAB_OAUTH_CLIENT_SECRET"
+      pkce: true
+      scopes:
+        readonly: ["read_api", "read_user", "read_repository"]
+        readwrite: ["api", "read_user"]
+    credential_headers:
+      Authorization: "Bearer {{access_token}}"
+    permission_model:
+      kind: header_groups
+      header: Enabled-Groups
+      always: ["core"]
+      groups:
+        - { id: code_review, title: "Code review: дискуссии в MR, approve", preset: readonly }
+        - { id: devops, title: "DevOps: пайплайны, джобы, окружения", preset: readonly }
+        - { id: users, title: "Пользователи и события проекта", preset: readonly }
+        - { id: repo_write, title: "Запись: файлы, ветки, MR", preset: readwrite }
+        - { id: issue_management, title: "Issues: создание и редактирование", preset: readwrite }
+        - { id: releases, title: "Релизы", preset: readwrite }
+        - { id: wiki, title: "Wiki", preset: readwrite }
+        - { id: draft_notes, title: "Черновики комментариев", preset: readwrite }
+        - { id: admin, title: "Админ: лейблы, майлстоуны, участники", preset: none }
+
+  - alias: gitlab-platform
+    title: "GitLab Platform (gitlab.platform.corp)"
+    description: "Репозитории, merge requests, issues, пайплайны GitLab Platform."
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
+    status: ga
+    audience: ["all"]
+    mode: facade
+    upstream_url: "https://mcp-gitlab-platform.ailab-copilot-prod.corp.tander.ru/mcp"
+    auth:
+      type: oauth2
+      authorize_url: "https://gitlab.platform.corp/oauth/authorize"
+      token_url: "https://gitlab.platform.corp/oauth/token"
+      revoke_url: "https://gitlab.platform.corp/oauth/revoke"
+      client_id: "${GITLAB_PLATFORM_OAUTH_CLIENT_ID}"
+      client_secret: "env:GITLAB_PLATFORM_OAUTH_CLIENT_SECRET"
+      pkce: true
+      scopes:
+        readonly: ["read_api", "read_user", "read_repository"]
+        readwrite: ["api", "read_user"]
+    credential_headers:
+      Authorization: "Bearer {{access_token}}"
+    permission_model: { $ref: "#/servers/gitlab/permission_model" }
+
+  - alias: jira
+    title: "Jira"
+    description: "Задачи, проекты, спринты и Service Desk Jira (jira.corp.tander.ru)."
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/atlassian-mcp-oblachno"
+    status: ga
+    audience: ["all"]
+    mode: facade
+    upstream_url: "https://mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp"
+    auth:
+      type: oauth2
+      authorize_url: "https://jira.corp.tander.ru/rest/oauth2/latest/authorize"
+      token_url: "https://jira.corp.tander.ru/rest/oauth2/latest/token"
+      client_id: "${JIRA_OAUTH_CLIENT_ID}"
+      client_secret: "env:JIRA_OAUTH_CLIENT_SECRET"
+      pkce: true
+      scopes:
+        readonly: ["READ"]
+        readwrite: ["WRITE"]
+    credential_headers:
+      X-Atlassian-Jira-Personal-Token: "{{access_token}}"
+      X-Atlassian-Jira-Url: "https://jira.corp.tander.ru"
+    permission_model:
+      kind: header_groups
+      header: Enabled-Groups
+      groups:
+        - { id: jira_read, title: "Чтение задач и проектов", preset: readonly }
+        - { id: jira_agile, title: "Доски и спринты", preset: readonly }
+        - { id: jira_service_desk, title: "Service Desk", preset: readonly }
+        - { id: jira_write, title: "Создание и изменение задач", preset: readwrite }
+
+  - alias: confluence
+    title: "Confluence"
+    description: "Поиск и чтение страниц, комментарии и вложения Confluence (it-portal.corp.tander.ru)."
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/atlassian-mcp-oblachno"
+    status: ga
+    audience: ["all"]
+    mode: facade
+    upstream_url: "https://mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp"
+    auth:
+      type: oauth2
+      authorize_url: "https://it-portal.corp.tander.ru/rest/oauth2/latest/authorize"
+      token_url: "https://it-portal.corp.tander.ru/rest/oauth2/latest/token"
+      client_id: "${CONFLUENCE_OAUTH_CLIENT_ID}"
+      client_secret: "env:CONFLUENCE_OAUTH_CLIENT_SECRET"
+      pkce: true
+      scopes:
+        readonly: ["READ"]
+        readwrite: ["WRITE"]
+    credential_headers:
+      X-Atlassian-Confluence-Personal-Token: "{{access_token}}"
+      X-Atlassian-Confluence-Url: "https://it-portal.corp.tander.ru"
+    permission_model:
+      kind: header_groups
+      header: Enabled-Groups
+      groups:
+        - { id: confluence_read, title: "Чтение страниц и поиск", preset: readonly }
+        - { id: confluence_write, title: "Создание и редактирование страниц", preset: readwrite }

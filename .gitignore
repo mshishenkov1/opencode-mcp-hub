@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mutmut-cache
+mutants/
+.mypy_cache/
+.ruff_cache/
+reports/coverage.xml
+htmlcov/
+.coverage
+.DS_Store
+deploy/.env
+deploy/caddy/certs/
