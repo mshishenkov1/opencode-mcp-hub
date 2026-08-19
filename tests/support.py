@@ -1397,3 +1397,29 @@ async def connected_client(
         hub, user_id=user_id, alias=alias, connection_id=conn.id, scope=f"{alias}:{preset}"
     )
     return conn, tokens
+
+
+WEB_LOGIN_POLL_RE = re.compile(r"/auth/login/poll/([0-9a-fA-F-]+)")
+
+
+async def litellm_web_login(
+    hub: Any,
+    *,
+    next_url: str = "/ui/connections",
+    user_id: str = "u1",
+    email: str | None = "u1@corp.test",
+    key: str = "sk-web-1",
+) -> Any:
+    """Полный вход в веб через CLI-SSO LiteLLM (HUB_WEB_AUTH=litellm): страница → опрос → cookie."""
+    mock_start(hub.litellm, start_body())
+    page = await hub.client.get("/auth/login", params={"next": next_url})
+    assert page.status_code == 200, page.text
+    match = WEB_LOGIN_POLL_RE.search(page.text)
+    assert match, page.text
+    login_id = match.group(1)
+    claims: dict[str, Any] = {"sub": user_id, "exp": int(hub.clock.time()) + 3600}
+    if email is not None:
+        claims["email"] = email
+    mock_poll(hub.litellm, ready_body(make_jwt(claims), user_id=user_id))
+    mock_key_generate(hub.litellm, key)
+    return await hub.client.get(f"/auth/login/poll/{login_id}")
