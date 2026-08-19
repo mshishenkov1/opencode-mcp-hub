@@ -1,4 +1,4 @@
-"""MCP-proxy (R-P1..R-P11): AC-114..AC-121, AC-125..AC-130."""
+"""MCP-proxy (R-P1..R-P11): AC-114..AC-121, AC-125..AC-130, AC-151, AC-152."""
 
 from __future__ import annotations
 
@@ -131,6 +131,48 @@ async def test_upstream_headers_are_rewritten(make_hub: HubFactory) -> None:
     assert sent.header("cookie") is None
     assert sent.header("x-forwarded-for") is None
     assert tokens["access_token"] not in str(sent.headers)
+
+
+@pytest.mark.ac("AC-115")
+async def test_client_authorization_is_dropped_when_catalog_sets_other_header(
+    make_hub: HubFactory,
+) -> None:
+    """Токен Hub не уходит на upstream, даже если каталог не задаёт свой ``Authorization``.
+
+    У 'jira' (как у jira/confluence боевого каталога) креды идут в собственном заголовке
+    ``X-Atlassian-Jira-Personal-Token``, поэтому подставленное значение не «затирает» возможный
+    проброс клиентского ``Authorization`` — только удаление заголовка проксёй (R-P2) не даёт
+    access-токену Hub уйти на чужой upstream.
+    """
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub, alias="jira", groups=("issues",))
+    token = tokens["access_token"]
+    response = await hub.post(
+        "/mcp/jira",
+        content=CALL_BODY,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Cookie": "a=b",
+            "X-Forwarded-For": "1.2.3.4",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2025-06-18",
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    assert hub.net is not None
+    sent = hub.net.upstreams["jira"].last()
+    assert sent.header("x-atlassian-jira-personal-token") == UPSTREAM_ACCESS
+    assert sent.header("x-atlassian-jira-url") == "https://jira.test"
+    assert sent.header("accept") == "application/json, text/event-stream"
+    assert sent.header("mcp-protocol-version") == "2025-06-18"
+    assert sent.header("authorization") is None
+    assert sent.header("cookie") is None
+    assert sent.header("x-forwarded-for") is None
+    # Токен Hub не пришёл ни под каким именем заголовка.
+    leaked = [name for name, value in sent.headers.items() if token in value]
+    assert leaked == [], f"токен Hub ушёл на upstream в заголовках {leaked}"
 
 
 # --- AC-116 ----------------------------------------------------------------
@@ -572,6 +614,113 @@ async def test_circuit_breaker_opens_and_recovers(make_hub: HubFactory) -> None:
     )
     assert again.status_code == 200, again.text
     assert hub.upstream.calls == 5
+
+
+# --- AC-151 ----------------------------------------------------------------
+
+
+def _call(request_id: int) -> bytes:
+    return jsonrpc_body("tools/call", {"name": "list_mrs"}, request_id=request_id)
+
+
+async def _open_breaker(hub: Hub, headers: dict[str, str]) -> None:
+    """Три неуспешных вызова подряд открывают окно (HUB_CB_FAILURES=3)."""
+    hub.upstream.push_many(httpx.Response(500, json={"error": "boom"}), 3)
+    for request_id in (1, 2, 3):
+        response = await hub.post("/mcp/gitlab", content=_call(request_id), headers=headers)
+        assert response.status_code == 502, response.text
+    assert hub.upstream.calls == 3
+
+
+@pytest.mark.ac("AC-151")
+async def test_failed_half_open_probe_reopens_window(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, cb_failures=3, cb_reset=30)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    # Пробный запрос уходит на upstream и снова получает 500.
+    hub.clock.advance(31)
+    hub.upstream.push(httpx.Response(500, json={"error": "boom"}))
+    probe = await hub.post("/mcp/gitlab", content=_call(4), headers=headers)
+    assert probe.status_code == 502, probe.text
+    assert probe.json()["error"]["code"] == CODE_UPSTREAM
+    assert hub.upstream.calls == 4
+
+    # Окно открылось снова сразу: повторно накапливать HUB_CB_FAILURES ошибок не требуется.
+    for request_id in (5, 6):
+        blocked = await hub.post("/mcp/gitlab", content=_call(request_id), headers=headers)
+        assert blocked.status_code == 503, blocked.text
+        error = blocked.json()["error"]
+        assert error["code"] == CODE_UPSTREAM
+        assert error["data"]["reason"] == "upstream_unavailable"
+        assert int(blocked.headers["Retry-After"]) >= 1
+    assert hub.upstream.calls == 4
+
+    # Новое истечение окна: успешная проба закрывает выключатель.
+    hub.clock.advance(31)
+    recovered = await hub.post("/mcp/gitlab", content=_call(7), headers=headers)
+    assert recovered.status_code == 200, recovered.text
+    assert hub.upstream.calls == 5
+
+    following = await hub.post("/mcp/gitlab", content=_call(8), headers=headers)
+    assert following.status_code == 200, following.text
+    assert hub.upstream.calls == 6
+
+
+# --- AC-152 ----------------------------------------------------------------
+
+
+@pytest.mark.ac("AC-152")
+async def test_only_one_request_probes_upstream_in_half_open(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, cb_failures=3, cb_reset=30)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    gate = asyncio.Event()
+
+    async def hold(recorded: Any) -> httpx.Response:
+        await gate.wait()
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": recorded.json_body["id"], "result": {"ok": True}},
+        )
+
+    hub.upstream.push(hold)
+    hub.clock.advance(31)
+
+    tasks = [
+        asyncio.create_task(hub.post("/mcp/gitlab", content=_call(request_id), headers=headers))
+        for request_id in (4, 5, 6)
+    ]
+    try:
+        async with asyncio.timeout(5):
+            while sum(task.done() for task in tasks) < 2:
+                await asyncio.sleep(0)
+        # Пока проба удерживается upstream'ом, остальные запросы уже отказаны.
+        assert hub.upstream.calls == 4, "во время пробы на upstream ушёл не один запрос"
+        refused = [task.result() for task in tasks if task.done()]
+        for response in refused:
+            assert response.status_code == 503, response.text
+            error = response.json()["error"]
+            assert error["code"] == CODE_UPSTREAM
+            assert error["data"]["reason"] == "upstream_unavailable"
+            assert int(response.headers["Retry-After"]) >= 1
+    finally:
+        gate.set()
+        responses = await asyncio.gather(*tasks)
+
+    statuses = sorted(response.status_code for response in responses)
+    assert statuses == [200, 503, 503]
+    assert hub.upstream.calls == 4
+
+    # Успешная проба закрыла выключатель и обнулила счётчик ошибок.
+    following = await hub.post("/mcp/gitlab", content=_call(7), headers=headers)
+    assert following.status_code == 200, following.text
+    assert hub.upstream.calls == 5
+    state = await hub.app.state.kv.get("cb:gitlab")
+    assert state == {"failures": 0, "open_until": 0.0}
 
 
 # --- AC-129 ----------------------------------------------------------------

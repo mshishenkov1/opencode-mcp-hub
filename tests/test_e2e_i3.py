@@ -7,6 +7,7 @@ from urllib.parse import quote, urlsplit
 
 import pytest
 
+from hub.websession import CSRF_FIELD
 from tests.conftest import Hub, HubFactory
 from tests.support import (
     CATALOG_ENV,
@@ -22,6 +23,7 @@ from tests.support import (
     connected_client,
     exchange_code,
     fetch_rows,
+    hidden_inputs,
     i3_catalog,
     jsonrpc_body,
     litellm_web_login,
@@ -228,6 +230,9 @@ async def test_revision2_secrets_do_not_leak(make_hub: HubFactory) -> None:
             "/oauth/authorize", params=authorize_params(client_id, challenge=challenge)
         )
         consent_page = await provider_callback(hub, started.headers["location"])
+        # R-W6: на экране прав CSRF-токен присутствует скрытым полем формы — это требование,
+        # а не утечка; в логи, аудит, /metrics и страницы /ui/* он не попадает (проверки ниже).
+        assert hidden_inputs(consent_page.text)[CSRF_FIELD] == csrf_token
         granted = await submit_consent(hub, consent_page.text)
         code = query_of(granted.headers["location"])["code"]
         tokens = (

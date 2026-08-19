@@ -1,4 +1,4 @@
-"""Hub как authorization server (R-O1..R-O13): AC-75..AC-101, AC-148."""
+"""Hub как authorization server (R-O1..R-O13): AC-75..AC-101, AC-148, AC-153, AC-155."""
 
 from __future__ import annotations
 
@@ -34,13 +34,15 @@ from tests.support import (
     refresh_grant,
     register_client,
     seed_connection,
+    signature_bytes,
     submit_consent,
     tamper_signature,
     web_login,
     web_logout,
 )
 
-# Клиент B: отличается путём (не только портом) — см. R-O4.1 (для loopback другой порт допустим).
+# Клиент B отличается от A путём: расхождение только по порту loopback разрешено R-O4.1
+# и проверяется в AC-83 (test_loopback_redirect_with_other_port_is_accepted).
 CLIENT_B_REDIRECT = "http://127.0.0.1:20000/other-callback"
 PRM_URL = f"{PUBLIC_URL}/.well-known/oauth-protected-resource/mcp/gitlab"
 
@@ -293,6 +295,83 @@ async def test_register_rate_limited_per_ip(make_hub: HubFactory) -> None:
     assert len(await fetch_rows(hub.app, "SELECT client_id FROM oauth_clients")) == 3
 
 
+# --- AC-153 ----------------------------------------------------------------
+
+XFF_TWO_HOPS = "10.0.0.1, 10.0.0.9"
+XFF_OTHER = "10.0.0.2"
+
+
+def _register_payload() -> dict[str, Any]:
+    return {"redirect_uris": [LOOPBACK_REDIRECT]}
+
+
+@pytest.mark.ac("AC-153")
+async def test_forwarded_for_is_ignored_without_trust_proxy(make_hub: HubFactory) -> None:
+    """Дефолт HUB_TRUST_PROXY=false: заголовок не влияет, ключ лимита один на все запросы."""
+    hub = await _hub(make_hub, rate_limit_register=2)
+    assert hub.settings.trust_proxy is False
+
+    first = await hub.post(
+        "/oauth/register", json=_register_payload(), headers={"X-Forwarded-For": XFF_TWO_HOPS}
+    )
+    second = await hub.post(
+        "/oauth/register", json=_register_payload(), headers={"X-Forwarded-For": XFF_OTHER}
+    )
+    assert (first.status_code, second.status_code) == (201, 201), second.text
+
+    third = await hub.post(
+        "/oauth/register", json=_register_payload(), headers={"X-Forwarded-For": "10.0.0.3"}
+    )
+    assert third.status_code == 429, third.text
+    assert third.json()["error"] == "rate_limited"
+    assert int(third.headers["Retry-After"]) >= 1
+    assert len(await fetch_rows(hub.app, "SELECT client_id FROM oauth_clients")) == 2
+
+
+@pytest.mark.ac("AC-153")
+async def test_trust_proxy_counts_limit_per_left_forwarded_address(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, rate_limit_register=2, trust_proxy=True)
+
+    for header in (XFF_TWO_HOPS, XFF_OTHER):
+        for _ in range(2):
+            response = await hub.post(
+                "/oauth/register", json=_register_payload(), headers={"X-Forwarded-For": header}
+            )
+            assert response.status_code == 201, response.text
+    assert len(await fetch_rows(hub.app, "SELECT client_id FROM oauth_clients")) == 4
+
+    # Левый адрес '10.0.0.1' исчерпал своё окно, '10.0.0.9' в правой части ключом не является.
+    fifth = await hub.post(
+        "/oauth/register", json=_register_payload(), headers={"X-Forwarded-For": XFF_TWO_HOPS}
+    )
+    assert fifth.status_code == 429, fifth.text
+    assert fifth.json()["error"] == "rate_limited"
+
+
+@pytest.mark.ac("AC-153")
+@pytest.mark.parametrize("trust_proxy", [False, True])
+async def test_forwarded_for_does_not_affect_auth_or_alias(
+    make_hub: HubFactory, trust_proxy: bool
+) -> None:
+    """Заголовок влияет только на ключ лимита: аутентификация и выбор alias от него не зависят."""
+    hub = await _hub(make_hub, trust_proxy=trust_proxy)
+    _conn, tokens = await connected_client(hub)
+    headers = {**mcp_headers(tokens["access_token"]), "X-Forwarded-For": XFF_TWO_HOPS}
+
+    response = await hub.post("/mcp/gitlab", content=jsonrpc_body("tools/list"), headers=headers)
+    assert response.status_code == 200, response.text
+    assert hub.upstream.calls == 1
+
+    assert hub.net is not None
+    assert hub.net.upstreams["jira"].calls == 0
+    anonymous = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/list"),
+        headers={"Content-Type": "application/json", "X-Forwarded-For": XFF_TWO_HOPS},
+    )
+    assert anonymous.status_code == 401, anonymous.text
+
+
 # --- AC-83, AC-148 ---------------------------------------------------------
 
 
@@ -355,23 +434,46 @@ async def test_authorize_rejects_path_traversal_redirect(make_hub: HubFactory) -
     assert await fetch_rows(hub.app, "SELECT id FROM oauth_codes") == []
 
 
-@pytest.mark.ac("AC-148")
+@pytest.mark.ac("AC-83")
 async def test_loopback_redirect_with_other_port_is_accepted(make_hub: HubFactory) -> None:
-    """R-O4.1 (решение 46): для loopback допускается другой порт при том же пути.
+    """R-O4.1 (RFC 8252): расхождение только по порту loopback ошибкой не является.
 
-    AC-83/AC-148 описывают клиентов A и B, различающихся только портом; более конкретное
-    правило R-O4.1 такое совпадение разрешает — противоречие зафиксировано в отчёте.
+    Флоу продолжается до выдачи кода, а код привязан к предъявленному redirect_uri: обмен с
+    ним проходит, обмен с зарегистрированным — invalid_grant.
     """
+    presented = "http://127.0.0.1:20000/cb"
     hub = await _hub(make_hub)
     client_id = await _ready_client(hub, redirect_uris=["http://127.0.0.1:19876/cb"])
-    response = await hub.get(
+    verifier, challenge = pkce_pair()
+    started = await hub.get(
         "/oauth/authorize",
-        params=authorize_params(
-            client_id, redirect_uri="http://127.0.0.1:20000/cb", challenge=pkce_pair()[1]
-        ),
+        params=authorize_params(client_id, redirect_uri=presented, challenge=challenge),
     )
-    assert response.status_code == 302
-    assert response.headers["location"].startswith("https://gitlab.test/oauth/authorize")
+    assert started.status_code == 302
+    assert started.headers["location"].startswith("https://gitlab.test/oauth/authorize")
+
+    consent_page = await provider_callback(hub, started.headers["location"])
+    granted = await submit_consent(hub, consent_page.text)
+    assert granted.status_code == 302, granted.text
+    location = granted.headers["location"]
+    assert location.startswith(f"{presented}?")
+    code = query_of(location)["code"]
+
+    wrong = await exchange_code(
+        hub,
+        code=code,
+        client_id=client_id,
+        verifier=verifier,
+        redirect_uri="http://127.0.0.1:19876/cb",
+    )
+    assert wrong.status_code == 400, wrong.text
+    assert wrong.json()["error"] == "invalid_grant"
+
+    exchanged = await exchange_code(
+        hub, code=code, client_id=client_id, verifier=verifier, redirect_uri=presented
+    )
+    assert exchanged.status_code == 200, exchanged.text
+    assert exchanged.json()["access_token"]
 
 
 # --- AC-84 -----------------------------------------------------------------
@@ -687,6 +789,34 @@ async def test_wrong_or_missing_verifier_rejected_and_code_survives(make_hub: Hu
     assert good.status_code == 200, good.text
 
 
+# --- AC-155 ----------------------------------------------------------------
+
+
+@pytest.mark.ac("AC-155")
+async def test_token_requires_redirect_uri_used_for_code(make_hub: HubFactory) -> None:
+    """RFC 6749 §4.1.3: код выдан с redirect_uri → обмен без него отклоняется (код не сгорает)."""
+    hub = await _hub(make_hub)
+    client_id = await _ready_client(hub)
+    verifier, challenge = pkce_pair()
+    code = await authorize_to_code(hub, client_id, challenge=challenge)
+
+    missing = await exchange_code(
+        hub, code=code, client_id=client_id, verifier=verifier, redirect_uri=None
+    )
+    assert missing.status_code == 400, missing.text
+    body = missing.json()
+    assert body["error"] == "invalid_grant"
+    assert any("Ѐ" <= ch <= "ӿ" for ch in body["error_description"])
+    assert await fetch_rows(hub.app, "SELECT id FROM refresh_tokens") == []
+
+    good = await exchange_code(
+        hub, code=code, client_id=client_id, verifier=verifier, redirect_uri=LOOPBACK_REDIRECT
+    )
+    assert good.status_code == 200, good.text
+    tokens = good.json()
+    assert tokens["access_token"] and tokens["refresh_token"]
+
+
 # --- AC-93 -----------------------------------------------------------------
 
 
@@ -860,11 +990,14 @@ async def test_revoke_always_returns_200(make_hub: HubFactory) -> None:
 
 
 @pytest.mark.ac("AC-98")
-async def test_token_signature_expiry_and_audience(make_hub: HubFactory) -> None:
+@pytest.mark.parametrize("position", [0, 20, -1], ids=["first", "middle", "last"])
+async def test_token_signature_expiry_and_audience(make_hub: HubFactory, position: int) -> None:
     hub = await _hub(make_hub)
     _conn, tokens = await connected_client(hub)
     token = tokens["access_token"]
-    tampered = tamper_signature(token)
+    # Изменяется любой значащий символ подписи — декодированные байты гарантированно отличаются.
+    tampered = tamper_signature(token, position)
+    assert signature_bytes(tampered) != signature_bytes(token)
 
     claims = jwt_decode(token, hub.settings.secret_key.get_secret_value())
     expired = jwt_encode(

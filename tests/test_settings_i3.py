@@ -1,7 +1,8 @@
-"""Настройки ревизии 2 (R-T1..R-T4) и ``deploy/.env.example``: AC-70..AC-73, AC-145."""
+"""Настройки ревизии 2 (R-T1..R-T4) и ``deploy/.env.example``: AC-70..AC-73, AC-145, AC-156."""
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -12,22 +13,28 @@ import pytest
 from hub.app import create_app
 from hub.crypto import jwt_decode
 from hub.errors import ConfigError
-from tests.conftest import Hub, HubFactory
+from hub.kv import InMemoryKeyValueStore, RedisKeyValueStore
+from hub.settings import Settings
+from tests.conftest import Hub, HubFactory, base_settings_kwargs
 from tests.support import (
     CATALOG_ENV,
     FERNET_KEY,
     LITELLM_URL,
     PUBLIC_URL,
+    MockNetwork,
     authorize_params,
     authorize_to_code,
     connected_client,
     exchange_code,
     i3_catalog,
     jsonrpc_body,
+    litellm_http_client,
+    make_litellm_router,
     mcp_headers,
     mock_start,
     pkce_pair,
     provider_callback,
+    record_text,
     register_client,
     submit_consent,
     web_login,
@@ -63,6 +70,7 @@ I3_SETTINGS_VARS = (
     "HUB_RATE_LIMIT_REGISTER",
     "HUB_RATE_LIMIT_TOKEN",
     "HUB_RATE_LIMIT_MCP",
+    "HUB_TRUST_PROXY",
     "HUB_MAX_SSE_PER_USER",
     "HUB_MAX_BODY_BYTES",
     "HUB_UPSTREAM_TIMEOUT",
@@ -334,6 +342,30 @@ async def test_i1_environment_serves_i3_endpoints(
 
 
 @pytest.mark.ac("AC-73")
+async def test_catalog_vars_are_not_hub_settings(
+    make_hub: HubFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Переменные каталога не заданы: Hub поднимается, серверы — unconfigured, PRM 404 (R-C3/AC-79).
+
+    Так фиксируется граница из ``given`` AC-73: ``GITLAB_OAUTH_CLIENT_ID`` и подобные — настройки
+    серверов каталога, а не Hub; их отсутствие не делает окружение неполным.
+    """
+    for name in (*REPO_CATALOG_VARS, "KEYCLOAK_ISSUER", "KEYCLOAK_CLIENT_ID"):
+        monkeypatch.delenv(name, raising=False)
+    assert not [name for name in os.environ if name.startswith(("HUB_", "KEYCLOAK_"))]
+
+    path = tmp_path / "repo-catalog.yaml"
+    shutil.copy(REPO_CATALOG, path)
+    hub: Hub = await make_hub(catalog=None, path=path, env={}, base_url="https://hub.test")
+
+    assert (await hub.get("/health")).status_code == 200
+    assert (await hub.get("/.well-known/opencode")).status_code == 200
+    assert (await hub.get("/.well-known/oauth-authorization-server")).status_code == 200
+    prm = await hub.get("/.well-known/oauth-protected-resource/mcp/gitlab")
+    assert prm.status_code == 404, prm.text
+
+
+@pytest.mark.ac("AC-73")
 async def test_i1_defaults_of_new_settings(make_hub: HubFactory) -> None:
     """Ни одна переменная ревизии 2 не задана — применяются дефолты таблицы R-T1."""
     hub = await _hub(make_hub)
@@ -383,3 +415,57 @@ def test_env_example_keeps_secrets_empty() -> None:
             assert value in ("", "change-me") or value.startswith("change-me"), (
                 f"{name} в .env.example должен быть пустым или change-me, а не {value!r}"
             )
+
+
+# --- AC-156 ----------------------------------------------------------------
+
+REDIS_WARNING = "kv_in_memory"
+
+
+def _kv_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record_text(record)
+        for record in caplog.records
+        if record.levelname == "WARNING" and record.getMessage() == REDIS_WARNING
+    ]
+
+
+@pytest.mark.ac("AC-156")
+async def test_start_without_redis_url_warns_about_unshared_state(
+    make_hub: HubFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-N5: пустой HUB_REDIS_URL — WARNING о том, что реплики не делят состояние."""
+    caplog.clear()
+    hub = await _hub(make_hub)
+    assert hub.settings.redis_url == ""
+    assert isinstance(hub.app.state.kv, InMemoryKeyValueStore)
+
+    warnings = _kv_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    text = warnings[0]
+    assert "HUB_REDIS_URL" in text
+    for topic in ("denylist", "MCP-сесси", "rate-limit", "circuit-breaker"):
+        assert topic in text, f"в предупреждении нет упоминания {topic}: {text}"
+
+    # Приложение при этом создаётся и обслуживает запросы.
+    assert (await hub.get("/health")).status_code == 200
+    assert (await hub.get("/api/catalog", headers={"Authorization": "Bearer nope"})).status_code == 401
+
+
+@pytest.mark.ac("AC-156")
+async def test_start_with_redis_url_does_not_warn(
+    catalog_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = Settings(
+        **base_settings_kwargs(catalog_path, redis_url="redis://redis.test:6379/0")
+    )
+    litellm = litellm_http_client(make_litellm_router())
+    outbound = MockNetwork().client()
+    caplog.clear()
+    try:
+        app = create_app(settings, litellm_client=litellm, http_client=outbound)
+        assert isinstance(app.state.kv, RedisKeyValueStore)
+        assert _kv_warnings(caplog) == []
+    finally:
+        await litellm.aclose()
+        await outbound.aclose()

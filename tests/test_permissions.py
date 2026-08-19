@@ -1,4 +1,4 @@
-"""Фильтр инструментов и права подключения (R-P8, R-B7): AC-122..AC-124."""
+"""Фильтр инструментов и права подключения (R-P8, R-B7): AC-122..AC-124, AC-150."""
 
 from __future__ import annotations
 
@@ -181,3 +181,84 @@ async def test_batch_with_forbidden_call_is_rejected(make_hub: HubFactory) -> No
     assert body["id"] == 2
     assert body["error"]["code"] == CODE_TOOL_FORBIDDEN
     assert hub.upstream.calls == 0
+
+
+# --- AC-150 ----------------------------------------------------------------
+
+OVERLAPPING_TOOLS = [
+    {"name": "create_issue", "description": "Создать задачу"},
+    {"name": "create_merge_request", "description": "Создать MR"},
+    {"name": "list_mrs", "description": "Список merge requests"},
+]
+
+
+def _overlapping_masks_catalog() -> dict[str, Any]:
+    """Пересекающиеся маски: включаемая группа issues ['create_issue'] и repo_write ['create_*'].
+
+    Маска выключенной группы шире маски включённой, но не совпадает с ней строкой — решение
+    должно приниматься по имени инструмента (R-P8 ревизии 2.1).
+    """
+    server = gitlab_facade(
+        permission_model={
+            "kind": "header_groups",
+            "header": "Enabled-Groups",
+            "always": [],
+            "groups": [
+                {
+                    "id": "issues",
+                    "title": "Задачи",
+                    "preset": "readonly",
+                    "tools": ["create_issue"],
+                },
+                {
+                    "id": "repo_write",
+                    "title": "Запись в репозиторий",
+                    "preset": "readonly",
+                    "tools": ["create_*"],
+                },
+            ],
+            "tool_filter": {"allow": ["*"]},
+        }
+    )
+    return catalog_doc([server, jira_facade(), native_server("tag")])
+
+
+@pytest.mark.ac("AC-150")
+async def test_overlapping_group_masks_resolved_by_tool_name(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, catalog=_overlapping_masks_catalog())
+    hub.upstream.tools = [dict(tool) for tool in OVERLAPPING_TOOLS]
+    _conn, tokens = await connected_client(hub, preset="readonly", groups=("issues",))
+    headers = mcp_headers(tokens["access_token"])
+
+    listed = await hub.post("/mcp/gitlab", content=jsonrpc_body("tools/list"), headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert _tool_names(listed.json()) == ["create_issue", "list_mrs"]
+
+    calls_before = hub.upstream.calls
+    granted = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/call", {"name": "create_issue", "arguments": {}}, request_id=2),
+        headers=headers,
+    )
+    assert granted.status_code == 200, granted.text
+    body = granted.json()
+    assert "error" not in body
+    assert body["result"]["content"][0]["text"] == "вызван create_issue"
+    assert hub.upstream.calls == calls_before + 1
+
+    calls_before = hub.upstream.calls
+    refused = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body(
+            "tools/call", {"name": "create_merge_request", "arguments": {}}, request_id=3
+        ),
+        headers=headers,
+    )
+    assert refused.status_code == 200, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == CODE_TOOL_FORBIDDEN
+    assert error["data"] == {
+        "tool": "create_merge_request",
+        "hint_url": "https://hub.test/ui/servers/gitlab",
+    }
+    assert hub.upstream.calls == calls_before

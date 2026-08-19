@@ -1,4 +1,4 @@
-"""Веб-интерфейс Hub (R-W1..R-W6): AC-131..AC-137."""
+"""Веб-интерфейс Hub (R-W1..R-W6): AC-131..AC-137, AC-154."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from tests.support import (
     bearer,
     catalog_doc,
     connected_client,
+    cookie_attributes,
     execute,
     facade_server,
     fetch_rows,
@@ -37,6 +38,7 @@ from tests.support import (
     register_client,
     restricted_facade,
     seed_connection,
+    set_cookie_header,
     start_body,
     submit_consent,
     teams_body,
@@ -100,6 +102,7 @@ async def _start_oidc_login(hub: Hub, next_url: str = "/ui/connections") -> dict
 
 
 @pytest.mark.ac("AC-131")
+@pytest.mark.ac("AC-154")
 async def test_oidc_login_creates_web_session(make_hub: HubFactory) -> None:
     hub = await _oidc_hub(make_hub)
     params = await _start_oidc_login(hub)
@@ -117,11 +120,21 @@ async def test_oidc_login_creates_web_session(make_hub: HubFactory) -> None:
     )
     assert callback.status_code in (302, 303), callback.text
     assert callback.headers["location"] == "/ui/connections"
-    cookie = callback.headers["set-cookie"]
-    assert "hub_session=" in cookie
-    assert "HttpOnly" in cookie
-    assert "SameSite=lax" in cookie or "SameSite=Lax" in cookie
-    assert "Secure" in cookie
+    # Атрибуты проверяются у каждой cookie отдельно: в ответе их две (hub_session и hub_csrf),
+    # и в склеенном заголовке атрибут соседней cookie удовлетворял бы проверку.
+    session_cookie = set_cookie_header(callback, "hub_session")
+    session_attrs = cookie_attributes(session_cookie)
+    assert session_cookie.split("=", 1)[1].split(";")[0]
+    assert "httponly" in session_attrs
+    assert session_attrs["samesite"].lower() == "lax"
+    assert "secure" in session_attrs  # HUB_PUBLIC_URL — https
+    assert session_attrs["path"] == "/"
+
+    # R-W6: hub_csrf — double-submit, читается скриптом страницы, поэтому без HttpOnly.
+    csrf_attrs = cookie_attributes(set_cookie_header(callback, "hub_csrf"))
+    assert "httponly" not in csrf_attrs
+    assert csrf_attrs["samesite"].lower() == "lax"
+    assert "secure" in csrf_attrs
 
     users = await fetch_rows(hub.app, "SELECT user_id, email FROM users")
     assert users == [{"user_id": "u1", "email": "u1@corp"}]
@@ -147,6 +160,35 @@ async def test_external_next_is_replaced(make_hub: HubFactory) -> None:
     hub.oidc.next_id_token = hub.oidc.make_id_token(nonce=params["nonce"], now=hub.clock.time())
     callback = await hub.get("/auth/callback", params={"code": "c", "state": params["state"]})
     assert callback.headers["location"] == "/ui/connections"
+
+
+# --- AC-154 ----------------------------------------------------------------
+
+
+@pytest.mark.ac("AC-154")
+@pytest.mark.parametrize("alg", ["HS256", "none"])
+@pytest.mark.parametrize("jwks_available", [True, False], ids=["jwks_ok", "jwks_down"])
+async def test_id_token_with_forbidden_alg_is_rejected(
+    make_hub: HubFactory, alg: str, jwks_available: bool
+) -> None:
+    """R-W1: ``none`` и HS* отклоняются до обращения к JWKS (защита от algorithm confusion)."""
+    hub = await _oidc_hub(make_hub)
+    params = await _start_oidc_login(hub)
+    if not jwks_available:
+        hub.oidc.jwks_status = 503
+    hub.oidc.next_id_token = hub.oidc.make_id_token(
+        nonce=params["nonce"], now=hub.clock.time(), alg=alg
+    )
+
+    response = await hub.get("/auth/callback", params={"code": "c", "state": params["state"]})
+    assert response.status_code == 400, response.text
+    assert html_error_code(response.text) == "invalid_id_token"
+    assert any("Ѐ" <= ch <= "ӿ" for ch in response.text)
+    assert "set-cookie" not in response.headers
+    assert hub.client.cookies.get("hub_session") is None
+    assert await fetch_rows(hub.app, "SELECT id FROM sessions") == []
+    # Решение принято по alg: к JWKS не обращались ни разу (результат не зависит от его доступности).
+    assert hub.oidc.jwks_requests == []
 
 
 # --- AC-132 ----------------------------------------------------------------

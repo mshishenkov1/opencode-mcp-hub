@@ -1,4 +1,4 @@
-"""Модель данных, миграции и KeyValueStore (R-M1..R-M5): AC-138..AC-142."""
+"""Модель данных, миграции и KeyValueStore (R-M1..R-M5): AC-138..AC-142, AC-156."""
 
 from __future__ import annotations
 
@@ -7,14 +7,21 @@ from typing import Any
 
 import pytest
 from asgi_lifespan import LifespanManager
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 
+import hub.migrate as migrate_module
 from hub.app import create_app
 from hub.cli import main
 from hub.clock import ManualClock
 from hub.db import build_engine
 from hub.kv import InMemoryKeyValueStore
-from hub.migrate import current_revision, head_revision, upgrade
+from hub.migrate import (
+    ADVISORY_LOCK_ID,
+    _lock,
+    current_revision,
+    head_revision,
+    upgrade,
+)
 from hub.settings import Settings
 from tests.conftest import Hub, HubFactory, base_settings_kwargs
 from tests.support import (
@@ -319,7 +326,12 @@ async def test_revision2_kv_keys_and_ttls(make_hub: HubFactory, clock: ManualClo
     live_keys = {k for k in kv._data if kv._alive(k)}
     assert any(k.startswith("jtiden:") for k in live_keys)
     assert "conn:u1:gitlab" in live_keys
-    assert any(k.startswith("mcpsess:") for k in live_keys)
+    # R-M4 ревизии 2.1: alias входит в ключ виртуальной сессии (mcpsess:<alias>:<id>),
+    # отдельного счётчика сессий (mcpsessn:*) в таблице ключей нет.
+    session_keys = [k for k in live_keys if k.startswith("mcpsess:")]
+    assert session_keys and all(k.startswith("mcpsess:gitlab:") for k in session_keys), session_keys
+    assert all(len(k.split(":")) == 3 and k.split(":")[2] for k in session_keys), session_keys
+    assert not [k for k in kv.written_keys if k.startswith("mcpsessn:")]
     assert any(k.startswith("toolscache:gitlab:") for k in live_keys)
     assert "cb:gitlab" in live_keys
 
@@ -328,9 +340,7 @@ async def test_revision2_kv_keys_and_ttls(make_hub: HubFactory, clock: ManualClo
 
     assert ttl_of("conn:u1:gitlab") == pytest.approx(60, abs=1)
     assert ttl_of("cb:gitlab") == pytest.approx(60, abs=1)  # HUB_CB_RESET × 2
-    assert ttl_of(next(k for k in live_keys if k.startswith("mcpsess:"))) == pytest.approx(
-        86400, abs=1
-    )
+    assert ttl_of(session_keys[0]) == pytest.approx(86400, abs=1)
     assert ttl_of(next(k for k in live_keys if k.startswith("toolscache:"))) == pytest.approx(
         300, abs=1
     )
@@ -414,3 +424,66 @@ async def test_current_revision_is_none_for_empty_database(tmp_path: Path) -> No
 @pytest.mark.ac("AC-138")
 def test_head_revision_is_i3() -> None:
     assert head_revision() == "0002_i3_oauth"
+
+
+# --- AC-156 ----------------------------------------------------------------
+
+
+class _RecordingConnection:
+    """Мок соединения SQLAlchemy на границе БД: запоминает выполненные statements."""
+
+    def __init__(self, dialect_name: str) -> None:
+        self.dialect = type("_Dialect", (), {"name": dialect_name})()
+        self.executed: list[tuple[str, Any]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> Any:
+        self.executed.append((str(statement), params))
+        return None
+
+
+@pytest.mark.ac("AC-156")
+def test_postgres_migrations_take_advisory_lock() -> None:
+    """R-M1/R-N5: на PostgreSQL перед миграциями берётся advisory-блокировка транзакции."""
+    connection = _RecordingConnection("postgresql")
+    _lock(connection)
+    assert len(connection.executed) == 1
+    sql, params = connection.executed[0]
+    assert "pg_advisory_xact_lock" in sql
+    assert params == {"key": ADVISORY_LOCK_ID}
+
+
+@pytest.mark.ac("AC-156")
+def test_sqlite_migrations_do_not_take_lock() -> None:
+    connection = _RecordingConnection("sqlite")
+    _lock(connection)
+    assert connection.executed == []
+
+
+@pytest.mark.ac("AC-156")
+async def test_lock_is_taken_before_revisions_are_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Блокировка запрашивается до применения ревизий; на SQLite pg-запросов нет (AC-138)."""
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'lock.db'}")
+    statements: list[str] = []
+    revision_at_lock: list[Any] = []
+    original = migrate_module._lock
+
+    def spy(connection: Any) -> None:
+        revision_at_lock.append(inspect(connection).has_table("alembic_version"))
+        original(connection)
+
+    monkeypatch.setattr(migrate_module, "_lock", spy)
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        statements.append(statement)
+
+    try:
+        await upgrade(engine)
+        assert await current_revision(engine) == head_revision()
+    finally:
+        await engine.dispose()
+
+    assert revision_at_lock == [False], "блокировка взята не до применения ревизий"
+    assert not [sql for sql in statements if "pg_advisory" in sql]

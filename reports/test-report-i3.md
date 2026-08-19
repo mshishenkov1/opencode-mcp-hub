@@ -3,6 +3,9 @@
 Ветка: `pipeline/i3-hub-oauth-facade-proxy`. Критерии AC-70…AC-149 (80 новых), правила spec.md
 часть II §9–19 (R-T*, R-O*, R-B*, R-P*, R-W*, R-M*, R-N*).
 
+> Разделы 1–7 — прогон до ревью. Итог после `reports/review-i3-1.json` и ревизии 2.1 spec.md
+> (AC-150…AC-156, уточнённые AC-73/74/83/98/141/145/148) — в **разделе 8**: 633 теста, 156 AC.
+
 ## 1. Итоги прогона
 
 | Показатель | Значение |
@@ -242,3 +245,110 @@
 * Кэш `tools/list` (`toolscache:<alias>:<version>:<хеш прав>`) не зависит от пользователя — это
   соответствует решению 52 (ключ включает `catalog_version` и хеш прав), но означает, что одинаковые
   права разных пользователей делят один кэш. Учтено в тестах AC-109/AC-121.
+
+## 8. После review-i3-1 и spec 2.1
+
+Вход: `reports/review-i3-1.json` (2 must_fix с `assignee: test`) и ревизия 2.1 spec.md
+(новые AC-150…AC-156; уточнены AC-73/74/83/98/141/145/148). Код продукта не изменялся
+(`git status` по `src/` чист; временные мутации откатывались `git checkout -- src`).
+
+### 8.1 Итоги прогона
+
+| Показатель | Значение |
+|---|---|
+| Тестов в сьюте | **633** (было 612, добавлен 21) + 1 нагрузочный под маркером `load` |
+| Прошло / упало | 633 / 0 (два последовательных прогона, разные seed `pytest-randomly`) |
+| Skip / xfail | 0 |
+| Deselected | 1 (`tests/test_load_sse.py::test_hundred_parallel_sse_streams`, маркер `load`) |
+| `ruff check src tests` | чисто |
+| `scripts/check_ac_traceability.py` | G6 OK: все **156** критериев покрыты |
+| `scripts/check_zone_diff.py test` | ok: изменения в пределах зоны (`tests/`) |
+| Покрытие `src/` (строки) | **93 %** |
+| `diff-cover` к `main` | **92 %** (порог 90 %, exit 0) |
+| Багов заведено | **0** (падений, квалифицированных как `code_bug`, не было) |
+| Помечено `flaky_suspect` | 0 |
+
+Прирост по файлам: `test_oauth_as.py` 66 → 73, `test_web.py` 27 → 31, `test_proxy.py` 28 → 31,
+`test_settings_i3.py` 20 → 23, `test_migrations.py` 18 → 21, `test_permissions.py` 7 → 8.
+
+### 8.2 Исправленные must_fix ревью (с доказательством мутациями)
+
+**(a) AC-115 — клиентский `Authorization` не проверялся на удаление.** Причина, указанная ревью,
+подтверждена: у всех facade тестового каталога `credential_headers` содержали `Authorization`, и
+подставленное значение затирало проброшенный заголовок. Сделано:
+
+* `tests/support.py::jira_facade` приведён к боевому `catalog.yaml`: `credential_headers` =
+  `{X-Atlassian-Jira-Personal-Token: '{{access_token}}', X-Atlassian-Jira-Url: …}` — без `Authorization`;
+* добавлен `tests/test_proxy.py::test_client_authorization_is_dropped_when_catalog_sets_other_header`:
+  upstream `jira` получает токен целевой системы в своём заголовке, а клиентский `Authorization`
+  (JWT Hub), `Cookie` и `X-Forwarded-For` отсутствуют; отдельно проверяется, что значение токена Hub
+  не пришло **ни под каким именем заголовка** (перебор всех заголовков запроса).
+
+Мутация `FORWARDED_HEADERS += ("authorization",)` (`src/hub/proxy.py:38`) → тест падает
+(`assert 'Bearer eyJ…' is None`), остальные 28 тестов `test_proxy.py` проходят. Ранее эта мутация
+давала 612 passed.
+
+**(b) AC-131 — атрибуты cookie проверялись по склеенному `set-cookie`.** В `tests/support.py`
+добавлены `set_cookie_header(response, name)` (выбор строки `Set-Cookie` конкретной cookie из
+`headers.get_list`) и `cookie_attributes(raw)`. `test_oidc_login_creates_web_session` теперь проверяет
+`HttpOnly` / `SameSite=Lax` / `Secure` / `Path` именно у `hub_session`, а у `hub_csrf` — отсутствие
+`HttpOnly` (double-submit, R-W6) при `SameSite=Lax` и `Secure`.
+
+Мутация `secure=False` только для `hub_session` (`src/hub/websession.py:114`) → тест падает
+(`assert 'secure' in {'httponly': '', 'max-age': '28800', 'path': '/', 'samesite': 'lax'}`),
+остальные 26 тестов `test_web.py` проходят. Ранее эта мутация давала 612 passed.
+
+### 8.3 Новые критерии AC-150…AC-156
+
+| AC | Тесты | Что зафиксировано | Проверка мутацией |
+|---|---|---|---|
+| AC-150 | `test_permissions.py::test_overlapping_group_masks_resolved_by_tool_name` | включённая `issues ['create_issue']` против выключенной `repo_write ['create_*']`: `tools/list` = `create_issue`, `list_mrs`; `tools/call create_issue` уходит на upstream; `create_merge_request` — JSON-RPC `-32001` c `data {tool, hint_url}` без обращения к upstream | `ToolFilter.allows` → `not _matches(tool, group_deny)` (поведение до R-P8 2.1): падает |
+| AC-151 | `test_proxy.py::test_failed_half_open_probe_reopens_window` | провал пробы в half-open открывает окно немедленно: проба → 502 `-32004`, следующие два вызова → 503 `-32004` + `Retry-After` без обращения к upstream; после нового истечения окна успешная проба закрывает выключатель | `record_failure` со сбросом `failures = 0` при открытии окна: падает |
+| AC-152 | `test_proxy.py::test_only_one_request_probes_upstream_in_half_open` | три параллельных запроса во время half-open: upstream удерживает пробу до сигнала теста, `hub.upstream.calls == 1`, два других — 503 `-32004` + `Retry-After`; после успеха `cb:gitlab == {failures: 0, open_until: 0.0}` | `set_if_absent(cb:<alias>:probe)` → безусловный `claimed = True`: падает («во время пробы на upstream ушёл не один запрос») |
+| AC-153 | `test_oauth_as.py::test_forwarded_for_is_ignored_without_trust_proxy`, `…::test_trust_proxy_counts_limit_per_left_forwarded_address`, `…::test_forwarded_for_does_not_affect_auth_or_alias[False/True]` | дефолт `false` — заголовок игнорируется (третья регистрация 429 `rate_limited` + `Retry-After`); `true` — ключ по левому адресу `X-Forwarded-For` (по два запроса с `10.0.0.1` и `10.0.0.2` успешны, пятый с `10.0.0.1` — 429); заголовок не влияет на аутентификацию и выбор alias | `if True:` → падает «off»-тест; `if False:` → падает «on»-тест |
+| AC-154 | `test_web.py::test_id_token_with_forbidden_alg_is_rejected[jwks_ok/jwks_down × HS256/none]`, `…::test_oidc_login_creates_web_session` | `id_token` с `alg=HS256` (HMAC по значению открытого ключа из JWKS) и `alg=none` → 400, cookie нет, строки в `sessions` нет; к JWKS не было ни одного запроса (`MockOIDC.jwks_requests == []`), результат одинаков при доступном и недоступном JWKS; RS256 по-прежнему создаёт сессию | `ALLOWED_ALGORITHMS += ['HS256', 'none']`: падают все 4 параметра |
+| AC-155 | `test_oauth_as.py::test_token_requires_redirect_uri_used_for_code` | обмен кода без `redirect_uri` → 400 `invalid_grant` с русским описанием, токены не выданы, `refresh_tokens` пуст; повтор с корректным `redirect_uri` → 200 (код после отклонения остался неиспользованным) | — (проверка соответствует ветке R-O8, добавленной dev'ом) |
+| AC-156 | `test_settings_i3.py::test_start_without_redis_url_warns_about_unshared_state`, `…::test_start_with_redis_url_does_not_warn`, `test_migrations.py::test_postgres_migrations_take_advisory_lock`, `…::test_sqlite_migrations_do_not_take_lock`, `…::test_lock_is_taken_before_revisions_are_applied` | пустой `HUB_REDIS_URL` → ровно одна запись WARNING `kv_in_memory` с упоминанием `HUB_REDIS_URL`, denylist, MCP-сессий, окон rate-limit и circuit-breaker; приложение обслуживает `/health` и `/api/catalog`; при заданном `HUB_REDIS_URL` записи нет (`app.state.kv` — `RedisKeyValueStore`); на диалекте `postgresql` выполняется ровно один statement `pg_advisory_xact_lock` с параметром `ADVISORY_LOCK_ID`, на `sqlite` — ни одного; блокировка берётся до применения ревизий (в момент вызова `alembic_version` ещё нет), в SQL прогона на SQLite нет `pg_advisory` | — |
+
+PostgreSQL в тестах не поднимался: advisory-блокировка проверяется на границе БД — мок соединения
+SQLAlchemy (`_RecordingConnection` с `dialect.name`) плюс перехват реального SQL прогона миграций на
+SQLite через событие `before_cursor_execute`.
+
+### 8.4 Уточнённые критерии (AC-73/74/83/98/141/145/148)
+
+* **AC-83** — противоречие снято ревизией 2.1. `test_loopback_redirect_with_other_port_is_accepted`
+  перемаркирован на AC-83 и усилен: расхождение только по порту loopback не 400, флоу доходит до
+  выдачи кода (редирект на предъявленный `http://127.0.0.1:20000/cb`), а код **привязан к
+  предъявленному** `redirect_uri` — обмен с ним 200, обмен с зарегистрированным `…:19876/cb` →
+  `invalid_grant`.
+* **AC-148** — три негативных теста без изменений (чужой путь, `…/cb/../evil`, `https://evil.test/cb`);
+  комментарий к `CLIENT_B_REDIRECT` приведён к формулировке 2.1 (клиент B отличается **путём**).
+* **AC-98** — `tamper_signature(token, position)` принимает позицию символа подписи; тест
+  параметризован по `first / middle / last` и дополнительно проверяет, что декодированные **байты**
+  подписи отличаются (`signature_bytes`).
+* **AC-141** — вместо `mcpsess:*` проверяется `mcpsess:gitlab:<id>` (alias в ключе, ровно три сегмента)
+  и отсутствие записей по ключу `mcpsessn:*` (отдельного счётчика сессий в таблице ключей больше нет);
+  TTL 86400 проверяется на том же ключе.
+* **AC-145** — `HUB_TRUST_PROXY` добавлен в `I3_SETTINGS_VARS`; `deploy/.env.example` содержит строку.
+* **AC-73** — добавлен `test_catalog_vars_are_not_hub_settings`: без переменных **каталога** и без
+  `KEYCLOAK_*` (проверяется, что в окружении нет ни одной `HUB_*`/`KEYCLOAK_*`) Hub поднимается,
+  `/health`, `/.well-known/opencode` и метаданные AS — 200, а PRM сервера — 404 (R-C3/AC-79).
+* **AC-74** — к проверке «CSRF-токена нет в логах, аудите, `/metrics` и HTML `/ui/*`» добавлена
+  положительная: на экране прав (`/oauth/authorize`) токен присутствует скрытым полем формы
+  (`hidden_inputs(consent_page.text)[CSRF_FIELD] == csrf_token`) — требование R-W6.
+
+Пункты 1–4 раздела 6 (противоречия) закрыты ревизией 2.1 spec.md и в тестах больше не помечаются
+как расхождения.
+
+### 8.5 Покрытие затронутых модулей
+
+| Модуль | Покрытие |
+|---|---|
+| `src/hub/permissions.py` | 90 % |
+| `src/hub/proxy.py` | 93 % |
+| `src/hub/oidc.py` | 87 % |
+| `src/hub/websession.py` | 92 % |
+| `src/hub/migrate.py` | 91 % |
+| `src/hub/routes/oauth.py` | 93 % |
+| `src/hub/routes/web.py` | 91 % |
+| `src/hub/app.py` | 96 % |

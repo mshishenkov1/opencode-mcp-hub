@@ -10,6 +10,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -714,6 +715,19 @@ _OIDC_KEY: Any = None
 _OIDC_WRONG_KEY: Any = None
 
 
+def raw_jws(header: dict[str, Any], claims: dict[str, Any], secret: bytes | None) -> str:
+    """Собрать JWS вручную: ``secret is None`` → подписи нет (``alg: none``), иначе HMAC-SHA256."""
+    parts = [
+        _b64url(json.dumps(part, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        for part in (header, claims)
+    ]
+    signing_input = ".".join(parts).encode("ascii")
+    if secret is None:
+        return ".".join([*parts, ""])
+    signature = hmac.new(secret, signing_input, hashlib.sha256).digest()
+    return ".".join([*parts, _b64url(signature)])
+
+
 def oidc_keys() -> tuple[Any, Any]:
     """Пара RSA-ключей мока OIDC (генерируются один раз на процесс)."""
     global _OIDC_KEY, _OIDC_WRONG_KEY
@@ -735,7 +749,13 @@ class MockOIDC:
         self.next_id_token: str | None = None
         self.token_status = 200
         self.metadata_status = 200
+        self.jwks_status = 200
         self.extra_token_body: dict[str, Any] = {}
+
+    @property
+    def jwks_requests(self) -> list[RecordedRequest]:
+        """Запросы к JWKS издателя (AC-154: при запрещённом ``alg`` их быть не должно)."""
+        return [r for r in self.requests if str(r.url).split("?")[0] == self.jwks_url]
 
     @property
     def discovery_url(self) -> str:
@@ -770,6 +790,7 @@ class MockOIDC:
         audience: str | None = None,
         expires_at: float | None = None,
         wrong_key: bool = False,
+        alg: str = "RS256",
         now: float | None = None,
     ) -> str:
         from joserfc import jwt as jose_jwt
@@ -789,6 +810,11 @@ class MockOIDC:
             claims["preferred_username"] = username
         if email is not None:
             claims["email"] = email
+        if alg != "RS256":
+            # HS256 — HMAC по значению открытого ключа из JWKS (классическая algorithm confusion),
+            # none — вовсе без подписи. joserfc такие токены не выпускает, собираем JWS вручную.
+            secret = None if alg == "none" else self.jwks()["keys"][0]["n"].encode("ascii")
+            return raw_jws({"alg": alg, "kid": signing.kid}, claims, secret)
         return jose_jwt.encode({"alg": "RS256", "kid": signing.kid}, claims, signing)
 
     def matches(self, request: httpx.Request) -> bool:
@@ -815,6 +841,8 @@ class MockOIDC:
                 },
             )
         if url == self.jwks_url:
+            if self.jwks_status != 200:
+                return httpx.Response(self.jwks_status, json={"error": "unavailable"})
             return httpx.Response(200, json=self.jwks())
         if self.token_status != 200:
             return httpx.Response(self.token_status, json={"error": "invalid_grant"})
@@ -929,7 +957,12 @@ def jira_facade(**overrides: Any) -> dict[str, Any]:
             "pkce": True,
             "scopes": {"readonly": ["read:jira"], "readwrite": ["write:jira"]},
         },
-        credential_headers={"Authorization": "Bearer {{access_token}}"},
+        # Как в боевом catalog.yaml: креды уходят в собственном заголовке, Authorization
+        # каталогом не задаётся — клиентский Authorization обязан быть удалён проксёй (R-P2).
+        credential_headers={
+            "X-Atlassian-Jira-Personal-Token": "{{access_token}}",
+            "X-Atlassian-Jira-Url": "https://jira.test",
+        },
         static_headers={},
         permission_model={
             "kind": "header_groups",
@@ -1119,6 +1152,27 @@ HIDDEN_INPUT_RE = re.compile(
     r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"', re.IGNORECASE
 )
 META_ERROR_RE = re.compile(r'<meta name="hub-error" content="([^"]*)"')
+
+
+def set_cookie_header(response: Any, name: str) -> str:
+    """Строка ``Set-Cookie`` именно этой cookie (в ответе их несколько — AC-131).
+
+    Склеенный ``headers["set-cookie"]`` для проверки атрибутов не годится: атрибут соседней
+    cookie удовлетворял бы проверку.
+    """
+    for raw in response.headers.get_list("set-cookie"):
+        if raw.split("=", 1)[0].strip() == name:
+            return raw
+    raise AssertionError(f"в ответе нет Set-Cookie {name}: {response.headers.get_list('set-cookie')}")
+
+
+def cookie_attributes(raw: str) -> dict[str, str]:
+    """Атрибуты одной строки ``Set-Cookie`` в нижнем регистре (флаги → ``""``)."""
+    attrs: dict[str, str] = {}
+    for chunk in raw.split(";")[1:]:
+        key, _, value = chunk.strip().partition("=")
+        attrs[key.strip().lower()] = value.strip()
+    return attrs
 
 
 def hidden_inputs(html: str) -> dict[str, str]:
@@ -1464,12 +1518,22 @@ def parse_db_datetime(value: Any) -> datetime:
 B64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
-def tamper_signature(token: str) -> str:
-    """Изменить последнюю букву подписи JWT так, чтобы изменились сами байты подписи.
+def tamper_signature(token: str, position: int = -1) -> str:
+    """Изменить значащий символ подписи JWT так, чтобы изменились сами байты подписи.
 
-    В 43-символьной base64url-подписи HS256 два младших бита последнего символа не значимы,
-    поэтому «соседняя» буква даёт ту же подпись; сдвиг на 4 позиции алфавита меняет байт.
+    ``position`` — индекс символа подписи (по умолчанию последний). В 43-символьной
+    base64url-подписи HS256 два младших бита последнего символа не значимы, поэтому «соседняя»
+    буква даёт ту же подпись; сдвиг на 4 позиции алфавита меняет байт при любом положении.
     """
     head, _, signature = token.rpartition(".")
-    index = B64URL_ALPHABET.index(signature[-1])
-    return f"{head}.{signature[:-1]}{B64URL_ALPHABET[(index + 4) % 64]}"
+    index = B64URL_ALPHABET.index(signature[position])
+    replacement = B64URL_ALPHABET[(index + 4) % 64]
+    chars = list(signature)
+    chars[position] = replacement
+    return f"{head}.{''.join(chars)}"
+
+
+def signature_bytes(token: str) -> bytes:
+    """Декодированные байты подписи JWT (для проверки, что подпись действительно изменилась)."""
+    signature = token.rpartition(".")[2]
+    return base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
