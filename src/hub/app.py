@@ -76,6 +76,32 @@ async def _http_exception_handler(request: Request, exc: Exception) -> JSONRespo
     return _error_response(request, HubError(exc.status_code, code, message, headers=headers))
 
 
+async def _internal_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all: необработанное исключение → 500 ``internal_error`` в едином формате (R-A7).
+
+    Обработчик выполняется в ``ServerErrorMiddleware`` снаружи ``RequestContextMiddleware``, поэтому
+    ``X-Request-ID`` и ``nosniff`` проставляются здесь (R-S4). Детали исключения в ответ не попадают —
+    только в JSON-лог.
+    """
+    request_id = getattr(request.state, "request_id", None)
+    logger.error(
+        "unhandled_exception",
+        exc_info=exc,
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "exc_type": type(exc).__name__,
+        },
+    )
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if request_id:
+        headers["X-Request-ID"] = request_id
+    return _error_response(
+        request, HubError(500, "internal_error", "Внутренняя ошибка сервера", headers=headers)
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -169,6 +195,7 @@ def create_app(
     app.add_exception_handler(HubError, _hub_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
+    app.add_exception_handler(Exception, _internal_error_handler)
 
     app.include_router(system_router)
     app.include_router(cli_router)

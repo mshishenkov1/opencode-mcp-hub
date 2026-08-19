@@ -41,6 +41,8 @@ class RequestContextMiddleware:
             return
 
         request_id = _incoming_request_id(scope)
+        # request_id доступен и после сброса contextvar (обработчик 500 в ServerErrorMiddleware).
+        scope.setdefault("state", {})["request_id"] = request_id
         token = request_id_var.set(request_id)
         started = time.perf_counter()
         status_holder: dict[str, Any] = {"status": 500}
