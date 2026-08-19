@@ -675,3 +675,127 @@ async def test_sse_counter_released_on_client_disconnect(make_hub: HubFactory) -
     ) as again:
         assert again.status_code == 200
         assert await again.next_chunk() is not None
+
+
+# --- дополнительные ветки proxy -------------------------------------------
+
+
+@pytest.mark.ac("AC-116")
+async def test_get_returns_sse_stream(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub)
+    token = tokens["access_token"]
+    session_id = await _initialize(hub, token)
+    event = sse_body(sse_event({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}))
+    hub.upstream.push(_sse_response([event]))
+
+    response = await hub.get(
+        "/mcp/gitlab", headers=mcp_headers(token, session_id=session_id, accept=SSE_MEDIA_TYPE)
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(SSE_MEDIA_TYPE)
+    assert response.headers["Mcp-Session-Id"] == session_id
+    assert b'"ok"' in response.content
+
+
+@pytest.mark.ac("AC-116")
+async def test_get_passes_through_non_sse_response(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub)
+    token = tokens["access_token"]
+    session_id = await _initialize(hub, token)
+    response = await hub.get("/mcp/gitlab", headers=mcp_headers(token, session_id=session_id))
+    assert response.status_code == 405
+    assert response.json()["error"] == "method_not_allowed"
+
+
+@pytest.mark.ac("AC-116")
+async def test_sse_idle_timeout_closes_stream(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, upstream_sse_idle_timeout=0.05)
+    _conn, tokens = await connected_client(hub)
+    gate = asyncio.Event()
+    event = sse_body(sse_event({"jsonrpc": "2.0", "id": 1, "result": {"step": 1}}))
+    hub.upstream.push(_sse_response([event, event], gate))
+
+    response = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/list"),
+        headers=mcp_headers(tokens["access_token"], accept=SSE_MEDIA_TYPE),
+    )
+    assert response.status_code == 200
+    assert response.content.count(b"data:") == 1
+    gate.set()
+
+
+@pytest.mark.ac("AC-116")
+async def test_network_error_returns_502(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub)
+    hub.upstream.push(httpx.ConnectError("сеть недоступна"))
+    response = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/call", {"name": "list_mrs"}),
+        headers=mcp_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == CODE_UPSTREAM
+
+
+@pytest.mark.ac("AC-114")
+async def test_non_json_upstream_body_is_passed_through(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub)
+    hub.upstream.push(
+        httpx.Response(200, headers={"content-type": "text/plain"}, content=b"not json")
+    )
+    response = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/call", {"name": "list_mrs"}),
+        headers=mcp_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 200
+    assert response.content == b"not json"
+
+
+@pytest.mark.ac("AC-120")
+async def test_delete_without_session_header_is_404(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub)
+    response = await hub.client.delete(
+        "/mcp/gitlab", headers=mcp_headers(tokens["access_token"])
+    )
+    assert response.status_code == 404
+    assert response.json()["error"] == "session_not_found"
+    assert hub.upstream.calls == 0
+
+
+@pytest.mark.ac("AC-120")
+async def test_delete_survives_upstream_error(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub)
+    token = tokens["access_token"]
+    session_id = await _initialize(hub, token)
+    hub.upstream.push(httpx.ConnectError("сеть недоступна"))
+    response = await hub.client.delete(
+        "/mcp/gitlab", headers=mcp_headers(token, session_id=session_id)
+    )
+    assert response.status_code in (200, 204)
+    assert await hub.app.state.kv.get(SESSION_PREFIX + session_id) is None
+
+
+@pytest.mark.ac("AC-118")
+async def test_recreation_failure_returns_upstream_error(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, upstream_idle_ttl=600)
+    _conn, tokens = await connected_client(hub)
+    token = tokens["access_token"]
+    session_id = await _initialize(hub, token)
+    hub.clock.advance(601)
+    hub.upstream.push(httpx.Response(204))  # DELETE старой сессии
+    hub.upstream.push(httpx.Response(500, json={"error": "boom"}))  # повторный initialize
+    response = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/list", request_id=2),
+        headers=mcp_headers(token, session_id=session_id),
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == CODE_UPSTREAM

@@ -7,6 +7,7 @@ import json
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+import httpx
 import pytest
 
 from hub.crypto import jwt_decode, jwt_encode, sha256_hex
@@ -36,6 +37,7 @@ from tests.support import (
     submit_consent,
     tamper_signature,
     web_login,
+    web_logout,
 )
 
 # Клиент B: отличается путём (не только портом) — см. R-O4.1 (для loopback другой порт допустим).
@@ -1013,3 +1015,169 @@ async def test_token_rate_limit_per_client_and_ip(make_hub: HubFactory) -> None:
     )
     assert other.status_code == 400
     assert other.json()["error"] == "invalid_grant"
+
+
+# --- дополнительные ветки authorize / consent / callback -------------------
+
+
+@pytest.mark.ac("AC-89")
+async def test_consent_with_expired_transaction(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, oauth_tx_ttl=600)
+    client_id = await _ready_client(hub)
+    _verifier, challenge = pkce_pair()
+    started = await hub.get("/oauth/authorize", params=authorize_params(client_id, challenge=challenge))
+    page = await provider_callback(hub, started.headers["location"])
+    hub.clock.advance(601)
+    response = await submit_consent(hub, page.text)
+    assert response.status_code == 400
+    assert html_error_code(response.text) == "invalid_transaction"
+
+
+@pytest.mark.ac("AC-89")
+async def test_consent_of_other_user_is_forbidden(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    client_id = await _ready_client(hub)
+    _verifier, challenge = pkce_pair()
+    started = await hub.get("/oauth/authorize", params=authorize_params(client_id, challenge=challenge))
+    page = await provider_callback(hub, started.headers["location"])
+    web_logout(hub)
+    csrf = await web_login(hub, "u2")
+    response = await submit_consent(hub, page.text, csrf=csrf)
+    assert response.status_code == 403
+    assert html_error_code(response.text) == "forbidden"
+
+
+@pytest.mark.ac("AC-89")
+async def test_consent_without_session_is_forbidden(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    client_id = await _ready_client(hub)
+    _verifier, challenge = pkce_pair()
+    started = await hub.get("/oauth/authorize", params=authorize_params(client_id, challenge=challenge))
+    page = await provider_callback(hub, started.headers["location"])
+    web_logout(hub)
+    response = await submit_consent(hub, page.text, csrf="anything")
+    assert response.status_code == 403
+    assert html_error_code(response.text) == "forbidden"
+
+
+@pytest.mark.ac("AC-111")
+async def test_consent_readwrite_repeats_provider_oauth(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    client_id = await _ready_client(hub)
+    verifier, challenge = pkce_pair()
+    started = await hub.get(
+        "/oauth/authorize", params=authorize_params(client_id, challenge=challenge)
+    )
+    page = await provider_callback(hub, started.headers["location"])
+    assert query_of(started.headers["location"])["scope"] == "read_api read_user read_repository"
+
+    upgraded = await submit_consent(hub, page.text, preset="readwrite", groups=["repo_write"])
+    assert upgraded.status_code == 302
+    location = upgraded.headers["location"]
+    assert location.startswith("https://gitlab.test/oauth/authorize")
+    assert query_of(location)["scope"] == "api read_user"
+
+    finished = await provider_callback(hub, location, code="prov-code-2")
+    rows = await fetch_rows(hub.app, "SELECT preset, groups FROM connections")
+    assert rows[0]["preset"] == "readwrite"
+    assert "repo_write" in str(rows[0]["groups"])
+
+    # HUB_CONSENT=always: после расширения прав в системе экран прав показывается ещё раз,
+    # подтверждение уже не требует нового OAuth целевой системы (R-O6.3, R-B7).
+    assert finished.status_code == 200, finished.text
+    confirmed = await submit_consent(hub, finished.text, preset="readwrite", groups=["repo_write"])
+    assert confirmed.status_code == 302, confirmed.text
+    code = query_of(confirmed.headers["location"])["code"]
+    tokens = await exchange_code(hub, code=code, client_id=client_id, verifier=verifier)
+    assert tokens.status_code == 200, tokens.text
+    assert len(hub.provider.token_requests) == 2
+
+
+@pytest.mark.ac("AC-88")
+async def test_remembered_consent_row_is_updated(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, consent="remember")
+    client_id = await _ready_client(hub)
+    _verifier, challenge = pkce_pair()
+    for groups in (["code_review"], ["devops"]):
+        started = await hub.get(
+            "/oauth/authorize", params=authorize_params(client_id, challenge=challenge)
+        )
+        if started.status_code == 302 and started.headers["location"].startswith("https://gitlab"):
+            page = await provider_callback(hub, started.headers["location"])
+        else:
+            page = started
+        if page.status_code == 200:
+            assert (await submit_consent(hub, page.text, groups=groups)).status_code == 302
+    rows = await fetch_rows(hub.app, "SELECT user_id, client_id, alias, scope FROM consents")
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "gitlab:readonly"
+
+
+@pytest.mark.ac("AC-103")
+async def test_callback_without_code_is_invalid_request(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await web_login(hub)
+    client_id = await register_client(hub)
+    _verifier, challenge = pkce_pair()
+    started = await hub.get("/oauth/authorize", params=authorize_params(client_id, challenge=challenge))
+    state = query_of(started.headers["location"])["state"]
+    response = await hub.get("/oauth/callback/gitlab", params={"state": state})
+    assert response.status_code == 400
+    assert html_error_code(response.text) == "invalid_request"
+
+
+@pytest.mark.ac("AC-103")
+async def test_callback_with_provider_failure_shows_page(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await web_login(hub)
+    client_id = await register_client(hub)
+    _verifier, challenge = pkce_pair()
+    started = await hub.get("/oauth/authorize", params=authorize_params(client_id, challenge=challenge))
+    hub.provider.push(httpx.Response(500, json={"error": "server_error"}))
+    response = await provider_callback(hub, started.headers["location"])
+    assert response.status_code == 502
+    assert html_error_code(response.text) == "upstream_auth_failed"
+    assert await fetch_rows(hub.app, "SELECT id FROM upstream_tokens") == []
+
+
+@pytest.mark.ac("AC-102")
+async def test_missing_provider_secret_fails_exchange(make_hub: HubFactory) -> None:
+    env = {k: v for k, v in CATALOG_ENV.items() if k != "GL_SECRET"}
+    hub = await make_hub(catalog=i3_catalog(), env=env, base_url="https://hub.test")
+    await web_login(hub)
+    client_id = await register_client(hub)
+    _verifier, challenge = pkce_pair()
+    started = await hub.get("/oauth/authorize", params=authorize_params(client_id, challenge=challenge))
+    response = await provider_callback(hub, started.headers["location"])
+    assert response.status_code == 502
+    assert html_error_code(response.text) == "upstream_auth_failed"
+    assert hub.provider.token_requests == []
+
+
+@pytest.mark.ac("AC-149")
+async def test_connect_endpoint_reconnects_from_hub_page(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await web_login(hub)
+    await seed_connection(hub, status="needs_reauth")
+    started = await hub.get("/oauth/connect/gitlab")
+    assert started.status_code == 302
+    location = started.headers["location"]
+    assert location.startswith("https://gitlab.test/oauth/authorize")
+    finished = await provider_callback(hub, location)
+    assert finished.status_code == 302
+    assert finished.headers["location"] == "/ui/servers/gitlab"
+    rows = await fetch_rows(hub.app, "SELECT status FROM connections")
+    assert rows[0]["status"] == "connected"
+
+
+@pytest.mark.ac("AC-149")
+async def test_connect_requires_session_and_known_alias(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    anonymous = await hub.get("/oauth/connect/gitlab")
+    assert anonymous.status_code == 302
+    assert anonymous.headers["location"].startswith("/auth/login?next=")
+
+    await web_login(hub)
+    unknown = await hub.get("/oauth/connect/nope")
+    assert unknown.status_code == 404
+    assert html_error_code(unknown.text) == "not_found"

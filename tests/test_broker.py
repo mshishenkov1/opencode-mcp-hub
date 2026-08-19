@@ -20,12 +20,16 @@ from tests.support import (
     authorize_to_code,
     bearer,
     capture_json_logs,
+    catalog_doc,
     connected_client,
     fetch_rows,
+    gitlab_facade,
     html_error_code,
     i3_catalog,
+    jira_facade,
     jsonrpc_body,
     mcp_headers,
+    native_server,
     parse_db_datetime,
     pkce_pair,
     provider_callback,
@@ -595,3 +599,92 @@ async def test_provider_tokens_never_leak_outside(make_hub: HubFactory) -> None:
         "created_at",
         "updated_at",
     }
+
+
+# --- дополнительные ветки брокера -----------------------------------------
+
+
+@pytest.mark.ac("AC-105")
+async def test_background_refresh_survives_provider_failure(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, token_refresh_lead=300)
+    conn = await seed_connection(hub, expires_in=200)
+    hub.provider.push(httpx.Response(400, json={"error": "invalid_grant"}))
+    assert await hub.app.state.token_refresher.run_once() == 0
+    rows = await fetch_rows(
+        hub.app, "SELECT status FROM connections WHERE id = :cid", cid=conn.id
+    )
+    assert rows[0]["status"] == "needs_reauth"
+
+
+@pytest.mark.ac("AC-105")
+async def test_refresher_start_and_stop_are_idempotent(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    refresher = hub.app.state.token_refresher
+    await refresher.start()
+    await refresher.start()
+    await refresher.stop()
+    await refresher.stop()
+
+
+@pytest.mark.ac("AC-112")
+async def test_disconnect_without_revoke_url_still_works(make_hub: HubFactory) -> None:
+    jira = jira_facade()
+    jira["auth"] = {k: v for k, v in jira["auth"].items() if k != "revoke_url"}
+    hub = await make_hub(
+        catalog=catalog_doc([gitlab_facade(), jira, native_server("tag")]),
+        env=CATALOG_ENV,
+        base_url="https://hub.test",
+    )
+    await seed_connection(hub, alias="jira", groups=("issues",))
+    await add_key(hub, "sk-owner", "u1")
+    response = await hub.client.delete("/api/me/connections/jira", headers=bearer("sk-owner"))
+    assert response.status_code == 200, response.text
+    assert hub.net is not None
+    assert hub.net.providers["jira"].revoke_requests == []
+    assert await fetch_rows(hub.app, "SELECT id FROM upstream_tokens") == []
+
+
+@pytest.mark.ac("AC-112")
+async def test_disconnect_of_missing_connection_is_404(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await add_key(hub, "sk-owner", "u1")
+    response = await hub.client.delete("/api/me/connections/gitlab", headers=bearer("sk-owner"))
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+
+
+@pytest.mark.ac("AC-109")
+async def test_token_without_expires_in_stays_valid(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    _conn, tokens = await connected_client(hub, expires_in=None)
+    hub.clock.advance(3000)
+    response = await hub.post(
+        "/mcp/gitlab",
+        content=jsonrpc_body("tools/call", {"name": "list_mrs"}),
+        headers=mcp_headers(tokens["access_token"]),
+    )
+    assert response.status_code == 200, response.text
+    assert hub.provider.token_requests == []
+
+
+@pytest.mark.ac("AC-104")
+async def test_provider_response_without_access_token_fails(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await web_login(hub)
+    _location, state = await _start_provider_flow(hub)
+    hub.provider.push(httpx.Response(200, json={"token_type": "Bearer"}))
+    response = await hub.get("/oauth/callback/gitlab", params={"code": "c", "state": state})
+    assert response.status_code == 502
+    assert html_error_code(response.text) == "upstream_auth_failed"
+    assert await fetch_rows(hub.app, "SELECT id FROM upstream_tokens") == []
+
+
+@pytest.mark.ac("AC-104")
+async def test_provider_network_error_fails_exchange(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await web_login(hub)
+    _location, state = await _start_provider_flow(hub)
+    hub.provider.push(httpx.ConnectError("сеть недоступна"))
+    response = await hub.get("/oauth/callback/gitlab", params={"code": "c", "state": state})
+    assert response.status_code == 502
+    assert html_error_code(response.text) == "upstream_auth_failed"

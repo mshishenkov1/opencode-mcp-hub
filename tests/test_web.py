@@ -12,12 +12,14 @@ from tests.support import (
     OIDC_ISSUER,
     PUBLIC_URL,
     UPSTREAM_ACCESS,
+    WEB_LOGIN_POLL_RE,
     add_key,
     audit_rows,
     authorize_params,
     bearer,
     catalog_doc,
     connected_client,
+    execute,
     facade_server,
     fetch_rows,
     gitlab_facade,
@@ -26,6 +28,7 @@ from tests.support import (
     i3_catalog,
     jira_facade,
     litellm_web_login,
+    mock_poll,
     mock_start,
     native_server,
     pkce_pair,
@@ -36,6 +39,7 @@ from tests.support import (
     seed_connection,
     start_body,
     submit_consent,
+    teams_body,
     unconfigured_facade,
     web_login,
     web_logout,
@@ -398,3 +402,140 @@ async def test_html_responses_have_charset_and_cache_control(make_hub: HubFactor
         response = await hub.get(path)
         assert response.headers["content-type"] == "text/html; charset=utf-8", path
         assert response.headers["Cache-Control"] == "private, no-store", path
+
+
+# --- дополнительные ветки входа и страниц ---------------------------------
+
+
+@pytest.mark.ac("AC-133")
+async def test_login_with_active_session_redirects_to_next(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    await web_login(hub)
+    response = await hub.get("/auth/login", params={"next": "/ui/servers/gitlab"})
+    assert response.status_code == 302
+    assert response.headers["location"] == "/ui/servers/gitlab"
+
+
+@pytest.mark.ac("AC-133")
+async def test_login_start_failure_shows_error_page(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    hub.litellm.post("/sso/cli/start").respond(500, json={"error": "boom"})
+    response = await hub.get("/auth/login")
+    assert response.status_code >= 400
+    assert response.headers["content-type"] == "text/html; charset=utf-8"
+    assert html_error_code(response.text)
+
+
+@pytest.mark.ac("AC-133")
+async def test_login_poll_states(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    mock_start(hub.litellm, start_body())
+    page = await hub.get("/auth/login")
+    login_id = WEB_LOGIN_POLL_RE.search(page.text).group(1)
+
+    hub.litellm.get("/sso/cli/poll/ll-1").respond(200, json={"status": "pending"})
+    pending = await hub.get(f"/auth/login/poll/{login_id}")
+    assert pending.status_code == 200
+    assert "Ожидаем подтверждения входа" in pending.text
+
+    hub.litellm.reset()
+    expired = await hub.get("/auth/login/poll/no-such-login")
+    assert expired.status_code == 200
+    assert "истекла" in expired.text
+
+
+@pytest.mark.ac("AC-133")
+async def test_login_team_selection_fragment(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    mock_start(hub.litellm, start_body())
+    page = await hub.get("/auth/login")
+    login_id = WEB_LOGIN_POLL_RE.search(page.text).group(1)
+
+    mock_poll(hub.litellm, teams_body(("t1", "Команда 1"), ("t2", "Команда 2")))
+    fragment = await hub.get(f"/auth/login/poll/{login_id}")
+    assert fragment.status_code == 200
+    assert "Команда 1" in fragment.text
+    assert "Выберите команду" in fragment.text
+
+    mock_poll(hub.litellm, {"status": "pending"}, team_id="t1")
+    chosen = await hub.post(f"/auth/login/team/{login_id}", data={"team_id": "t1"})
+    assert chosen.status_code == 200
+    assert "Ожидаем подтверждения входа" in chosen.text
+
+    missing = await hub.post("/auth/login/team/no-such-login", data={"team_id": "t1"})
+    assert missing.status_code == 200
+    assert "истекла" in missing.text
+
+
+@pytest.mark.ac("AC-131")
+async def test_oidc_provider_unavailable_shows_error(make_hub: HubFactory) -> None:
+    hub = await _oidc_hub(make_hub)
+    hub.oidc.metadata_status = 503
+    response = await hub.get("/auth/login")
+    assert response.status_code == 502
+    assert html_error_code(response.text) == "oidc_unavailable"
+
+
+@pytest.mark.ac("AC-131")
+async def test_oidc_callback_error_and_missing_code(make_hub: HubFactory) -> None:
+    hub = await _oidc_hub(make_hub)
+    denied = await hub.get("/auth/callback", params={"error": "access_denied"})
+    assert denied.status_code == 400
+    assert html_error_code(denied.text) == "access_denied"
+
+    params = await _start_oidc_login(hub)
+    without_code = await hub.get("/auth/callback", params={"state": params["state"]})
+    assert without_code.status_code == 400
+    assert html_error_code(without_code.text) == "invalid_request"
+
+
+@pytest.mark.ac("AC-131")
+async def test_oidc_token_without_id_token_fails(make_hub: HubFactory) -> None:
+    hub = await _oidc_hub(make_hub)
+    params = await _start_oidc_login(hub)
+    hub.oidc.next_id_token = None
+    response = await hub.get("/auth/callback", params={"code": "c", "state": params["state"]})
+    assert response.status_code == 400
+    assert html_error_code(response.text) == "invalid_id_token"
+    assert await fetch_rows(hub.app, "SELECT id FROM sessions") == []
+
+
+@pytest.mark.ac("AC-131")
+async def test_oidc_login_updates_existing_user(make_hub: HubFactory) -> None:
+    hub = await _oidc_hub(make_hub)
+    await add_key(hub, "sk-old", "u1")
+    params = await _start_oidc_login(hub)
+    hub.oidc.next_id_token = hub.oidc.make_id_token(
+        nonce=params["nonce"], email="new@corp", now=hub.clock.time()
+    )
+    response = await hub.get("/auth/callback", params={"code": "c", "state": params["state"]})
+    assert response.status_code in (302, 303)
+    users = await fetch_rows(hub.app, "SELECT user_id, email FROM users")
+    assert users == [{"user_id": "u1", "email": "new@corp"}]
+
+
+@pytest.mark.ac("AC-137")
+async def test_logout_without_session_redirects_to_login(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    response = await hub.post("/auth/logout")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/auth/login"
+
+
+@pytest.mark.ac("AC-136")
+async def test_server_card_requires_session(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub)
+    response = await hub.get("/ui/servers/gitlab")
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("/auth/login?next=")
+
+
+@pytest.mark.ac("AC-136")
+async def test_server_card_visible_to_audience_group(make_hub: HubFactory) -> None:
+    catalog = catalog_doc([gitlab_facade(), restricted_facade("b"), native_server("tag")])
+    hub = await make_hub(catalog=catalog, env=CATALOG_ENV, base_url="https://hub.test")
+    await web_login(hub, "u1")
+    await execute(hub.app, "UPDATE users SET groups = '[\"devs\"]' WHERE user_id = 'u1'")
+    response = await hub.get("/ui/servers/b")
+    assert response.status_code == 200
+    assert "Внутренний сервер" in response.text
