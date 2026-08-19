@@ -12,8 +12,11 @@ services:
       HUB_DATABASE_URL: postgresql+asyncpg://hub:${POSTGRES_PASSWORD:-hub}@postgres:5432/hub
       HUB_REDIS_URL: redis://redis:6379/0
       HUB_CATALOG_PATH: /app/catalog.yaml
+      SSL_CERT_FILE: /etc/ssl/certs/tander-ca-bundle.pem
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/tander-ca-bundle.pem
     volumes:
       - ../catalog.yaml:/app/catalog.yaml:ro
+      - ./ca/tander-ca-bundle.pem:/etc/ssl/certs/tander-ca-bundle.pem:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -59,6 +62,9 @@ services:
       MM_HTTP_AUTH: oauth
       TAG_MCP_PUBLIC_URL: ${TAG_MCP_PUBLIC_URL:-https://localhost:8443/tag}
       TAG_MCP_REDIS_URL: redis://redis:6379/1
+      SSL_CERT_FILE: /etc/ssl/certs/tander-ca-bundle.pem
+    volumes:
+      - ./ca/tander-ca-bundle.pem:/etc/ssl/certs/tander-ca-bundle.pem:ro
     depends_on:
       redis: { condition: service_healthy }
     profiles: ["tag"]
