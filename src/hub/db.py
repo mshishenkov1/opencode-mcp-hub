@@ -109,6 +109,7 @@ class Database:
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
         self._ready = False
+        self._closed = False
         self._lock = asyncio.Lock()
 
     async def init(self) -> None:
@@ -126,6 +127,8 @@ class Database:
         return AsyncSession(self.engine, expire_on_commit=False)
 
     async def ping(self) -> bool:
+        if self._closed:
+            return False
         try:
             async with self.engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
@@ -155,6 +158,9 @@ class Database:
             )
 
     async def dispose(self) -> None:
+        """Закрыть движок; после этого ``ping()`` → False (``/ready`` → 503)."""
+        self._closed = True
+        self._ready = False
         await self.engine.dispose()
 
 
