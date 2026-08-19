@@ -360,6 +360,10 @@ class OAuthServer:
             raise invalid_grant("Код авторизации недействителен или уже использован")
         if row.client_id != client_id:
             raise invalid_grant("Код выдан другому клиенту")
+        # RFC 6749 §4.1.3: redirect_uri обязателен, если он использовался при выдаче кода
+        # (на /oauth/authorize он обязателен всегда).
+        if row.redirect_uri and not redirect_uri:
+            raise invalid_grant("Не указан redirect_uri, с которым был выдан код")
         if redirect_uri is not None and redirect_uri != row.redirect_uri:
             raise invalid_grant("redirect_uri не совпадает с указанным при выдаче кода")
         if not verify_pkce(code_verifier, row.code_challenge, row.code_challenge_method):
