@@ -122,6 +122,10 @@ def _proxy_error_response(request: Request, alias: str, exc: ProxyError, ctx_jso
             "message": exc.message,
             "hint_url": exc.data.get("hint_url", _hint_url(request, alias)),
         }
+        # Пояснительные поля (reason, retry_after) сохраняются и в форме без JSON-RPC (R-P11).
+        for key, value in exc.data.items():
+            if key != "hint_url":
+                body.setdefault(key, value)
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
 
