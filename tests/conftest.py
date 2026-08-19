@@ -35,6 +35,26 @@ from tests.support import (
 START_TIME = datetime(2026, 8, 19, 12, 30, 0, tzinfo=UTC)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _detach_hub_json_handler_between_runs() -> Iterator[None]:
+    """Снять JSON-хендлер Hub с root-логгера до и после сессии.
+
+    ``configure_logging`` идемпотентен: хендлер живёт на root-логгере всё время процесса и держит
+    поток ``sys.stderr``, захваченный в момент создания. При двух прогонах pytest в одном процессе
+    (так работает ``mutmut``: сбор статистики, затем чистый прогон) поток первого прогона уже закрыт,
+    и любая запись в лог падает ``ValueError: I/O operation on closed file``. Снимаем хендлер на
+    границах сессии — следующий прогон создаст его заново поверх актуального ``sys.stderr``.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, "_hub_json", False):
+            root.removeHandler(handler)
+    yield
+    for handler in list(root.handlers):
+        if getattr(handler, "_hub_json", False):
+            root.removeHandler(handler)
+
+
 @pytest.fixture(autouse=True)
 def clean_hub_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Тесты не должны зависеть от HUB_* окружения машины."""
