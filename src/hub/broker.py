@@ -273,6 +273,7 @@ class TokenBroker:
             ).scalar_one_or_none()
             has_refresh = bool(row and row.refresh_token_enc)
             has_token = row is not None
+            access_token_enc = row.access_token_enc if row is not None else None
             if row is not None and row.expires_at is not None:
                 token_expires_at = row.expires_at.replace(tzinfo=UTC).timestamp()
         state = {
@@ -284,6 +285,9 @@ class TokenBroker:
             "token_expires_at": token_expires_at,
             "has_token": has_token,
             "has_refresh": has_refresh,
+            # Токен системы кладётся в кэш в том же зашифрованном виде, что и в БД (R-B3),
+            # чтобы горячий путь /mcp/{alias} не ходил в БД (R-O12).
+            "access_token_enc": access_token_enc,
             "needs_reauth_reason": conn.needs_reauth_reason,
         }
         await self.kv.set(
@@ -445,6 +449,16 @@ class TokenBroker:
                     select(UpstreamToken).where(UpstreamToken.connection_id == connection_id).limit(1)
                 )
             ).scalar_one_or_none()
+
+    async def cached_access_token(self, state_record: dict[str, Any]) -> str | None:
+        """Пригодный токен системы из KV-кэша подключения; ``None`` — нужно идти в БД (R-O12)."""
+        enc = state_record.get("access_token_enc")
+        if not isinstance(enc, str) or not enc:
+            return None
+        expires_at = state_record.get("token_expires_at")
+        if isinstance(expires_at, int | float) and float(expires_at) - self.clock.time() <= 0:
+            return None
+        return self.cipher.try_decrypt(enc)
 
     async def access_token(self, connection: Connection, *, force_refresh: bool = False) -> str:
         """Пригодный access-токен целевой системы; при необходимости обновляется (R-B4).

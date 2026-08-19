@@ -272,7 +272,12 @@ async def _check_breaker(ctx: ProxyContext) -> None:
 
 
 async def _access_token(ctx: ProxyContext, *, force_refresh: bool = False) -> str:
+    """Токен целевой системы: сначала из KV-кэша подключения (без обращения к БД, R-O12)."""
     state = ctx.request.app.state
+    if not force_refresh:
+        cached = await state.broker.cached_access_token(ctx.state_record)
+        if cached:
+            return cached
     connection = await state.broker.load_connection(ctx.user_id, ctx.alias)
     if connection is None:
         raise ProxyError(

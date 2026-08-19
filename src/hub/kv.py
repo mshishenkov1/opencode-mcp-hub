@@ -28,6 +28,9 @@ class KeyValueStore(Protocol):
         """Скользящее окно: если в окне < ``limit`` меток — добавить ``now`` и вернуть ``(True, 0)``;
         иначе ``(False, секунды до освобождения окна)``. Отклонённые обращения не учитываются."""
 
+    async def delete_prefix(self, prefix: str) -> int:
+        """Удалить все ключи с префиксом (инвалидация кэшей); вернуть число удалённых."""
+
     async def set_if_absent(self, key: str, value: Any, ttl: float | None = None) -> bool:
         """Атомарно записать значение, если ключа нет. ``True`` — записали (блокировка захвачена)."""
 
@@ -87,6 +90,12 @@ class InMemoryKeyValueStore:
         self._data[key] = (stamps, self._clock.monotonic() + float(window))
         return True, 0.0
 
+    async def delete_prefix(self, prefix: str) -> int:
+        keys = [k for k in list(self._data) if k.startswith(prefix)]
+        for key in keys:
+            self._data.pop(key, None)
+        return len(keys)
+
     async def set_if_absent(self, key: str, value: Any, ttl: float | None = None) -> bool:
         if self._alive(key):
             return False
@@ -145,6 +154,18 @@ end
 return value
 """
 
+_DELETE_PREFIX_LUA = """
+local total, cursor = 0, '0'
+repeat
+  local res = redis.call('SCAN', cursor, 'MATCH', ARGV[1], 'COUNT', 1000)
+  cursor = res[1]
+  for _, k in ipairs(res[2]) do
+    total = total + redis.call('DEL', k)
+  end
+until cursor == '0'
+return total
+"""
+
 _COUNT_PREFIX_LUA = """
 local seen, total, cursor = {}, 0, '0'
 repeat
@@ -175,6 +196,7 @@ class RedisKeyValueStore:
         self._rate_limit_script = self._redis.register_script(_RATE_LIMIT_LUA)
         self._count_prefix_script = self._redis.register_script(_COUNT_PREFIX_LUA)
         self._decr_script = self._redis.register_script(_DECR_LUA)
+        self._delete_prefix_script = self._redis.register_script(_DELETE_PREFIX_LUA)
 
     async def get(self, key: str) -> Any | None:
         raw = await self._redis.get(key)
@@ -208,6 +230,9 @@ class RedisKeyValueStore:
         if int(allowed):
             return True, 0.0
         return False, max(0.0, float(oldest) + window - now)
+
+    async def delete_prefix(self, prefix: str) -> int:
+        return int(await self._delete_prefix_script(keys=[], args=[f"{prefix}*"]))
 
     async def set_if_absent(self, key: str, value: Any, ttl: float | None = None) -> bool:
         if ttl is not None and ttl <= 0:

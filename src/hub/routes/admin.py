@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from hub.catalog import CatalogError, load_catalog
 from hub.errors import HubError
+from hub.proxy import TOOLS_CACHE_PREFIX
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger("hub.admin")
@@ -30,6 +31,8 @@ async def catalog_reload(request: Request) -> JSONResponse:
         logger.warning("catalog_reload_failed", extra={"reason": str(exc)})
         raise HubError(400, "catalog_invalid", str(exc)) from exc
     state.catalog = catalog  # атомарная замена ссылки
+    # R-P7: кэш tools/list инвалидируется при перезагрузке каталога.
+    await state.kv.delete_prefix(TOOLS_CACHE_PREFIX)
     await state.db.audit(
         "catalog_reloaded",
         details={"catalog_version": catalog.version, "servers": len(catalog.servers)},

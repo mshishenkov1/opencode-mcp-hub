@@ -27,6 +27,8 @@ ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 ENV_REF_RE = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 REF_RE = re.compile(r"^#/servers/([^/]+)/([^/]+)$")
+# R-P2: шаблоны в значениях заголовков; допустим только {{access_token}}.
+TEMPLATE_RE = re.compile(r"\{\{([^}]*)\}\}")
 
 # Поля, в которых допустима ссылка env:VAR (относительно сервера).
 _ENV_REF_ALLOWED_PREFIXES = (("auth", "client_secret"), ("credential_headers",), ("static_headers",))
@@ -200,6 +202,22 @@ class ServerModel(_Strict):
     credential_headers: dict[str, HeaderValue] | None = None
     static_headers: dict[str, HeaderValue] | None = None
     permission_model: PermissionModel
+
+    @model_validator(mode="after")
+    def _check_header_templates(self) -> ServerModel:
+        """R-P2/R-C1: в заголовках допустим только шаблон ``{{access_token}}``."""
+        for field_name in ("credential_headers", "static_headers"):
+            headers = getattr(self, field_name) or {}
+            for name, value in headers.items():
+                if not isinstance(value, str):
+                    continue
+                for found in TEMPLATE_RE.findall(value):
+                    if found.strip() != "access_token":
+                        raise ValueError(
+                            f"{field_name}.{name}: недопустимый шаблон {{{{{found}}}}} "
+                            "(поддерживается только {{access_token}})"
+                        )
+        return self
 
     @model_validator(mode="after")
     def _mode_requirements(self) -> ServerModel:
