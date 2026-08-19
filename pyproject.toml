@@ -65,7 +65,7 @@ source = ["src"]
 source_paths = ["src/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Тесты запускаются из каталога mutants/; AC-07 читает catalog.yaml из корня репозитория.
-also_copy = ["catalog.yaml"]
+also_copy = ["catalog.yaml", "deploy/.env.example"]
 
 [tool.ruff]
 line-length = 100
