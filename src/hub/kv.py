@@ -82,13 +82,51 @@ class InMemoryKeyValueStore:
         self._data.clear()
 
 
+# Lua-скрипты: операции над окном rate-limit и подсчёт ключей выполняются атомарно на стороне Redis.
+_RATE_LIMIT_LUA = """
+local key, now, threshold, limit = KEYS[1], ARGV[1], ARGV[2], tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', threshold)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  local score = oldest[2]
+  if type(oldest[1]) == 'table' then score = oldest[1][2] end  -- RESP3-форма [[member, score]]
+  return {0, score or now}
+end
+redis.call('ZADD', key, now, ARGV[4])
+redis.call('PEXPIRE', key, ARGV[5])
+return {1, '0'}
+"""
+
+_COUNT_PREFIX_LUA = """
+local seen, total, cursor = {}, 0, '0'
+repeat
+  local res = redis.call('SCAN', cursor, 'MATCH', ARGV[1], 'COUNT', 1000)
+  cursor = res[1]
+  for _, k in ipairs(res[2]) do
+    if not seen[k] then
+      seen[k] = true
+      total = total + 1
+    end
+  end
+until cursor == '0'
+return total
+"""
+
+
 class RedisKeyValueStore:
-    """Реализация поверх ``redis.asyncio``. Значения — JSON; окна rate-limit — sorted set."""
+    """Реализация поверх ``redis.asyncio``. Значения — JSON; окна rate-limit — sorted set.
+
+    ``rate_limit_hit`` и ``count_prefix`` выполняются Lua-скриптами (EVALSHA) — атомарно, без гонок
+    между репликами Hub.
+    """
 
     def __init__(self, url: str) -> None:
         import redis.asyncio as aioredis
 
         self._redis = aioredis.from_url(url, decode_responses=True)
+        self._rate_limit_script = self._redis.register_script(_RATE_LIMIT_LUA)
+        self._count_prefix_script = self._redis.register_script(_COUNT_PREFIX_LUA)
 
     async def get(self, key: str) -> Any | None:
         raw = await self._redis.get(key)
@@ -110,21 +148,18 @@ class RedisKeyValueStore:
         await self._redis.delete(key)
 
     async def count_prefix(self, prefix: str) -> int:
-        count = 0
-        async for _ in self._redis.scan_iter(match=f"{prefix}*", count=500):
-            count += 1
-        return count
+        total = await self._count_prefix_script(keys=[], args=[f"{prefix}*"])
+        return int(total)
 
     async def rate_limit_hit(self, key: str, now: float, window: float, limit: int) -> tuple[bool, float]:
-        await self._redis.zremrangebyscore(key, 0, now - window)
-        count = await self._redis.zcard(key)
-        if count >= limit:
-            oldest = await self._redis.zrange(key, 0, 0, withscores=True)
-            oldest_ts = float(oldest[0][1]) if oldest else now
-            return False, max(0.0, oldest_ts + window - now)
-        await self._redis.zadd(key, {f"{now!r}:{uuid.uuid4().hex}": now})
-        await self._redis.expire(key, max(1, int(window)))
-        return True, 0.0
+        member = f"{now!r}:{uuid.uuid4().hex}"
+        allowed, oldest = await self._rate_limit_script(
+            keys=[key],
+            args=[repr(float(now)), repr(float(now - window)), int(limit), member, max(1, int(window * 1000))],
+        )
+        if int(allowed):
+            return True, 0.0
+        return False, max(0.0, float(oldest) + window - now)
 
     async def close(self) -> None:
         await self._redis.aclose()
