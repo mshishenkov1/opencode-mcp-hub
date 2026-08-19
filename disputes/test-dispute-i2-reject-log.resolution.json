@@ -1,0 +1,7 @@
+{
+  "dispute": "disputes/test-dispute-i2-reject-log.json",
+  "resolution": "uphold_dispute",
+  "decided_by": "review-agent (reports/review-i2-1.json, finding #3) — зафиксировано оркестратором",
+  "reasoning": "Review-i2-1 прямо потребовал не писать userinfo отклонённого redirect URI в WARNING-лог (риск утечки чужого пароля). R-25 разрешает логировать URI как таковой, R-61/R-62 запрещают секреты в логах; AC-26 требует отказа и reason=redirect_uri, а не дословного URI. Тесты test_authorize.py:191/216 должны проверять reason, отсутствие userinfo и сохранность схемы/хоста/пути (ожидаемое значение — redirect_uri_for_log(redirect_uri)). Формулировку R-25 уточнить при следующей ревизии спеки: «…и самим URI без userinfo и query».",
+  "assignee": "test"
+}
