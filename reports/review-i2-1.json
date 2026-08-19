@@ -1,0 +1,81 @@
+{
+  "verdict": "approve",
+  "findings": [
+    {
+      "severity": "minor",
+      "where": "docs/oauth-mode/spec.md:R-23 ↔ tag_mcp/oauth_redirects.py:51-65 (_matches_any_host)",
+      "what": "Расхождение спеки с собой и с кодом по порту в шаблоне `scheme://*`. R-23 говорит: «порт — по правилам библиотеки: `*` любой, отсутствие = порт схемы по умолчанию». Реализация при отсутствии порта в шаблоне пропускает проверку порта совсем (`if pattern_port is not None and not _match_port(...)`), то есть `https://*` совпадает с `https://a.b.c.example:8443/`. AC-26 явно требует именно этого (URI с портом 8443 в списке принимаемых по умолчанию), и тест tests/oauth/test_registration.py::test_default_allow_list_accepts_loopback_and_https[https://a.b.c.example:8443/] это фиксирует. Эксплуатации нет: хост в таком шаблоне и так любой, поэтому закрепление порта 443 ничего не сужает. Нужно привести в согласие текст R-23 (убрать «отсутствие = порт схемы по умолчанию» для расширения `*`) либо код — но код сейчас соответствует AC.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "tag_mcp/oauth.py:588-616 (_remember_grant, GrantIndex)",
+      "what": "Обратный индекс гранта только растёт: при каждой выдаче по коду и при каждой ротации refresh в `index.jtis` дописываются два jti и один хэш refresh, а старые (уже удалённые библиотекой из `_jti_mapping_store`) записи не вычищаются. TTL записи — `_fallback_refresh_token_expiry_seconds` (по умолчанию год), при этом значение читается, дешифруется, дописывается и перешифровывается на каждой выдаче. Клиент с ежечасным refresh за год даёт ~26 тыс. строк в одном значении Redis. Функционально безопасно (revoke удаляет всё), но стоит подрезать индекс до живых jti (или хранить только текущую пару). Спекой размер индекса не оговорён — замечание операционное.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "tag_mcp/oauth.py:468-476 (_reject_redirect)",
+      "what": "Отклонённый redirect URI пишется в лог WARNING целиком, включая класс URI с userinfo, который отвергается как раз всегда (`http://user:pass@evil.example/cb`). R-25 разрешает логировать URI («URI не секрет»), но в этой ветке в лог попадает чужой пароль из userinfo. Дёшево лечится вырезанием userinfo перед логированием (`parsed._replace(netloc=host)`). R-62 формально не нарушен — это не наш токен и не наш секрет.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "dispute_resolutions": [],
+  "evidence": {
+    "gates": {
+      "pytest": "886 passed, 55 skipped",
+      "ruff": "All checks passed",
+      "mypy": "Success: no issues found in 32 source files",
+      "coverage": "100.00% (fail_under=100); oauth.py 385/385, oauth_redirects.py 40/40, oauth_ui.py 16/16, scopes.py 34/34",
+      "ac_coverage": "79 AC в acceptance-criteria.yaml, 79 помечены маркером @pytest.mark.ac в тестах"
+    },
+    "mutation_testing": {
+      "method": "точечная правка tag_mcp через bash + прогон tests/oauth, tests/policy, tests/unit, tests/security; после каждой мутации `git checkout -- <файл>`; итоговый `git status` по tag_mcp/ чистый",
+      "result": "16 мутаций из 16 убиты",
+      "mutations": [
+        "M1 снята проверка userinfo в redirect_uri_always_rejected → 2 failed",
+        "M2 разрешены dot-сегменты (регресс BUG-I2-001) → 6 failed",
+        "M3 отключён allow-list в TagOAuthProxy.authorize → 1 failed",
+        "M4 возвращена библиотечная запись cookie MCP_DENIED_CLIENTS → 1 failed",
+        "M5 scopes в load_access_token берутся от верификатора, а не из claim JWT → 22 failed",
+        "M6 revoke удаляет только текущий jti, а не весь грант → 1 failed",
+        "M7 снята проверка типа канала direct/group для tag:dm → 3 failed",
+        "M8 отключено вырезание `scope` из ответов Mattermost (R-34) → 3 failed",
+        "M9 снята проверка длины TAG_MCP_JWT_SIGNING_KEY → 1 failed",
+        "M10 отключён allow-list в register_client → 7 failed",
+        "M11 внутренние tag:* уходят в URL Mattermost → 2 failed",
+        "M12 TAG_MCP_DEFAULT_SCOPES не подставляются при пустом scope → 3 failed",
+        "M13 tag:* уходят в обмен кода на upstream-токен → 2 failed",
+        "M14 отключён POST /users/logout при отзыве → 3 failed",
+        "M15 AccessToken.client_id берётся от верификатора (user_id), а не из JWT → 7 failed",
+        "M16 снята проверка схемы TAG_MCP_PUBLIC_URL → 1 failed"
+      ]
+    },
+    "checked": [
+      "R-01…R-06: _check_oauth в config.py перечисляет все недостающие переменные, проверяет длину ключа, схему/query/fragment PUBLIC_URL, схему storage_url, непустое подмножество default_scopes и consent; режимы off|token|passthrough не затронуты (per_user-ветка в server.py, AC-76 зелёный).",
+      "R-07…R-10: TagOAuthProxy собирается ровно с параметрами спеки, allowed_client_redirect_uris=None, revocation_options.enabled=True; PassthroughMiddleware(pool, scoped=True) первым в конвейере; MM_TOKEN при старте не проверяется.",
+      "R-11…R-14: метаданные строятся из TAG_MCP_PUBLIC_URL, заголовок Host игнорируется (тесты test_metadata_urls_ignore_the_host_header, test_resource_metadata_ignores_the_host_header); только /mcp требует Bearer, 401 несёт resource_metadata.",
+      "PKCE: клиент↔сервер обязателен на уровне SDK (code_challenge/code_verifier — обязательные поля), TAG_MCP_FORWARD_PKCE по умолчанию не пробрасывает его в Mattermost; одноразовость кода и привязка к клиенту проверены (AC-42).",
+      "R-19/R-23/R-24 (BUG-I2-001): проверка «всегда отвергаемого» (схема, userinfo, dot-сегменты) вынесена в _QueryGuard/_BodyGuard по сырой строке запроса до разбора в AnyUrl; allow-list по разобранному URI остаётся в register_client и authorize. Обе точки покрыты, включая синтезируемого клиента с client_id == MM_OAUTH_CLIENT_ID.",
+      "Refresh: ротация FastMCP refresh (старый jti удаляется библиотекой), сужение scopes работает, расширение → invalid_scope, чужой refresh → invalid_grant; upstream_token_id при exchange_refresh_token переиспользуется, поэтому индекс гранта не расщепляется.",
+      "Revoke: завершает грант целиком (jti-маппинги, refresh-хэши, UpstreamTokenSet, индекс), затем POST /api/v4/users/logout upstream-токеном; ошибка logout только warning; неизвестный/чужой токен → 200 без побочных эффектов. AccessToken.client_id = DCR client_id, иначе SDK-обработчик /revoke молча пропускал бы access-токены (D-14, подтверждено мутацией M15).",
+      "MCP_DENIED_CLIENTS: перекрыты и запись (_set_list_cookie), и чтение (_decode_list_cookie); других обращений в tag_mcp нет (grep). Сигнатуры совпадают с ConsentMixin.",
+      "CSRF и cookie экрана согласия — библиотечные: переопределён только рендер тела, ответ библиотеки (create_secure_html_response) сохраняет заголовок X-Frame-Options: DENY и подписанные cookie MCP_CONSENT_STATE/MCP_CONSENT_BINDING. Свой CSP не слабее библиотечного (убран только img-src). Все подстановки в HTML проходят html.escape, значения атрибутов — с quote=True.",
+      "Глобальная политика как потолок: PolicyMiddleware.on_call_tool проверяет policy.tool_visible до scopes, WritePolicy.check ставит scopes после жёстких запретов и списков каналов, но до подтверждения и стоп-крана; tag:dm требуется и по тегу тула, и по типу канала direct/group. Тесты проверяют, что до Mattermost запрос не доходит (channels.call_count == 0).",
+      "Логи: события oauth.* пишутся логгером tag_mcp.oauth, reject — WARNING; в сообщениях только отпечатки token_fingerprint (16 hex); AC-75 проверяет отсутствие JWT, upstream-токенов, MM_OAUTH_CLIENT_SECRET и TAG_MCP_JWT_SIGNING_KEY в логах, в том числе библиотечных.",
+      "Хранилище: Redis и подменённый backend оборачиваются в FernetEncryptionWrapper с ключом от отдельной соли; в сырых значениях нет upstream-токенов (AC-71); смена TAG_MCP_JWT_SIGNING_KEY даёт 401 и не роняет сервер, /ready остаётся 200; недоступное хранилище → /ready 503 {ready:false, storage:'unavailable'}; две реплики проходят полный флоу вразнобой (AC-70).",
+      "Моки только на границе: respx на HTTP Mattermost (/oauth/access_token, /api/v4/users/me, /users/logout, /users/ids), MemoryStore вместо Redis, сервер поднимается настоящий через ASGI-транспорт; assert_all_mocked=True — любой поход в сеть роняет тест (test_oauth_tests_never_touch_the_network). Тестируемая логика (политика, scopes, allow-list, выдача токенов) не замокана нигде."
+    ],
+    "pragma_no_cover_review": {
+      "verdict": "обоснованы",
+      "items": [
+        "tag_mcp/oauth.py:512 — ветка get_client для клиента не типа ProxyDCRClient: библиотека возвращает ProxyDCRClient либо CIMD-клиента (enable_cimd выключен), защита от смены контракта.",
+        "tag_mcp/oauth.py:597 — mapping is None сразу после выдачи токена: библиотека записывает jti-маппинг в той же транзакции, воспроизвести без подмены хранилища нельзя.",
+        "tag_mcp/oauth.py:904 — отсутствие маршрута метаданных в списке SDK: create_auth_routes создаёт его всегда."
+      ]
+    }
+  }
+}
