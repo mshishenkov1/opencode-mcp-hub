@@ -22,8 +22,7 @@ from pydantic import (
 
 from hub.errors import CatalogError
 
-# Spec R-C1: ^[a-z][a-z0-9-]{1,31}$. Нижняя граница ослаблена до 1 символа, потому что AC-54/AC-55
-# используют alias 'a', 'b', 'c' (иначе критерии невыполнимы). Верхняя граница (32) сохранена.
+# Spec 1.1, R-C1: alias — 1–32 символа, ^[a-z][a-z0-9-]{0,31}$ (односимвольные alias из AC-54/AC-55 валидны).
 ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 ENV_REF_RE = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
