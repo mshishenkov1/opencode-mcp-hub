@@ -50,7 +50,6 @@ def cmd_catalog_validate(path: str | None) -> int:
         catalog = load_catalog(catalog_path)
     except CatalogError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
-        print(f"Ошибка: {exc}")
         return 1
     unconfigured = [s.alias for s in catalog.unconfigured()]
     suffix = f" (unconfigured: {', '.join(unconfigured)})" if unconfigured else ""
