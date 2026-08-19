@@ -13,7 +13,7 @@ from hub.db import Connection, to_iso
 
 router = APIRouter(tags=["api"])
 
-_FALSE_VALUES = {"false", "0", "no", "off"}
+_FALSE_VALUES = {"false", "0", "no"}
 
 
 def _parse_include_deprecated(value: str | None) -> bool:
