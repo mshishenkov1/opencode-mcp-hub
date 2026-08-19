@@ -1,0 +1,103 @@
+{
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "severity": "major",
+      "where": "src/hub/proxy.py:194 (CircuitBreaker.record_failure)",
+      "what": "R-P10 реализован не полностью: при достижении порога счётчик обнуляется (failures = 0) вместе с открытием окна, поэтому (а) после истечения HUB_CB_RESET на upstream уходит не «один пробный запрос», а неограниченное число параллельных, и (б) провал пробного запроса НЕ открывает окно снова — требуется заново накопить HUB_CB_FAILURES ошибок. Воспроизведено напрямую: при cb_failures=3, cb_reset=30 после открытия и сдвига часов на 31 с провалившийся пробный запрос оставляет состояние {failures: 1, open_until: 0.0}, и на лежащий upstream уходят ещё 2 запроса. Спека: «По истечении HUB_CB_RESET пропускается один пробный запрос: успех → счётчик сбрасывается и выключатель закрывается; ошибка → окно открывается снова». Нужно half-open-состояние (или сохранение счётчика на пороге), чтобы одна ошибка после reset немедленно открывала окно. AC-128 проверяет только успешный пробный запрос — ветка провала не покрыта, поэтому нужен и тест.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "tests/test_proxy.py::test_upstream_headers_are_replaced (AC-115), tests/support.py::facade_server",
+      "what": "Тест не способен упасть при осмысленной поломке главного правила R-P2 «клиентский Authorization удаляется». Мутация: добавление \"authorization\" в FORWARDED_HEADERS (src/hub/proxy.py:38) — 612 passed, регрессия не обнаружена. Причина: у всех facade-серверов тестового каталога credential_headers = {Authorization: 'Bearer {{access_token}}'}, и подставленный заголовок затирает проброшенный, поэтому проверка `sent.header(\"authorization\") == 'Bearer ups-access-1'` выполняется в обоих случаях. В боевом catalog.yaml есть ровно противоположная конфигурация — jira (catalog.yaml:112) и confluence (catalog.yaml:144) используют X-Atlassian-*-Personal-Token и НЕ задают Authorization; при такой регрессии access-токен Hub уходил бы на чужой upstream. Нужен тест на facade-сервер, чей credential_headers не содержит Authorization: upstream не должен получить ни authorization, ни cookie, ни x-forwarded-*.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "tests/test_web.py:118-124 (test_oidc_login_creates_web_session, AC-131)",
+      "what": "Атрибуты cookie проверяются по склеенному значению заголовка set-cookie, в котором лежат ДВА cookie (hub_session и hub_csrf), поэтому проверка `assert \"Secure\" in cookie` удовлетворяется атрибутом cookie hub_csrf. Мутация: secure=False только для hub_session (src/hub/websession.py:114) — 612 passed. Требование R-W1/AC-131 («Secure при https») для сессионной cookie фактически не зафиксировано. Нужно выбирать строку, начинающуюся с 'hub_session=', из headers.get_list('set-cookie') и проверять HttpOnly/SameSite/Secure именно на ней (аналогично — для hub_csrf).",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "src/hub/permissions.py:122 (tool_filter)",
+      "what": "Вычитание масок выключенных групп сделано на уровне строк-масок: `deny.extend(mask for mask in group_deny if mask not in set(group_allow))`. При пересекающихся, но не идентичных масках выигрывает более широкая маска выключенной группы. Воспроизведено: включённая группа issues с tools ['create_issue'], выключенная repo_write с tools ['create_*'], tool_filter.allow ['*'] → allow=('*','create_issue'), deny=('create_*',), и явно выданный пользователю инструмент create_issue становится недоступен. Поведение fail-closed (эскалации прав нет), текущий catalog.yaml поля tools не использует, но правило некорректно. Чинить вместе с уточнением R-P8 (см. dispute_resolutions): маска выключенной группы должна запрещать инструмент только если ни одна маска включённых групп/общего allow не даёт этот инструмент явно, т.е. решение принимается по имени инструмента, а не по совпадению строк масок.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_web.py::test_invalid_id_token_creates_no_session (AC-132), src/hub/oidc.py:27",
+      "what": "Список допустимых алгоритмов подписи id_token не зафиксирован тестом: мутация ALLOWED_ALGORITHMS = [..., 'HS256', 'none'] — 612 passed. Проверяются только чужой ключ, nonce, iss и exp. Для authorization server это ключевая защита от algorithm confusion; желателен кейс: id_token с alg=HS256 (или none) отклоняется независимо от содержимого JWKS.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/routes/oauth.py:177 (_start_provider_oauth) и src/hub/routes/oauth.py:604 (provider_callback)",
+      "what": "Подтверждаю наблюдение отчёта тестов: _start_provider_oauth безусловно перезаписывает tx['step'] = 'provider', поэтому ветка `if tx.get('step') == 'scope_upgrade'` в provider_callback недостижима. Это не дефект безопасности и не нарушение AC: после повторного OAuth целевой системы флоу уходит в _continue_authorize, подключение уже connected с preset=readwrite, и при HUB_CONSENT=always пользователю просто второй раз показывается экран прав (при remember с тем же scope код выдаётся сразу). Классификация — латентный дефект (мёртвый код + лишний экран согласия), а не риск. Починка: сохранять исходный step (например, передавать его параметром) либо удалить недостижимую ветку.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/proxy.py:30, src/hub/proxy.py:243, src/hub/proxy.py:274, src/hub/app.py:271",
+      "what": "Метрика hub_upstream_sessions_active считается по незаспецифицированному ключу KV `mcpsessn:<alias>` (в таблице R-M4 такого ключа нет), а не «по записям mcpsess:*», как требует R-N1. Счётчик уменьшается только при явном DELETE /mcp/{alias}: сессии, истёкшие по HUB_CLIENT_SESSION_TTL (сутки), навсегда завышают gauge. В протоколе KeyValueStore для этого есть count_prefix («Число живых ключей с данным префиксом (для gauge активных сессий)»). Либо перейти на count_prefix, либо зафиксировать счётчик в спеке (R-M4/R-N1) как осознанный компромисс из-за стоимости SCAN в Redis.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/broker.py:288 (connection_state)",
+      "what": "В значение кэша `conn:<user_id>:<alias>` кладётся поле access_token_enc, которого нет в таблице R-M4 ({connection_id, status, preset, groups, revision, token_expires_at}). Фактически это необходимо для AC-99 (успешный горячий путь при заблокированной БД), значение — шифртекст Fernet, наружу не отдаётся; при смене HUB_ENCRYPTION_KEY деградация корректная (try_decrypt → None → путь обновления → needs_reauth). Требуется привести спеку и код в соответствие: либо дополнить таблицу R-M4, либо убрать поле из кэша.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/oauth.py:365 (exchange_code)",
+      "what": "redirect_uri при обмене кода проверяется только если он передан (`if redirect_uri is not None and redirect_uri != row.redirect_uri`). R-O8 перечисляет redirect_uri в составе тела запроса, а RFC 6749 §4.1.3 требует его обязательно, если он использовался на /oauth/authorize (а он там обязателен всегда). Практический риск низкий (код привязан к client_id и PKCE), но проверку следует сделать обязательной: отсутствие redirect_uri → invalid_grant.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/websession.py:120 (WebSessionService.set_cookies)",
+      "what": "Помимо hub_session выставляется незаспецифицированная cookie hub_csrf (HttpOnly=false, double-submit). R-W1 описывает только cookie hub_session, R-W6 — только скрытое поле формы и заголовок X-CSRF-Token. Само поведение безопасно (значение CSRF выводится HMAC от идентификатора сессии и сверяется с заголовком/полем, а не с cookie), но механизм доставки нужно отразить в спеке (R-W1/R-W6).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/routes/oauth.py:39 (_client_ip), src/hub/routes/oauth.py:105, src/hub/routes/oauth.py:619",
+      "what": "Эксплуатация за istio/ingress: rate-limit ключи rl:register:<ip> и rl:token:<client_id>:<ip> строятся по request.client.host. Доверие X-Forwarded-* явно вне объёма (§9.2), поэтому за ingress все запросы придут с одного адреса и HUB_RATE_LIMIT_REGISTER станет глобальным лимитом на весь Hub (10/мин по умолчанию — реальный риск самоблокировки при массовом онбординге клиентов). Ограничение стоит зафиксировать в deploy/.env.example (пояснение к HUB_RATE_LIMIT_REGISTER) и/или предусмотреть настройку доверенного прокси в следующей итерации.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/kv.py:270 (create_kv_store), src/hub/app.py",
+      "what": "Эксплуатация в двух репликах: при пустом HUB_REDIS_URL (дефолт) KV — in-memory, и denylist jtiden:*, mcpsess:*, окна rate-limit, cb:<alias> и conn:* не разделяются между репликами. Отозванный access-токен продолжит работать на второй реплике до истечения exp, а виртуальная MCP-сессия будет неизвестна (404 -32000). Спека исходит из общего KV (R-P4: «реплики Hub без sticky-сессий», R-P10: «состояние в KV, общее для реплик»), но ни валидации, ни предупреждения при старте нет. Достаточно предупреждения в логе при старте без HUB_REDIS_URL и пояснения в deploy/.env.example.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/migrate.py:70 (upgrade), src/hub/app.py:164 (lifespan)",
+      "what": "Эксплуатация: при HUB_DB_AUTO_MIGRATE=true (дефолт) и одновременном старте двух реплик обе выполняют alembic upgrade без блокировки (advisory lock). На PostgreSQL DDL транзакционен, поэтому проигравшая реплика упадёт с MigrationError и не поднимется до перезапуска — деплой самовосстановится, но старт будет шумным. Стоит либо взять advisory lock на время миграции, либо зафиксировать в спеке/деплое рекомендацию применять миграции отдельным job'ом (mcp-hub db upgrade) при HUB_DB_AUTO_MIGRATE=false.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "dispute_resolutions": [
+    {
+      "dispute": "disputes/spec-dispute-R-P8-tool-filter.json",
+      "resolution": "uphold_test",
+      "reasoning": "Противоречие подтверждаю: по букве R-P8 при tool_filter.allow = ['*'] маска '*' покрывает create_merge_request, и инструмент должен быть виден при любом наборе групп, тогда как AC-122 требует его скрыть. Решающим считаю AC-122, поэтому тесты и реализация (src/hub/permissions.py::tool_filter) верны, чинить нужно формулировку правила. Обоснование: (1) §19 спеки сама сопоставляет R-P8 именно с AC-122/123/124 — критерий является конкретизацией правила, а не независимым требованием, и при конфликте общего правила с его собственным приёмочным примером намерение выражает пример; (2) при буквальном чтении поле groups[].tools теряет смысл в любом каталоге, где tool_filter.allow содержит '*', то есть ровно в конфигурации AC-122 — правило противоречило бы собственной схеме; (3) трактовка по AC-122 строже (fail-closed) и соответствует модели групп «группа приносит инструменты», решению 49 и least privilege. Оговорка: предложенная в диспуте формулировка «deny = tool_filter.deny ∪ (tools выключенных групп \\ tools включённых групп)» вычитает МАСКИ как строки и потому даёт дефект при пересекающихся масках — проверено на живом коде: включённая группа issues (tools ['create_issue']) и выключенная repo_write (tools ['create_*']) при allow ['*'] дают deny ('create_*',) и делают недоступным явно выданный create_issue (см. findings, src/hub/permissions.py:122). Предлагаемая spec-агенту формулировка R-P8 (решение по имени инструмента, а не по строкам масок): «Для пользователя вычисляются: allow = tool_filter.allow ∪ tools включённых групп (always + выбранные); если оба источника пусты — allow = ['*']. deny = tool_filter.deny. group_allow = tools включённых групп; group_deny = tools групп, не включённых пользователю (в т.ч. отсечённых пресетом и preset: none). Инструмент доступен, если одновременно: (1) не совпал ни с одной маской deny; (2) совпал хотя бы с одной маской allow; (3) если он совпал хотя бы с одной маской group_deny — он совпал также хотя бы с одной маской group_allow. Иначе говоря, инструмент, который приносит только не включённая пользователю группа, недоступен, даже если общий allow — '*'; но инструмент, явно выданный включённой группой или общим tool_filter.allow по точной маске, остаётся доступен. При отсутствии tool_filter и tools у всех групп фильтр не применяется (allow = ['*'], deny пуст) — существующий catalog.yaml остаётся валидным и не требует правок». Дополнительно spec-агенту стоит добавить AC на этот пограничный случай (пересекающиеся маски включённой и выключенной групп)."
+    }
+  ]
+}
