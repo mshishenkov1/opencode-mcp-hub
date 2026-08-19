@@ -14,7 +14,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -22,6 +22,9 @@ logger = logging.getLogger("hub.migrate")
 
 MIGRATIONS_PATH = Path(__file__).resolve().parent / "migrations"
 BASE_REVISION = "0001_i1_base"
+# Ключ advisory-блокировки миграций: одновременный старт реплик не должен ронять «проигравшую»
+# (на PostgreSQL DDL транзакционен, и без блокировки вторая реплика падает с MigrationError).
+ADVISORY_LOCK_ID = 0x6D637068  # 'mcph'
 # Таблицы, созданные ``create_all`` в I-1: их наличие без alembic_version = БД ревизии I-1 (R-M5).
 I1_TABLES = ("users", "api_keys", "connections", "audit_log")
 
@@ -54,7 +57,21 @@ def _needs_stamp(connection: Connection) -> bool:
     return all(name in tables for name in I1_TABLES)
 
 
+def _lock(connection: Connection) -> None:
+    """Взять advisory-блокировку миграций на время транзакции (только PostgreSQL).
+
+    Реплика, стартующая второй, ждёт завершения первой и затем видит схему уже на ``head``:
+    ``upgrade`` становится no-op вместо падения. Для SQLite блокировка не нужна — файл БД
+    сериализует запись сам.
+    """
+    if connection.dialect.name != "postgresql":
+        return
+    logger.info("db_migration_lock_wait", extra={"lock_id": ADVISORY_LOCK_ID})
+    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": ADVISORY_LOCK_ID})
+
+
 def _run_upgrade(connection: Connection, revision: str) -> None:
+    _lock(connection)
     cfg = alembic_config()
     cfg.attributes["connection"] = connection
     if _needs_stamp(connection):
@@ -90,6 +107,7 @@ async def current_revision(engine: AsyncEngine) -> str | None:
 
 
 __all__: list[str] = [
+    "ADVISORY_LOCK_ID",
     "BASE_REVISION",
     "MIGRATIONS_PATH",
     "MigrationError",

@@ -152,6 +152,19 @@ def create_app(
 
     db = Database(build_engine(settings.database_url), auto_migrate=settings.db_auto_migrate)
     kv_store: KeyValueStore = kv or create_kv_store(settings.redis_url, app_clock)
+    if kv is None and not settings.redis_url:
+        # Общий KV — предпосылка работы нескольких реплик без sticky-сессий (R-P4, R-P10).
+        logger.warning(
+            "kv_in_memory",
+            extra={
+                "detail": (
+                    "HUB_REDIS_URL не задан: KeyValueStore хранится в памяти процесса — реплики "
+                    "Hub не делят denylist отозванных токенов, MCP-сессии, окна rate-limit и "
+                    "состояние circuit-breaker. Для запуска в нескольких репликах задайте "
+                    "HUB_REDIS_URL."
+                )
+            },
+        )
     metrics = Metrics()
 
     owns_http_client = litellm_client is None
