@@ -379,14 +379,14 @@ criteria:
     then: "первые два вызова — ошибка старта с текстом, содержащим 'KEYCLOAK_ISSUER' и 'KEYCLOAK_CLIENT_SECRET' соответственно; третий и четвёртый — приложение создаётся"
   - id: AC-73
     text: "Окружение I-1 без единой новой переменной поднимает Hub с эндпоинтами I-3"
-    given: "окружение ровно из четырёх обязательных переменных I-1 и каталога репозитория"
+    given: "окружение ровно из четырёх обязательных переменных HUB_* (никаких других HUB_*/KEYCLOAK_* не задано) и каталог репозитория; переменные каталога, на которые он ссылается (GITLAB_OAUTH_CLIENT_ID, GITLAB_OAUTH_CLIENT_SECRET и аналогичные для остальных серверов), заданы — это настройки серверов каталога, а не настройки Hub: без них серверы переходят в состояние unconfigured и PRM для них 404 по R-C3/AC-79"
     when: "create_app(); GET /health; GET /.well-known/oauth-authorization-server; GET /.well-known/oauth-protected-resource/mcp/gitlab; GET /.well-known/opencode"
     then: "все четыре запроса — 200; ответ /.well-known/opencode совпадает с ожиданиями AC-58/AC-59 (поведение I-1 не изменилось)"
   - id: AC-74
     text: "Секреты и токены ревизии 2 не попадают в логи, аудит, метрики и HTML"
     given: "перехват логов; KEYCLOAK_CLIENT_SECRET='KC-S3CRET'; выполнен сквозной сценарий (регистрация клиента, authorize, OAuth целевой системы с токенами 'ups-access-1'/'ups-refresh-1', выдача токенов Hub, вызов через proxy)"
     when: "просматриваются записи логов, строки audit_log, тело GET /metrics и HTML страниц /ui/connections и /ui/servers/gitlab"
-    then: "нигде не встречаются 'KC-S3CRET', 'ups-access-1', 'ups-refresh-1', значение refresh-токена Hub, значение кода авторизации, code_verifier, значение cookie hub_session и CSRF-токен"
+    then: "нигде не встречаются 'KC-S3CRET', 'ups-access-1', 'ups-refresh-1', значение refresh-токена Hub, значение кода авторизации, code_verifier, значение cookie hub_session; значение CSRF-токена отсутствует в логах, audit_log, /metrics и в HTML страниц /ui/connections и /ui/servers/gitlab (браузеру он доставляется cookie hub_csrf). На экране прав (HTML /oauth/authorize) CSRF-токен присутствует как скрытое поле формы — это требование R-W6, а не нарушение"
 
   # --- Hub как authorization server (R-O1..R-O13) ---
   - id: AC-75
@@ -430,10 +430,10 @@ criteria:
     when: "с одного IP выполняются три подряд валидных POST /oauth/register в пределах 60 с; затем часы сдвигаются на 61 с и запрос повторяется"
     then: "первые два — 201; третий — 429 {error:'rate_limited'} с заголовком Retry-After >= 1 и без создания клиента; после сдвига часов — снова 201"
   - id: AC-83
-    text: "Ошибки client_id/redirect_uri на authorize не редиректятся, а показываются страницей"
-    given: "зарегистрированы клиенты A (redirect 'http://127.0.0.1:19876/cb') и B (redirect 'http://127.0.0.1:20000/cb'); есть веб-сессия пользователя"
-    when: "GET /oauth/authorize с неизвестным client_id; затем с client_id клиента A и redirect_uri клиента B; затем с client_id A вовсе без redirect_uri"
-    then: "все три — 400 text/html, без заголовка Location; тело содержит машиночитаемый код invalid_client или invalid_redirect_uri; код авторизации не выдан"
+    text: "Ошибки client_id/redirect_uri на authorize не редиректятся, а показываются страницей; расхождение только по порту loopback ошибкой не является"
+    given: "зарегистрированы клиенты A (redirect 'http://127.0.0.1:19876/cb') и B (redirect 'http://127.0.0.1:20000/other-cb'); есть веб-сессия пользователя"
+    when: "GET /oauth/authorize с неизвестным client_id; затем с client_id клиента A и redirect_uri клиента B; затем с client_id A вовсе без redirect_uri; затем с client_id A и redirect_uri 'http://127.0.0.1:20000/cb' (loopback, та же схема, хост и путь, другой порт)"
+    then: "первые три — 400 text/html, без заголовка Location; тело содержит машиночитаемый код invalid_client или invalid_redirect_uri; код авторизации не выдан. Четвёртый принимается (R-O4.1, RFC 8252): ответ не 400 invalid_redirect_uri, флоу продолжается (вход/подключение/экран прав), а выданный в итоге код привязан к предъявленному redirect_uri"
   - id: AC-84
     text: "Прочие ошибки authorize возвращаются редиректом на зарегистрированный redirect_uri"
     given: "зарегистрирован клиент A с redirect 'http://127.0.0.1:19876/cb'; есть веб-сессия; каталог с facade 'gitlab'"
@@ -507,7 +507,7 @@ criteria:
   - id: AC-98
     text: "Проверка access-токена: подпись, срок, аудитория"
     given: "действующий токен для alias 'gitlab'; каталог с facade 'gitlab' и 'jira'"
-    when: "POST /mcp/gitlab с изменённой последней буквой подписи; с токеном, у которого exp в прошлом; с токеном, подписанным другим ключом; с валидным токеном для 'gitlab', но по адресу /mcp/jira"
+    when: "POST /mcp/gitlab с изменённой подписью (изменяется любой значащий символ подписи — так, чтобы декодированные байты подписи гарантированно отличались, а не только незначащие биты base64url-хвоста); с токеном, у которого exp в прошлом; с токеном, подписанным другим ключом; с валидным токеном для 'gitlab', но по адресу /mcp/jira"
     then: "первые три — 401 {error:'unauthorized'} с заголовком WWW-Authenticate, содержащим resource_metadata и error=\"invalid_token\"; четвёртый — 403 {error:'forbidden'}; upstream не вызывался ни разу"
   - id: AC-99
     text: "Горячий путь использует denylist и кэш подключения без обращения к БД"
@@ -731,7 +731,7 @@ criteria:
     text: "KeyValueStore поддерживает атомарные примитивы и ключи ревизии 2 с их TTL"
     given: "in-memory KeyValueStore с подменяемыми часами"
     when: "дважды вызывается set_if_absent('refreshlock:1', v, ttl=30); затем часы +31 с и вызов повторяется; incr('sse:u1',1)/decr('sse:u1',1); после сквозного сценария читаются ключи KV"
-    then: "первый set_if_absent → True, второй → False, после истечения TTL → снова True; incr/decr возвращают корректные значения; в KV присутствуют ключи вида oauthtx:*, jtiden:*, conn:u1:gitlab, mcpsess:*, toolscache:gitlab:*, cb:gitlab с TTL из таблицы spec.md §15 (значение jtiden:* исчезает после истечения exp токена)"
+    then: "первый set_if_absent → True, второй → False, после истечения TTL → снова True; incr/decr возвращают корректные значения; в KV присутствуют ключи вида oauthtx:*, jtiden:*, conn:u1:gitlab, mcpsess:gitlab:* (alias входит в ключ), toolscache:gitlab:*, cb:gitlab с TTL из таблицы spec.md §15 (значение jtiden:* исчезает после истечения exp токена)"
   - id: AC-142
     text: "БД, созданная кодом I-1, доводится до актуальной схемы без потери данных"
     given: "SQLite, созданная через create_all кода I-1, с записями в users, api_keys, connections, audit_log и без таблицы alembic_version"
@@ -753,7 +753,7 @@ criteria:
     text: "deploy/.env.example содержит все новые переменные"
     given: "файл deploy/.env.example"
     when: "файл читается и сравнивается с таблицей настроек spec.md §10 (R-T1)"
-    then: "для каждой переменной таблицы (HUB_WEB_AUTH, HUB_CONSENT, HUB_OAUTH_ALLOWED_REDIRECTS, HUB_ACCESS_TOKEN_TTL, HUB_REFRESH_TOKEN_TTL, HUB_AUTH_CODE_TTL, HUB_OAUTH_TX_TTL, HUB_WEB_SESSION_TTL, HUB_RATE_LIMIT_REGISTER, HUB_RATE_LIMIT_TOKEN, HUB_RATE_LIMIT_MCP, HUB_MAX_SSE_PER_USER, HUB_MAX_BODY_BYTES, HUB_UPSTREAM_TIMEOUT, HUB_UPSTREAM_SSE_IDLE_TIMEOUT, HUB_UPSTREAM_IDLE_TTL, HUB_CLIENT_SESSION_TTL, HUB_TOOLS_CACHE_TTL, HUB_TOKEN_REFRESH_LEAD, HUB_TOKEN_REFRESH_INTERVAL, HUB_TOKEN_REFRESH_ENABLED, HUB_CB_FAILURES, HUB_CB_RESET, HUB_CONNECTION_CACHE_TTL, HUB_DB_AUTO_MIGRATE, KEYCLOAK_ISSUER, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET, KEYCLOAK_SCOPES, KEYCLOAK_JWKS_TTL) в файле есть строка с этим именем; значения секретов пусты или равны change-me"
+    then: "для каждой переменной таблицы (HUB_WEB_AUTH, HUB_CONSENT, HUB_OAUTH_ALLOWED_REDIRECTS, HUB_ACCESS_TOKEN_TTL, HUB_REFRESH_TOKEN_TTL, HUB_AUTH_CODE_TTL, HUB_OAUTH_TX_TTL, HUB_WEB_SESSION_TTL, HUB_RATE_LIMIT_REGISTER, HUB_RATE_LIMIT_TOKEN, HUB_RATE_LIMIT_MCP, HUB_TRUST_PROXY, HUB_MAX_SSE_PER_USER, HUB_MAX_BODY_BYTES, HUB_UPSTREAM_TIMEOUT, HUB_UPSTREAM_SSE_IDLE_TIMEOUT, HUB_UPSTREAM_IDLE_TTL, HUB_CLIENT_SESSION_TTL, HUB_TOOLS_CACHE_TTL, HUB_TOKEN_REFRESH_LEAD, HUB_TOKEN_REFRESH_INTERVAL, HUB_TOKEN_REFRESH_ENABLED, HUB_CB_FAILURES, HUB_CB_RESET, HUB_CONNECTION_CACHE_TTL, HUB_DB_AUTO_MIGRATE, KEYCLOAK_ISSUER, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET, KEYCLOAK_SCOPES, KEYCLOAK_JWKS_TTL) в файле есть строка с этим именем; значения секретов пусты или равны change-me"
   - id: AC-146
     text: "Тесты не обращаются к сети, нагрузочный smoke вынесен в отдельный маркер"
     given: "полный прогон тестов ревизии 2"
@@ -768,11 +768,47 @@ criteria:
     then: "каждый шаг возвращает ожидаемый результат: 401 с resource_metadata, 200 метаданные, 201 client_id, 302 с code, 200 с парой токенов, успешные JSON-RPC ответы через proxy (upstream получил персональные заголовки), новая пара по refresh, 200 на revoke; после revoke вызов /mcp/gitlab отвечает 401"
   - id: AC-148
     text: "Клиент не может использовать redirect_uri чужого клиента"
-    given: "зарегистрированы клиент A (redirect 'http://127.0.0.1:19876/cb') и клиент B (redirect 'http://127.0.0.1:20000/cb'); веб-сессия пользователя"
-    when: "GET /oauth/authorize с client_id клиента A и redirect_uri клиента B; затем — с client_id A и redirect_uri 'http://127.0.0.1:19876/cb/../evil'"
-    then: "оба — 400 HTML без Location и без выдачи кода; в oauth_codes новых строк не появилось"
+    given: "зарегистрированы клиент A (redirect 'http://127.0.0.1:19876/cb') и клиент B (redirect 'http://127.0.0.1:20000/other-cb'); веб-сессия пользователя (redirect клиента B отличается от A путём: расхождение только по порту loopback разрешено R-O4.1 и проверяется в AC-83)"
+    when: "GET /oauth/authorize с client_id клиента A и redirect_uri клиента B; затем — с client_id A и redirect_uri 'http://127.0.0.1:19876/cb/../evil'; затем — с client_id A и redirect_uri 'https://evil.test/cb'"
+    then: "все три — 400 HTML без Location и без выдачи кода; в oauth_codes новых строк не появилось"
   - id: AC-149
     text: "Повторная авторизация восстанавливает подключение без новой регистрации клиента"
     given: "подключение в статусе needs_reauth; у клиента есть прежние access A и refresh R; клиент зарегистрирован ранее"
     when: "пользователь проходит /oauth/authorize тем же client_id (или нажимает «Переподключить»), заново авторизуется в целевой системе; затем выполняется POST /mcp/gitlab с прежним access A"
     then: "нового POST /oauth/register не потребовалось; connections.status снова 'connected' с прежним id подключения; вызов с прежним токеном A возвращает 200 (cid совпадает); refresh R по-прежнему обменивается на новую пару"
+  # --- Ревизия 2.1: уточнения правил R-P8, R-P10, R-T5, R-W1, R-O8, R-N5 ---
+  - id: AC-150
+    text: "Пересекающиеся маски включённой и выключенной групп разрешаются по имени инструмента, а не по строкам масок"
+    given: "каталог 'gitlab' с permission_model.header_groups и tool_filter {allow:['*']}; группа issues с tools ['create_issue'] включена пользователю, группа repo_write с tools ['create_*'] не включена; upstream возвращает инструменты create_issue, create_merge_request, list_mrs"
+    when: "POST /mcp/gitlab с tools/list; затем tools/call с name='create_issue'; затем tools/call с name='create_merge_request'"
+    then: "tools/list содержит create_issue и list_mrs и не содержит create_merge_request (его приносит только не включённая группа); вызов create_issue уходит на upstream и возвращает его ответ (маска выключенной группы не отбирает инструмент, явно выданный включённой); вызов create_merge_request — 200 с JSON-RPC error {code:-32001, data:{tool:'create_merge_request', hint_url}} без обращения к upstream"
+  - id: AC-151
+    text: "Провал пробного запроса half-open немедленно открывает окно circuit-breaker заново"
+    given: "HUB_CB_FAILURES=3, HUB_CB_RESET=30; мок upstream отвечает 500; выключатель открыт (выполнены три неуспешных вызова)"
+    when: "часы +31 с, выполняется один вызов (пробный, upstream по-прежнему 500); сразу за ним ещё два вызова; затем часы +31 с, upstream отвечает 200 и выполняется вызов"
+    then: "пробный вызов дошёл до upstream и вернул 502 с JSON-RPC -32004; следующие два — 503 с JSON-RPC -32004 (upstream_unavailable) и Retry-After, upstream их не получил (окно открылось снова сразу после провала пробы, повторного накопления HUB_CB_FAILURES ошибок не потребовалось); после нового истечения окна пробный вызов уходит на upstream, возвращает 200, выключатель закрыт и следующий вызов проходит нормально"
+  - id: AC-152
+    text: "Во время пробного запроса half-open на upstream уходит ровно один запрос, остальные получают upstream_unavailable"
+    given: "HUB_CB_FAILURES=3, HUB_CB_RESET=30; выключатель открыт; мок upstream удерживает полученный запрос до сигнала теста"
+    when: "часы +31 с; параллельно отправляются три запроса POST /mcp/gitlab; затем удерживаемый ответ отпускается со статусом 200"
+    then: "upstream получил ровно один запрос (право на пробу берётся атомарно, ключ KV cb:gitlab:probe через set_if_absent, поэтому проба одна и при нескольких репликах/параллельных запросах); два других — 503 с JSON-RPC -32004 (upstream_unavailable) и Retry-After; после успешной пробы выключатель закрыт, счётчик ошибок обнулён и следующий вызов проходит на upstream"
+  - id: AC-153
+    text: "HUB_TRUST_PROXY определяет, берётся ли IP для rate-limit из X-Forwarded-For"
+    given: "HUB_RATE_LIMIT_REGISTER=2; все запросы приходят с одного адреса соединения; заголовки X-Forwarded-For: '10.0.0.1, 10.0.0.9' и '10.0.0.2'"
+    when: "при незаданном HUB_TRUST_PROXY выполняются три POST /oauth/register (первые два с разными X-Forwarded-For, третий — с любым); затем при HUB_TRUST_PROXY=true выполняются по два запроса с каждым значением X-Forwarded-For и ещё один с '10.0.0.1, 10.0.0.9'"
+    then: "при незаданной переменной (дефолт false) третий запрос — 429 {error:'rate_limited'} с Retry-After: заголовок игнорируется и ключ лимита один на все запросы; при true все четыре запроса (по два на адрес) успешны — лимит считается по левому адресу X-Forwarded-For ('10.0.0.1' и '10.0.0.2' — разные ключи), а пятый запрос с '10.0.0.1' — 429; ни в одном режиме значение заголовка не влияет на аутентификацию и выбор alias"
+  - id: AC-154
+    text: "id_token с алгоритмом none или HS* отклоняется до обращения к JWKS"
+    given: "мок OIDC, режим keycloak; корректные iss, aud, exp и nonce во всех токенах"
+    when: "callback обрабатывается с id_token, подписанным alg='HS256' (HMAC по значению открытого ключа из JWKS), затем с alg='none' без подписи; оба сценария повторяются с моком JWKS, отвечающим ошибкой"
+    then: "во всех случаях — 400 с русским текстом ошибки, cookie hub_session не устанавливается, строка в sessions не создаётся; результат одинаков при доступном и недоступном JWKS (решение принимается по alg до запроса ключей), причём при недоступном JWKS запрос к нему не выполняется; id_token с alg='RS256' и корректной подписью по-прежнему создаёт сессию (AC-131 не изменился)"
+  - id: AC-155
+    text: "redirect_uri обязателен при обмене кода, если код был выдан с ним"
+    given: "клиенту A выдан код c с redirect_uri 'http://127.0.0.1:19876/cb'; известен code_verifier"
+    when: "POST /oauth/token с grant_type='authorization_code', code, code_verifier и client_id, но без параметра redirect_uri; затем тот же запрос с корректным redirect_uri"
+    then: "первый — 400 {error:'invalid_grant', error_description на русском}, токены не выданы; второй — 200 с парой токенов (код после отклонения из-за отсутствия redirect_uri остаётся неиспользованным, как и в AC-92)"
+  - id: AC-156
+    text: "Старт без HUB_REDIS_URL предупреждает о неразделяемом состоянии; миграции берут advisory-блокировку на PostgreSQL"
+    given: "перехват логов приложения; окружение из четырёх обязательных переменных I-1"
+    when: "create_app() без HUB_REDIS_URL; затем create_app() с заданным HUB_REDIS_URL; отдельно — применение миграций при HUB_DB_AUTO_MIGRATE=true на подключении PostgreSQL (перехват выполняемых SQL) и на SQLite"
+    then: "в первом случае в логах есть запись уровня WARNING, содержащая 'HUB_REDIS_URL' и пояснение, что реплики не делят состояние (denylist, MCP-сессии, окна rate-limit, circuit-breaker); приложение при этом создаётся и обслуживает запросы; во втором случае такой записи нет; на PostgreSQL до применения ревизий выполняется pg_advisory_xact_lock, на SQLite блокировка не запрашивается и миграции проходят как прежде (AC-138/AC-142 не изменились)"

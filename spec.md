@@ -3,6 +3,39 @@
 Источник: `examples/req-i1-hub-login-catalog.md` (на основе `docs/req-mvp.md` rev 0.2, §3, §4, §6.2, §6.3, §7, §8).
 Реализация — `src/hub/` (Python 3.12, FastAPI, async). Тесты — только против локальных моков.
 
+> **Ревизия 2.1 (2026-08-20).** Точечная правка по `reports/review-i3-1.json` и `reports/test-report-i3.md`
+> (нумерация существующих AC не менялась, ни одно требование не ослаблено; добавлены AC-150…AC-156):
+> 1. **R-P8** переписано по резолюции диспута `disputes/spec-dispute-R-P8-tool-filter.json`
+>    (`uphold_test`, AC-122 решающий): доступность инструмента определяется тремя условиями **по имени
+>    инструмента** (`deny` → `allow` → `group_deny` только при отсутствии `group_allow`), а не вычитанием
+>    строк-масок; пересекающиеся маски включённой и выключенной групп — AC-150.
+> 2. **R-P10** уточнён: после `HUB_CB_RESET` выключатель переходит в half-open и пропускает **ровно один**
+>    пробный запрос (право на пробу берётся атомарно, ключ `cb:<alias>:probe`, поэтому проба одна на все
+>    реплики); провал пробы немедленно открывает окно снова, успех — закрывает выключатель; параллельные
+>    запросы во время пробы получают `upstream_unavailable`. AC-151, AC-152.
+> 3. **R-M4 / R-N1**: ключ виртуальной сессии — `mcpsess:<alias>:<client_session_id>` (alias в ключе),
+>    добавлен ключ `cb:<alias>:probe`, в кэше `conn:<user_id>:<alias>` зафиксировано поле
+>    `access_token_enc` (шифртекст, наружу не отдаётся — R-B9); отдельного счётчика сессий
+>    (`mcpsessn:*`) нет — gauge `hub_upstream_sessions_active` считается по живым записям (`count_prefix`).
+> 4. **R-T1 / R-T5 / §9.2**: добавлена настройка `HUB_TRUST_PROXY` (дефолт `false`); при `true` IP для
+>    rate-limit берётся из левого адреса `X-Forwarded-For`. Доверие `X-Forwarded-For` больше не «вне
+>    объёма», а явно выключено по умолчанию. AC-153.
+> 5. **R-W1**: допустимые алгоритмы подписи `id_token` — `RS256`, `ES256`; `none` и HS* отклоняются
+>    **до** обращения к JWKS (защита от algorithm confusion). AC-154. Там же зафиксирована cookie
+>    `hub_csrf` (double-submit, R-W6).
+> 6. **R-O8**: `redirect_uri` при обмене кода **обязателен**, если код был выдан с ним (RFC 6749 §4.1.3);
+>    его отсутствие → `invalid_grant`. AC-155.
+> 7. Устранены 4 противоречия из `reports/test-report-i3.md` §6: AC-83/AC-148 приведены в соответствие
+>    с R-O4.1 (расхождение только по порту loopback допустимо — чужой `redirect_uri` различается путём);
+>    AC-98 — «изменённая подпись (любой значащий символ)» вместо «последняя буква»; AC-73 — в `given`
+>    явно заданы переменные **каталога** (не настройки Hub); AC-74 — CSRF-токен не выводится на
+>    страницах `/ui/*`, на экране прав он присутствует как скрытое поле формы.
+> 8. **R-B7**: расширение прав на экране прав выполняется повторным OAuth целевой системы **в той же
+>    транзакции** `/oauth/authorize`; отдельного шага `scope_upgrade` нет, экран прав после возврата
+>    показывается по правилам `HUB_CONSENT` (R-O6.3).
+> 9. **R-M1 / R-N5**: миграции при старте выполняются под advisory-блокировкой (PostgreSQL), пустой
+>    `HUB_REDIS_URL` даёт WARNING при старте (реплики не делят состояние). AC-156.
+
 > **Ревизия 2 (2026-08-19). Итерация I-3 — OAuth-фасад и MCP-proxy.** Документ описывает уже две итерации:
 > разделы 1–8 — I-1 (правила `R-K*`, `R-C*`, `R-L*`, `R-A*`, `R-S*`, критерии AC-01…AC-69, **не изменены**);
 > **часть II (разделы 9–18)** — I-3 по требованию `examples/req-i3-hub-oauth-facade-proxy.md` (P-01…P-19):
@@ -450,7 +483,9 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 - изменение `catalog.yaml` репозитория: спека расширяет **схему** каталога только необязательными полями
   (R-P8), существующий файл остаётся валидным и не требует правок;
 - нагрузочный тест k6 на 30 000 VU (S-07), sticky-сессии, партиционирование аудита, CDN, HTTP/2-тюнинг;
-- отзыв ключей LiteLLM, доверие `X-Forwarded-For`, CORS — как и в I-1.
+- отзыв ключей LiteLLM и CORS — как и в I-1. Доверие `X-Forwarded-For` **не** вне объёма ревизии 2.1:
+  оно управляется настройкой `HUB_TRUST_PROXY` (по умолчанию выключено) и влияет только на выбор IP
+  для ключей rate-limit (R-T5); на аутентификацию и авторизацию заголовок не влияет никогда.
 
 ### 9.3. Факты `[проверить]` и как они параметризованы
 
@@ -481,6 +516,7 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   | `HUB_RATE_LIMIT_REGISTER` | `10` | Регистраций клиента (`/oauth/register`) в 60 с на IP |
   | `HUB_RATE_LIMIT_TOKEN` | `60` | Обращений к `/oauth/token` в 60 с на пару (`client_id`, IP) |
   | `HUB_RATE_LIMIT_MCP` | `120` | Запросов к `/mcp/{alias}` в 60 с на пару (пользователь, alias) |
+| `HUB_TRUST_PROXY` | `false` | Доверять ли `X-Forwarded-For` при вычислении IP для rate-limit (R-T5): `false` — адрес соединения, `true` — левый (первый) адрес заголовка |
   | `HUB_MAX_SSE_PER_USER` | `4` | Одновременных SSE-потоков на пользователя (по всем alias) |
   | `HUB_MAX_BODY_BYTES` | `1048576` | Максимальный размер тела запроса к `/mcp/{alias}`, байт |
   | `HUB_UPSTREAM_TIMEOUT` | `30.0` | Таймаут соединения и ожидания первого байта ответа upstream, с |
@@ -506,6 +542,8 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
     (кроме `_ENABLED`) — целые/дробные > 0; иначе — ошибка старта с именем переменной;
   - `HUB_WEB_AUTH ∈ {keycloak, litellm}`, `HUB_CONSENT ∈ {always, remember}` — иное значение — ошибка
     старта с именем переменной и перечнем допустимых;
+  - `HUB_TRUST_PROXY`, `HUB_TOKEN_REFRESH_ENABLED`, `HUB_DB_AUTO_MIGRATE` — булевы (`true`/`false`,
+    разбор pydantic-settings); дефолт `HUB_TRUST_PROXY` — `false`;
   - `HUB_OAUTH_ALLOWED_REDIRECTS` — строка JSON, разбираемая в непустой массив непустых строк; иначе —
     ошибка старта с именем переменной;
   - при `HUB_WEB_AUTH=keycloak` обязательны `KEYCLOAK_ISSUER` и `KEYCLOAK_CLIENT_SECRET`: отсутствие
@@ -521,6 +559,18 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   авторизации, идентификаторы веб-сессий и CSRF-токены, `code_verifier` — не попадают в логи,
   `audit_log.details`, метрики, HTML-страницы, ответы `/api/*`, `/oauth/*` (кроме собственно выдачи
   токена клиенту в теле `/oauth/token`), `/.well-known/*`, `/remote-config`.
+- **R-T5. Доверенный прокси (`HUB_TRUST_PROXY`).** IP клиента для ключей rate-limit
+  (`rl:register:<ip>`, `rl:token:<client_id>:<ip>`) вычисляется так:
+  - `HUB_TRUST_PROXY=false` (по умолчанию) — адрес TCP-соединения (`request.client.host`); заголовки
+    `X-Forwarded-*` игнорируются (клиент подделывает их сам). За ingress/service mesh это означает
+    один общий ключ на весь Hub, поэтому `HUB_RATE_LIMIT_REGISTER` фактически становится глобальным
+    лимитом — предупреждение об этом обязательно в `deploy/.env.example` (R-N3);
+  - `HUB_TRUST_PROXY=true` — **левый (первый)** адрес заголовка `X-Forwarded-For` (список
+    `client, proxy1, proxy2`, значения обрезаются по пробелам); при пустом или отсутствующем
+    заголовке — адрес соединения. Включать разрешено только когда `X-Forwarded-For` проставляет
+    доверенный прокси.
+  Заголовок не влияет ни на аутентификацию, ни на авторизацию, ни на выбор alias — только на выбор
+  ключа лимита; в логи и `audit_log` попадает то же значение IP (`created_ip` в `oauth_clients`).
 
 ## 11. Hub как authorization server для facade-серверов (R-O*)
 
@@ -576,16 +626,19 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
     "grant_types":["authorization_code","refresh_token"], "response_types":["code"],
     "token_endpoint_auth_method":"none", "client_name":…}`; `client_secret` не выдаётся никогда;
     запись в `oauth_clients` (R-M2), аудит `oauth_client_registered`;
-  - rate-limit `HUB_RATE_LIMIT_REGISTER` в 60 с на IP соединения → 429 `{error:"rate_limited"}`
-    с `Retry-After` (как R-L8).
+  - rate-limit `HUB_RATE_LIMIT_REGISTER` в 60 с на IP клиента (определяется по R-T5) → 429
+    `{error:"rate_limited"}` с `Retry-After` (как R-L8).
 - **R-O4. `GET /oauth/authorize` — валидация (P-04).** Параметры: `response_type=code`, `client_id`,
   `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `state` (опц., но возвращается как есть),
   `scope` (опц.), `resource` (опц.). Порядок проверок:
   1. `client_id` неизвестен, `redirect_uri` отсутствует или не принадлежит этому клиенту → **редирект не
      выполняется**: 400 HTML-страница с русским текстом ошибки и кодом `invalid_client`/`invalid_redirect_uri`
      (тело содержит `error=` в машиночитаемом виде в `<meta name="hub-error">`). Совпадение `redirect_uri`
-     со строкой регистрации — точное; для loopback-хостов допускается отличающийся порт при совпадении
-     схемы, хоста и пути (RFC 8252);
+     со строкой регистрации — точное, **с единственным исключением**: для loopback-хостов (`127.0.0.1`,
+     `localhost`, `[::1]`) допускается отличающийся **порт** при совпадении схемы, хоста и пути
+     (RFC 8252) — такой `redirect_uri` принимается, даже если тот же порт зарегистрирован другим
+     клиентом. Любое расхождение пути (в т.ч. обход `…/cb/../evil`), схемы или хоста, а также
+     расхождение порта для не-loopback хостов — ошибка `invalid_redirect_uri` без редиректа;
   2. далее ошибки возвращаются редиректом на `redirect_uri` с `error`, `error_description`, `state`:
      `unsupported_response_type` (`response_type != code`), `invalid_request` (нет `code_challenge`,
      `code_challenge_method != S256`), `invalid_target` (`resource` не соответствует ни одному
@@ -624,6 +677,8 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   - код неизвестен, истёк или уже использован → `invalid_grant`; **повторное предъявление уже
     использованного кода дополнительно отзывает всю цепочку токенов, выданных по этому коду** (R-O10);
   - `client_id`/`redirect_uri` не совпадают с сохранёнными при выдаче кода → `invalid_grant`;
+  - `redirect_uri` **обязателен**, если код был выдан с ним (на `/oauth/authorize` он обязателен
+    всегда — R-O4.1): его отсутствие в теле запроса → `invalid_grant` (RFC 6749 §4.1.3);
   - `code_verifier` отсутствует или `BASE64URL(SHA256(code_verifier)) != code_challenge` → `invalid_grant`;
   - успех → 200 `{"access_token":"<JWT>", "token_type":"Bearer", "expires_in":<HUB_ACCESS_TOKEN_TTL>,
     "refresh_token":"<opaque>", "scope":"<alias>:<preset>"}`, заголовки `Cache-Control: no-store`,
@@ -645,7 +700,8 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
     не истёкшим `exp` заносятся в denylist KV (`jtiden:<jti>` с TTL до `exp`); аудит
     `oauth_refresh_reuse_detected`. Последующие запросы `/mcp/{alias}` с этими access-токенами → 401.
   - Истёкший refresh → `invalid_grant`; refresh, выданный другому `client_id`, → `invalid_grant`.
-  - Rate-limit `HUB_RATE_LIMIT_TOKEN` на пару (`client_id`, IP) → 429 `{error:"rate_limited"}` + `Retry-After`.
+  - Rate-limit `HUB_RATE_LIMIT_TOKEN` на пару (`client_id`, IP — определяется по R-T5) → 429
+    `{error:"rate_limited"}` + `Retry-After`.
 - **R-O11. `POST /oauth/revoke` (P-06).** Тело: `token`, опц. `token_type_hint`, опц. `client_id`.
   Ответ всегда 200 с пустым JSON-объектом `{}` (в т.ч. для неизвестного токена — RFC 7009);
   отсутствие параметра `token` → 400 `invalid_request`. Отзыв refresh-токена отзывает всю его цепочку
@@ -728,7 +784,13 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
     не требуется; аудит `connection_permissions_changed`;
   - если новый пресет требует scope целевой системы шире выданных (`readonly → readwrite`), подключение
     переводится в `needs_reauth` с пояснением «нужно заново разрешить доступ в <система>», 200 с
-    `status: "needs_reauth"`; фактические права применяются после повторного OAuth системы.
+    `status: "needs_reauth"`; фактические права применяются после повторного OAuth системы;
+  - то же расширение, выбранное **на экране прав** (`POST /oauth/consent` с `preset: readwrite`),
+    выполняется повторным OAuth целевой системы (R-B2) **в той же транзакции** `/oauth/authorize`:
+    отдельного шага/состояния `scope_upgrade` в флоу нет. После возврата из целевой системы флоу
+    продолжается обычным порядком R-O6: при `HUB_CONSENT=always` экран прав показывается ещё раз,
+    при `remember` с уже сохранённым тем же scope код выдаётся сразу; новой регистрации клиента (DCR)
+    и нового подключения не требуется.
 - **R-B8. Отключение и переподключение (P-06, P-16).** `DELETE /api/me/connections/{alias}`:
   best-effort `POST revoke_url` (если задан в каталоге; ошибка отзыва не блокирует), удаление
   `upstream_tokens`, `connections.status = not_connected` (или удаление строки — эквивалентно для
@@ -770,7 +832,7 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   Заголовок upstream `Mcp-Session-Id` клиенту не пересылается (см. R-P4).
 - **R-P4. Виртуализация сессий (P-12).** Идентификатор сессии, который видит клиент, выдаёт Hub:
   - при успешном ответе upstream на `initialize` Hub создаёт `client_session_id` (uuid4-hex), запись
-    `mcpsess:<client_session_id>` в KV (`user_id`, `alias`, `connection_id`, `upstream_session_id`,
+    `mcpsess:<alias>:<client_session_id>` в KV (`user_id`, `alias`, `connection_id`, `upstream_session_id`,
     `protocol_version`, `client_info`, `upstream_last_used_at`) с TTL `HUB_CLIENT_SESSION_TTL`,
     и возвращает клиенту заголовок `Mcp-Session-Id: <client_session_id>`;
   - при последующих запросах клиентский `Mcp-Session-Id` заменяется на `upstream_session_id`;
@@ -804,9 +866,28 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   - `permission_model` вида `tool_filter`: как в I-1, `presets.<пресет>.tools` — allow-маски.
 
   Маска — шаблон `fnmatch` (`*`, `?`, `[…]`), регистр важен. Итоговые наборы для пользователя:
-  `allow` = `tool_filter.allow` ∪ `tools` всех включённых групп (`always` + выбранные); если оба источника
-  пусты — `allow = ["*"]`. `deny` = `tool_filter.deny`. Инструмент доступен, если совпал хотя бы с одной
-  маской `allow` и **ни с одной** маской `deny` (deny приоритетнее).
+  - `allow` = `tool_filter.allow` ∪ `tools` включённых групп (`always` + выбранные); если оба источника
+    пусты — `allow = ["*"]`;
+  - `deny` = `tool_filter.deny`;
+  - `group_allow` = `tools` включённых групп; `group_deny` = `tools` групп, не включённых пользователю
+    (в т.ч. отсечённых пресетом `readonly` и групп с `preset: none`).
+
+  Решение принимается **по имени инструмента**, а не сравнением строк-масок. Инструмент доступен,
+  если одновременно выполнены три условия:
+  1. имя не совпало ни с одной маской `deny` (deny приоритетнее всего);
+  2. имя совпало хотя бы с одной маской `allow`;
+  3. если имя совпало хотя бы с одной маской `group_deny` — оно совпало **также** хотя бы с одной
+     маской `group_allow`.
+
+  Иначе говоря: инструмент, который «приносит» только не включённая пользователю группа, недоступен,
+  даже если общий `allow` — `*` (AC-122); инструмент, явно выданный включённой группой или общим
+  `tool_filter.allow`, остаётся доступен и при пересекающихся масках — включённая группа с
+  `tools: ["create_issue"]` при выключенной группе с `tools: ["create_*"]` и `allow: ["*"]` даёт
+  доступ к `create_issue`, но не к остальным `create_*` (AC-150). Правило fail-closed: расширить права
+  сверх включённых групп оно не может. При отсутствии `tool_filter` и `tools` у всех групп фильтр не
+  применяется (`allow = ["*"]`, `deny` и `group_deny` пусты) — существующий `catalog.yaml` остаётся
+  валидным (решение 51).
+
   - В ответе `tools/list` недоступные инструменты удаляются (в т.ч. в SSE-ответе upstream);
   - `tools/call` недоступного (или отсутствующего в отфильтрованном списке) инструмента → запрос на
     upstream **не отправляется**, ответ 200 с JSON-RPC ошибкой
@@ -824,10 +905,22 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   `{error:"payload_too_large"}`, upstream не вызывается.
 - **R-P10. Circuit-breaker (P-14).** На alias: `HUB_CB_FAILURES` подряд идущих ошибок upstream
   (5xx, таймаут, сетевая ошибка) переводят выключатель в открытое состояние на `HUB_CB_RESET` секунд
-  (состояние в KV `cb:<alias>`, общее для реплик). В открытом состоянии запросы к upstream не идут:
-  ответ 503 + JSON-RPC `-32004` `upstream_unavailable` с `data.hint_url` и `Retry-After`. По истечении
-  `HUB_CB_RESET` пропускается один пробный запрос: успех → счётчик сбрасывается и выключатель
-  закрывается; ошибка → окно открывается снова. Успешный ответ обнуляет счётчик ошибок.
+  (состояние в KV `cb:<alias>` = `{failures, open_until}`, общее для реплик). В открытом состоянии
+  запросы к upstream не идут: ответ 503 + JSON-RPC `-32004` `upstream_unavailable` с `data.hint_url`
+  и `Retry-After`. По истечении `HUB_CB_RESET` выключатель переходит в состояние half-open:
+  - на upstream пропускается **ровно один** пробный запрос. Право на пробу выдаётся атомарно
+    (`set_if_absent` по ключу KV `cb:<alias>:probe` с TTL `HUB_CB_RESET`), поэтому проба одна на все
+    реплики Hub, а не одна на реплику;
+  - все прочие запросы, пришедшие, пока проба не завершилась (в т.ч. параллельные и на других
+    репликах), получают тот же ответ, что и в открытом состоянии — 503 + `-32004`
+    `upstream_unavailable`, upstream не вызывается (AC-152);
+  - **успех** пробы → счётчик ошибок обнуляется, `open_until` сбрасывается, право на пробу удаляется,
+    выключатель закрыт, обычное обслуживание возобновляется;
+  - **ошибка** пробы (5xx, таймаут, сетевая ошибка) → окно открывается снова на `HUB_CB_RESET` секунд
+    немедленно, без повторного накопления `HUB_CB_FAILURES` ошибок; право на пробу удаляется и
+    выдаётся заново только по истечении нового окна (AC-151).
+
+  В закрытом состоянии успешный ответ upstream обнуляет счётчик ошибок.
 - **R-P11. Ошибки, понятные клиенту (P-15).** Все ошибки Hub на `/mcp/{alias}` для запросов с JSON-RPC
   телом отдаются как JSON-RPC error (`jsonrpc: "2.0"`, `id` из запроса или `null`) с русским `message` и
   `data.hint_url`:
@@ -855,14 +948,21 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
     `client_id`, `redirect_uri=<HUB>/auth/callback`, `response_type=code`, `scope=KEYCLOAK_SCOPES`,
     `state`, `nonce`, PKCE S256;
   - `GET /auth/callback`: неизвестный/повторный/истёкший `state` → 400; ошибка провайдера → 400 с русским
-    текстом; успех → обмен кода на токены, проверка `id_token` (подпись по JWKS issuer'а, `iss`, `aud`,
-    `exp`, `nonce`) — нарушение любой проверки → 400, сессия не создаётся;
+    текстом; успех → обмен кода на токены, проверка `id_token`: сначала **алгоритм подписи** —
+    допустимы только асимметричные `RS256` и `ES256`; `none`, HS* и любой другой `alg` отклоняются
+    **до** обращения к JWKS и независимо от его содержимого (защита от algorithm confusion);
+    затем подпись по JWKS issuer'а, `iss`, `aud`, `exp`, `nonce` — нарушение любой проверки → 400,
+    сессия не создаётся;
   - `user_id` = первый непустой из claims `preferred_username`, `email`, `sub`; `email` = claim `email`;
     выполняется upsert `users` (как R-L5, без создания `api_keys`);
   - создаётся веб-сессия: строка ≥ 32 байта случайности, в БД (`sessions`) хранится sha256, cookie
     `hub_session` — `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` (если `HUB_PUBLIC_URL` начинается с
-    `https`), срок `HUB_WEB_SESSION_TTL`; редирект на `next` (только относительный путь внутри Hub;
-    внешний/абсолютный `next` заменяется на `/ui/connections`);
+    `https`), срок `HUB_WEB_SESSION_TTL`; вместе с ней выставляется cookie `hub_csrf` — механизм
+    доставки CSRF-токена (double-submit, R-W6): те же `SameSite=Lax`, `Path=/`, `Secure` и срок, но
+    `HttpOnly=false` (значение читает скрипт страницы и отправляет в заголовке `X-CSRF-Token`).
+    Значение `hub_csrf` — производная (HMAC) от идентификатора сессии, самим по себе доступом оно не
+    является; сверка идёт с полем формы/заголовком, а не с cookie. Далее — редирект на `next`
+    (только относительный путь внутри Hub; внешний/абсолютный `next` заменяется на `/ui/connections`);
   - `POST /auth/logout` (CSRF-токен обязателен) удаляет сессию и cookie.
 - **R-W2. Временный режим `HUB_WEB_AUTH=litellm` (P-16).** Страница `/auth/login` показывает тот же экран
   входа; внутри выполняется CLI-SSO флоу I-1: Hub создаёт сессию входа (R-L1), показывает ссылку/кнопку
@@ -892,6 +992,11 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   `Content-Type: text/html; charset=utf-8`, `Cache-Control: private, no-store`. Для всех небезопасных
   методов при аутентификации по cookie обязателен CSRF-токен (скрытое поле формы или заголовок
   `X-CSRF-Token`), привязанный к веб-сессии: отсутствие/несовпадение → 403 `{error:"forbidden"}`.
+  Токен доставляется браузеру cookie `hub_csrf` (R-W1) и подставляется в запрос скриптом страницы
+  (заголовок `X-CSRF-Token`) либо берётся из скрытого поля формы. В HTML-страницах его значение
+  выводится **только** в скрытом поле формы экрана прав (`POST /oauth/consent`) и формы
+  `POST /auth/logout`; страницы `/ui/*` (`/ui/connections`, `/ui/servers/{alias}`) значение
+  CSRF-токена в разметке не содержат (AC-74).
   Эндпоинты `/api/me/*` принимают **либо** Bearer-ключ LiteLLM (R-L6), **либо** веб-сессию с CSRF;
   прочие правила R-A7 сохраняются. HTML не содержит токенов, секретов и внутренних URL (`upstream_url`).
 
@@ -902,7 +1007,10 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   файл `alembic.ini` в корне не требуется — корень вне зоны записи dev-агента). Базовая ревизия
   повторяет схему I-1 (`users`, `api_keys`, `connections`, `audit_log`), следующая добавляет объекты I-3.
   При `HUB_DB_AUTO_MIGRATE=true` (дефолт) миграции применяются при старте (lifespan) до обслуживания
-  запросов — поведение AC-65 сохраняется. CLI: `mcp-hub db upgrade [--revision head]`,
+  запросов — поведение AC-65 сохраняется. На PostgreSQL миграция выполняется под advisory-блокировкой
+  (`pg_advisory_xact_lock` на время транзакции): при одновременном старте нескольких реплик вторая
+  ждёт первую и затем видит схему уже на `head` (`upgrade` — no-op) вместо падения с ошибкой миграции;
+  для SQLite блокировка не берётся (запись сериализует сам файл). См. также R-N5. CLI: `mcp-hub db upgrade [--revision head]`,
   `mcp-hub db current` (печатает текущую ревизию, код 0). Ошибка миграции → приложение не поднимается,
   сообщение содержит имя ревизии.
 - **R-M2. Новые таблицы.**
@@ -932,14 +1040,27 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   | `oauthtx:<tx_id>` | параметры `/oauth/authorize`, `user_id`, alias, scope, шаг флоу, `provider_state`, `provider_verifier` | `HUB_OAUTH_TX_TTL` |
   | `oauthstate:<state>` | `tx_id` (для `/oauth/callback/{alias}`) | `HUB_OAUTH_TX_TTL` |
   | `jtiden:<jti>` | `1` (denylist отозванных access-токенов) | до `exp` токена |
-  | `conn:<user_id>:<alias>` | `{connection_id, status, preset, groups, revision, token_expires_at}` | `HUB_CONNECTION_CACHE_TTL` |
-  | `mcpsess:<client_session_id>` | `{user_id, alias, connection_id, upstream_session_id, protocol_version, client_info, upstream_last_used_at}` | `HUB_CLIENT_SESSION_TTL` |
+  | `conn:<user_id>:<alias>` | `{connection_id, status, preset, groups, revision, token_expires_at, access_token_enc}` | `HUB_CONNECTION_CACHE_TTL` |
+  | `mcpsess:<alias>:<client_session_id>` | `{user_id, alias, connection_id, upstream_session_id, protocol_version, client_info, upstream_last_used_at}` | `HUB_CLIENT_SESSION_TTL` |
   | `toolscache:<alias>:<catalog_version>:<hash прав>` | результат `tools/list` до фильтрации | `HUB_TOOLS_CACHE_TTL` |
   | `refreshlock:<connection_id>` | владелец блокировки | 30 с |
   | `cb:<alias>` | `{failures, open_until}` | `HUB_CB_RESET` × 2 |
+  | `cb:<alias>:probe` | право на единственный пробный запрос в half-open (R-P10) | `HUB_CB_RESET` |
   | `sse:<user_id>` | счётчик активных SSE-потоков | 1 ч (обновляется) |
   | `rl:mcp:<user_id>:<alias>`, `rl:register:<ip>`, `rl:token:<client_id>:<ip>` | окна rate-limit | 60 с |
   | `oidc:jwks:<issuer>`, `oidc:meta:<issuer>` | JWKS и метаданные OIDC | `KEYCLOAK_JWKS_TTL` |
+
+  Пояснения к таблице:
+  - alias входит в **ключ** записи сессии (`mcpsess:<alias>:<client_session_id>`), чтобы живые сессии
+    сервера считались по фактическим записям (`count_prefix`, R-N1). Отдельного счётчика сессий
+    (ключа вида `mcpsessn:<alias>`) нет: он завышал бы значение на сессии, истёкшие по
+    `HUB_CLIENT_SESSION_TTL` без явного `DELETE /mcp/{alias}`;
+  - `access_token_enc` в кэше подключения — **шифртекст** Fernet (тот же, что в БД), нужен для
+    успешного горячего пути без обращения к БД (AC-99). Наружу он не отдаётся никогда (R-B9);
+    при смене `HUB_ENCRYPTION_KEY` расшифровка не удаётся и запрос уходит по обычному пути
+    обновления токена (при неуспехе — `needs_reauth`, R-B5);
+  - `cb:<alias>:probe` берётся только через `set_if_absent` (атомарно) и удаляется по итогам пробы
+    — как при успехе, так и при провале (R-P10).
 
 - **R-M5. Совместимость с БД I-1.** Если в БД уже есть таблицы I-1, созданные `create_all`, и нет таблицы
   `alembic_version` — при старте (или `mcp-hub db upgrade`) Hub помечает БД базовой ревизией (`stamp`)
@@ -950,7 +1071,10 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 
 - **R-N1. Метрики (P-14).** К метрикам R-S4 добавляются:
   `hub_mcp_requests_total{alias,method,status}` (counter), `hub_mcp_request_duration_seconds{alias}`
-  (histogram, даёт p50/p95), `hub_upstream_sessions_active{alias}` (gauge, по записям `mcpsess:*`),
+  (histogram, даёт p50/p95), `hub_upstream_sessions_active{alias}` (gauge — число **живых** записей `mcpsess:<alias>:*` в KV,
+  считается на момент сбора метрик через `count_prefix`; отдельного инкрементального счётчика нет,
+  поэтому сессии, истёкшие по `HUB_CLIENT_SESSION_TTL` без явного `DELETE /mcp/{alias}`, gauge не
+  завышают),
   `hub_upstream_errors_total{alias,kind}` (`kind ∈ {timeout, http_5xx, network, circuit_open}`),
   `hub_oauth_tokens_issued_total{grant}` (`grant ∈ {authorization_code, refresh_token}`),
   `hub_token_refresh_total{alias,result}` (`result ∈ {ok, failed}`). Значения токенов, `user_id` и другие
@@ -978,6 +1102,20 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
   Нагрузочный smoke (100 параллельных SSE-потоков через мок) — в отдельном маркере pytest
   (`@pytest.mark.load`), в обычном прогоне не выполняется. Часы подменяемые (TTL кодов, токенов, idle
   сессий, кэшей, окон rate-limit), KV — in-memory, БД — SQLite (после миграций).
+
+- **R-N5. Предупреждения и блокировки при старте (эксплуатация).**
+  - **Пустой `HUB_REDIS_URL`.** KeyValueStore по умолчанию — in-memory, то есть состояние живёт в
+    памяти процесса. При старте без `HUB_REDIS_URL` Hub пишет в лог запись уровня **WARNING**,
+    содержащую имя переменной `HUB_REDIS_URL` и пояснение: реплики не делят denylist отозванных
+    токенов (`jtiden:*`), виртуальные MCP-сессии (`mcpsess:*`), окна rate-limit, состояние
+    circuit-breaker (`cb:*`) и кэш подключений (`conn:*`), поэтому запуск в нескольких репликах
+    требует общего Redis. Старт при этом **не** прерывается (однорепличный и тестовый запуск
+    остаются штатными, R-T3); при заданном `HUB_REDIS_URL` предупреждение отсутствует. То же
+    пояснение обязательно в `deploy/.env.example` (R-N3).
+  - **Одновременные миграции.** См. R-M1: при `HUB_DB_AUTO_MIGRATE=true` на PostgreSQL миграции
+    выполняются под advisory-блокировкой, поэтому одновременный старт реплик не роняет «проигравшую».
+    Альтернатива для эксплуатации — `HUB_DB_AUTO_MIGRATE=false` и отдельный job `mcp-hub db upgrade`
+    (обе схемы поддерживаются).
 
 ## 17. Контракты эндпоинтов I-3
 
@@ -1086,6 +1224,7 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 | R-T2 | AC-71, AC-72 |
 | R-T3 | AC-73 |
 | R-T4 | AC-74 |
+| R-T5 | AC-153 |
 | R-O1 | AC-75, AC-76 |
 | R-O2 | AC-77, AC-78, AC-79 |
 | R-O3 | AC-80, AC-81, AC-82, AC-148 |
@@ -1093,7 +1232,7 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 | R-O5 | AC-85, AC-86 |
 | R-O6 | AC-87, AC-88, AC-89 |
 | R-O7 | AC-90 |
-| R-O8 | AC-91, AC-92, AC-93 |
+| R-O8 | AC-91, AC-92, AC-93, AC-155 |
 | R-O9 | AC-94 |
 | R-O10 | AC-95, AC-96 |
 | R-O11 | AC-97 |
@@ -1115,11 +1254,11 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 | R-P5 | AC-118, AC-119 |
 | R-P6 | AC-120 |
 | R-P7 | AC-121 |
-| R-P8 | AC-122, AC-123, AC-124 |
+| R-P8 | AC-122, AC-123, AC-124, AC-150 |
 | R-P9 | AC-125, AC-126, AC-127 |
-| R-P10 | AC-128 |
+| R-P10 | AC-128, AC-151, AC-152 |
 | R-P11 | AC-129, AC-130 |
-| R-W1 | AC-131, AC-132 |
+| R-W1 | AC-131, AC-132, AC-154 |
 | R-W2 | AC-133 |
 | R-W3 | AC-134 |
 | R-W4 | AC-135 |
@@ -1134,9 +1273,16 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 | R-N2 | AC-144 |
 | R-N3 | AC-145 |
 | R-N4 | AC-146, AC-147 |
+| R-N5 | AC-156 |
 
 Сквозной сценарий P-18 — AC-147; обязательные негативные сценарии требования: чужой redirect — AC-81,
 AC-83, AC-148; неверный PKCE — AC-92; повтор кода — AC-90; повтор refresh с отзывом цепочки — AC-96;
 истёкший upstream-токен без refresh — AC-108; `needs_reauth` — AC-107, AC-129, AC-149; лимиты — AC-82,
 AC-101, AC-125, AC-126, AC-127; idle-сессия и пересоздание — AC-118, AC-119; кэш `tools/list` — AC-121;
-фильтр инструментов — AC-122, AC-123, AC-124.
+фильтр инструментов — AC-122, AC-123, AC-124, AC-150; провал пробы circuit-breaker и параллельные
+запросы во время неё — AC-151, AC-152; `id_token` с недопустимым алгоритмом — AC-154; обмен кода без
+`redirect_uri` — AC-155; старт без общего KV — AC-156.
+
+Критерии ревизии 2.1 (AC-150…AC-156) добавлены к существующим; ни один AC ревизии 2 не удалён,
+изменены только формулировки AC-73, AC-74, AC-83, AC-98, AC-141, AC-148 (см. блок «Ревизия 2.1»
+в начале документа) — их ID и проверяемое поведение сохранены.
