@@ -128,7 +128,7 @@ def create_app(
 
     catalog: Catalog = load_catalog(settings.catalog_path, catalog_env)
 
-    db = Database(build_engine(settings.database_url))
+    db = Database(build_engine(settings.database_url), auto_migrate=settings.db_auto_migrate)
     kv_store: KeyValueStore = kv or create_kv_store(settings.redis_url, app_clock)
     metrics = Metrics()
 

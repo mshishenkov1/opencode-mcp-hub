@@ -80,6 +80,11 @@ class Connection(Base):
     groups: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    # --- I-3 (R-M3) ---
+    needs_reauth_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    provider_account: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class AuditLog(Base):
@@ -93,6 +98,126 @@ class AuditLog(Base):
     details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
+class OAuthClient(Base):
+    """Клиент MCP, зарегистрированный по RFC 7591 (R-M2)."""
+
+    __tablename__ = "oauth_clients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    client_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    redirect_uris: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    grant_types: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    response_types: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    token_endpoint_auth_method: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    scope: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    created_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OAuthCode(Base):
+    """Код авторизации Hub: хранится только sha256 (R-M2, R-O7)."""
+
+    __tablename__ = "oauth_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), ForeignKey("users.user_id"), nullable=False)
+    alias: Mapped[str] = mapped_column(String(64), nullable=False)
+    connection_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("connections.id"), nullable=True
+    )
+    redirect_uri: Mapped[str] = mapped_column(String(2048), nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(255), nullable=False)
+    code_challenge_method: Mapped[str] = mapped_column(String(16), nullable=False, default="S256")
+    scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class RefreshToken(Base):
+    """Refresh-токен Hub: sha256, цепочка ротации, связанный access-``jti`` (R-M2, R-O10)."""
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    chain_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    client_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), ForeignKey("users.user_id"), nullable=False)
+    connection_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("connections.id"), nullable=True
+    )
+    alias: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    access_jti: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    access_exp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class UpstreamToken(Base):
+    """Токены целевой системы: только в зашифрованном виде (R-M2, R-B3)."""
+
+    __tablename__ = "upstream_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("connections.id"), nullable=False, unique=True, index=True
+    )
+    access_token_enc: Mapped[str] = mapped_column(String, nullable=False)
+    refresh_token_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+    token_type: Mapped[str] = mapped_column(String(32), nullable=False, default="Bearer")
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    obtained_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    refresh_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class WebSession(Base):
+    """Веб-сессия пользователя: sha256 идентификатора и CSRF-токена (R-M2, R-W1)."""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    csrf_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("users.user_id"), nullable=False, index=True
+    )
+    auth_method: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class Consent(Base):
+    """Сохранённое согласие пользователя клиенту на alias (R-M2, HUB_CONSENT=remember)."""
+
+    __tablename__ = "consents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "client_id", "alias", name="uq_consents_user_client_alias"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), ForeignKey("users.user_id"), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    alias: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    preset: Mapped[str] = mapped_column(String(64), nullable=False)
+    groups: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 def build_engine(database_url: str) -> AsyncEngine:
     url = make_url(database_url)
     kwargs: dict[str, Any] = {"future": True}
@@ -104,23 +229,30 @@ def build_engine(database_url: str) -> AsyncEngine:
 
 
 class Database:
-    """Обёртка над движком: ленивое создание схемы, сессии, аудит, проверка готовности."""
+    """Обёртка над движком: ленивое приведение схемы, сессии, аудит, проверка готовности."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, *, auto_migrate: bool = True) -> None:
         self.engine = engine
+        self.auto_migrate = auto_migrate
         self._ready = False
         self._closed = False
         self._lock = asyncio.Lock()
 
     async def init(self) -> None:
-        """``create_all`` — идемпотентно."""
+        """Довести схему до ``head`` миграциями Alembic — идемпотентно (R-M1, R-M5).
+
+        При ``auto_migrate=False`` (``HUB_DB_AUTO_MIGRATE=false``) схема не создаётся автоматически:
+        её приводит администратор командой ``mcp-hub db upgrade``.
+        """
         if self._ready:
             return
         async with self._lock:
             if self._ready:
                 return
-            async with self.engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+            if self.auto_migrate:
+                from hub.migrate import upgrade
+
+                await upgrade(self.engine)
             self._ready = True
 
     def session(self) -> AsyncSession:
@@ -182,8 +314,14 @@ __all__ = [
     "AuditLog",
     "Base",
     "Connection",
+    "Consent",
     "Database",
+    "OAuthClient",
+    "OAuthCode",
+    "RefreshToken",
+    "UpstreamToken",
     "User",
+    "WebSession",
     "build_engine",
     "find_key_owner",
     "to_iso",
