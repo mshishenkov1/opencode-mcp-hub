@@ -37,6 +37,14 @@ MODE_CONNECT = "connect"
 
 
 def _client_ip(request: Request) -> str:
+    """IP для ключей rate-limit: адрес соединения; ``X-Forwarded-For`` — только при
+    ``HUB_TRUST_PROXY=true`` (за ingress иначе все запросы приходят с одного адреса и лимит
+    становится общим на весь Hub; недоверенный заголовок клиент подделывает сам)."""
+    if request.app.state.settings.trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
     if request.client and request.client.host:
         return request.client.host
     return "unknown"

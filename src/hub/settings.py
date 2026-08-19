@@ -137,6 +137,8 @@ class Settings(BaseSettings):
     oauth_tx_ttl: int = Field(default=600, gt=0)
     rate_limit_register: int = Field(default=10, gt=0)
     rate_limit_token: int = Field(default=60, gt=0)
+    # Доверять ли X-Forwarded-For при вычислении IP для лимитов (по умолчанию — нет, R-O3).
+    trust_proxy: bool = False
 
     # --- I-3: MCP-proxy ---
     rate_limit_mcp: int = Field(default=120, gt=0)
