@@ -1,12 +1,176 @@
 {
-  "run_id": null,
-  "stage": "idle",
+  "run_id": "i1-hub-login-catalog-20260818",
+  "stage": "done",
   "current_agent": "orchestrator",
-  "requirements_file": null,
-  "branch": null,
+  "requirements_file": "examples/req-i1-hub-login-catalog.md",
+  "branch": "pipeline/i1-hub-login-catalog-20260818",
   "iteration": 0,
   "bugs": [],
   "escalations": [],
-  "gates": {},
-  "history": []
+  "gates": {
+    "G1": true,
+    "G2": true,
+    "G3": true,
+    "G4": true,
+    "G5": true,
+    "G6": true
+  },
+  "history": [
+    {
+      "ts": "2026-08-18T22:29:13",
+      "event": "set run_id=\"i1-hub-login-catalog-20260818\""
+    },
+    {
+      "ts": "2026-08-18T22:29:13",
+      "event": "set requirements_file=\"examples/req-i1-hub-login-catalog.md\""
+    },
+    {
+      "ts": "2026-08-18T22:29:13",
+      "event": "set branch=\"pipeline/i1-hub-login-catalog-20260818\""
+    },
+    {
+      "ts": "2026-08-18T22:29:13",
+      "event": "stage -> spec"
+    },
+    {
+      "ts": "2026-08-18T22:29:13",
+      "event": "I-1: старт конвейера (spec)"
+    },
+    {
+      "ts": "2026-08-18T22:29:13",
+      "event": "current_agent -> spec"
+    },
+    {
+      "ts": "2026-08-18T22:43:53",
+      "event": "spec готов: 69 AC"
+    },
+    {
+      "ts": "2026-08-18T22:43:53",
+      "event": "stage -> dev"
+    },
+    {
+      "ts": "2026-08-18T22:43:53",
+      "event": "current_agent -> dev"
+    },
+    {
+      "ts": "2026-08-18T23:03:45",
+      "event": "zone-check spec: ложное срабатывание на egg-info (артефакт venv), исправлено .gitignore"
+    },
+    {
+      "ts": "2026-08-19T10:21:44",
+      "event": "dev I-1 завершён: 7 коммитов fea711c..0b9589c только в src/; zone-check показал docs/examples из коммитов оркестратора (I-2/I-3/I-4 требования) — не нарушение"
+    },
+    {
+      "ts": "2026-08-19T10:21:44",
+      "event": "stage -> test"
+    },
+    {
+      "ts": "2026-08-19T10:21:44",
+      "event": "current_agent -> test"
+    },
+    {
+      "ts": "2026-08-19T10:26:00",
+      "event": "стенд поднят (compose, Colima): health/ready/well-known OK, /cli/start → LiteLLM OK (CA смонтирован)"
+    },
+    {
+      "ts": "2026-08-19T10:45:13",
+      "event": "test I-1: 286 passed, 1 xfail(strict), coverage 94%, багов нет; 3 противоречия спеки (AC-59, R-C1, R-L9) → ревизия spec"
+    },
+    {
+      "ts": "2026-08-19T10:45:13",
+      "event": "stage -> spec"
+    },
+    {
+      "ts": "2026-08-19T10:45:13",
+      "event": "current_agent -> spec"
+    },
+    {
+      "ts": "2026-08-19T10:47:37",
+      "event": "spec 1.1 закоммичен"
+    },
+    {
+      "ts": "2026-08-19T10:47:37",
+      "event": "stage -> test"
+    },
+    {
+      "ts": "2026-08-19T10:47:37",
+      "event": "current_agent -> test"
+    },
+    {
+      "ts": "2026-08-19T10:52:11",
+      "event": "test I-1 под spec 1.1: 300/300, coverage 94%, багов нет"
+    },
+    {
+      "ts": "2026-08-19T10:52:11",
+      "event": "stage -> review"
+    },
+    {
+      "ts": "2026-08-19T10:52:11",
+      "event": "current_agent -> review"
+    },
+    {
+      "ts": "2026-08-19T13:22:52",
+      "event": "review-1 approve"
+    },
+    {
+      "ts": "2026-08-19T13:22:52",
+      "event": "stage -> gates"
+    },
+    {
+      "ts": "2026-08-19T13:22:52",
+      "event": "current_agent -> orchestrator"
+    },
+    {
+      "ts": "2026-08-19T13:23:10",
+      "event": "gates: FAIL -> gates-i1-hub-login-catalog-20260818.json"
+    },
+    {
+      "ts": "2026-08-19T13:23:45",
+      "event": "gates: G1,G2,G4,G5,G6 PASS; G3 FAIL — mutmut: тест AC-07 не находит catalog.yaml в mutants/ (нужен also_copy)"
+    },
+    {
+      "ts": "2026-08-19T13:23:45",
+      "event": "stage -> dev"
+    },
+    {
+      "ts": "2026-08-19T13:23:45",
+      "event": "current_agent -> dev"
+    },
+    {
+      "ts": "2026-08-19T13:53:32",
+      "event": "dev после review-1/G3: 8 коммитов; mutation 70.05% (no_proxy=*), segfault на macOS без no_proxy"
+    },
+    {
+      "ts": "2026-08-19T13:53:33",
+      "event": "stage -> test"
+    },
+    {
+      "ts": "2026-08-19T13:53:33",
+      "event": "current_agent -> test"
+    },
+    {
+      "ts": "2026-08-19T20:00:31",
+      "event": "test I-1 усиление: 8 коммитов, 408 тестов; запуск гейтов с no_proxy=*"
+    },
+    {
+      "ts": "2026-08-19T20:00:31",
+      "event": "stage -> gates"
+    },
+    {
+      "ts": "2026-08-19T20:00:31",
+      "event": "current_agent -> orchestrator"
+    },
+    {
+      "ts": "2026-08-19T20:03:30",
+      "event": "gates: ALL PASS -> gates-i1-hub-login-catalog-20260818.json"
+    },
+    {
+      "ts": "2026-08-19T20:04:04",
+      "event": "stage -> done"
+    },
+    {
+      "ts": "2026-08-19T20:04:05",
+      "event": "I-1 done: все гейты зелёные"
+    }
+  ]
 }
