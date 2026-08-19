@@ -1678,11 +1678,15 @@ async def test_key_generate_2xx_without_key_is_502_and_session_survives(hub: Hub
 
 
 @pytest.mark.ac("AC-42")
-async def test_key_generate_3xx_is_unavailable(hub: Hub) -> None:
-    """Перенаправление вместо ответа /key/generate — недоступность (2xx и 4xx исчерпывают контракт)."""
+@pytest.mark.parametrize("status", [300, 302], ids=["boundary", "redirect"])
+async def test_key_generate_3xx_is_unavailable(hub: Hub, status: int) -> None:
+    """Перенаправление вместо ответа /key/generate — недоступность (2xx и 4xx исчерпывают контракт).
+
+    Граница 300 проверяется отдельно: успешным считается только диапазон 2xx.
+    """
     start = await _start(hub)
     mock_poll(hub.litellm, ready_body(_jwt(hub)))
-    mock_key_generate(hub.litellm, "sk-never", status=302)
+    mock_key_generate(hub.litellm, "sk-never", status=status)
     resp = await hub.poll(start["login_id"], start["poll_secret"])
     assert resp.status_code == 502
     assert resp.json()["error"] == "litellm_unavailable"
