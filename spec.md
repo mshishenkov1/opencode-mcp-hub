@@ -3,6 +3,15 @@
 Источник: `examples/req-i1-hub-login-catalog.md` (на основе `docs/req-mvp.md` rev 0.2, §3, §4, §6.2, §6.3, §7, §8).
 Реализация — `src/hub/` (Python 3.12, FastAPI, async). Тесты — только против локальных моков.
 
+> **Ревизия 2 (2026-08-19). Итерация I-3 — OAuth-фасад и MCP-proxy.** Документ описывает уже две итерации:
+> разделы 1–8 — I-1 (правила `R-K*`, `R-C*`, `R-L*`, `R-A*`, `R-S*`, критерии AC-01…AC-69, **не изменены**);
+> **часть II (разделы 9–18)** — I-3 по требованию `examples/req-i3-hub-oauth-facade-proxy.md` (P-01…P-19):
+> новые правила `R-T*` (настройки), `R-O*` (Hub как authorization server), `R-B*` (брокер токенов целевых
+> систем), `R-P*` (MCP-proxy), `R-W*` (веб-интерфейс), `R-M*` (модель данных и миграции), `R-N*`
+> (наблюдаемость, эксплуатация, моки); критерии — AC-70…AC-149.
+> Совместимость: ни одно правило I-1 не ослаблено, ни один AC I-1 не изменён; новых **обязательных**
+> переменных окружения нет (R-T3). Раздел 5 «Вне объёма итерации» относится к I-1 — границы I-3 см. §9.2.
+
 > **Ревизия 1.1 (2026-08-19).** Точечная правка по `reports/test-report-i1.md` §5 (противоречия внутри спеки;
 > нумерация AC не менялась, требования не ослаблены):
 > 1. **AC-59 ↔ R-A5/AC-58.** Плейсхолдеры OpenCode `{env:<HUB_WELLKNOWN_ENV_NAME>}` в `/.well-known/opencode`
@@ -398,3 +407,736 @@ LiteLLM (`HUB_LITELLM_BASE_URL`, например `https://litellm.test`):
 Прочее: KeyValueStore — in-memory; БД — `sqlite+aiosqlite:///:memory:` или файл во временном каталоге;
 время — подменяемые часы (для TTL сессий, окна rate-limit, кэша 60 с/2 с); каталоги — временные YAML-файлы
 (валидный полный, пустой `servers: []`, с ошибками схемы, с `${VAR}`/`env:VAR`/`$ref`).
+
+---
+
+# Часть II. Итерация I-3: OAuth-фасад и MCP-proxy (ревизия 2)
+
+Источник: `examples/req-i3-hub-oauth-facade-proxy.md` (P-01…P-19) на основе `docs/req-mvp.md` rev 0.2
+(§4, §6.4 R-08…R-11, §6.6 R-12, §8 S-01…S-06). Разделы 1–8 (правила `R-K*`, `R-C*`, `R-L*`, `R-A*`,
+`R-S*`, критерии AC-01…AC-69) остаются в силе без изменений; правила ниже их дополняют и нигде не ослабляют.
+Факты требования с пометкой `[проверено]` перенесены как есть; `[проверить]` — параметризованы настройками
+и/или каталогом и явно помечены ниже.
+
+## 9. Назначение и границы I-3
+
+### 9.1. Назначение
+
+Для каждого сервера каталога с `mode: facade` Hub:
+
+1. выглядит для любого MCP-клиента (OpenCode 1.17.9, Claude Desktop, Cursor, VS Code) как удалённый
+   MCP-сервер со стандартной MCP-авторизацией: RFC 9728 (protected resource metadata),
+   RFC 8414 (authorization server metadata), RFC 7591 (динамическая регистрация клиента),
+   PKCE S256, `authorization_code` + `refresh_token` **[проверено]**;
+2. является брокером доступа к целевой системе: получает по OAuth и хранит (в зашифрованном виде)
+   токены пользователя к GitLab / GitLab Platform / Jira DC / Confluence DC, обновляет их фоном;
+3. проксирует MCP-вызовы на неизменённые облачные MCP-серверы AI Lab (`upstream_url` каталога),
+   подставляя персональные `credential_headers` и заголовок групп прав;
+4. показывает пользователю страницы входа, экрана прав, «Мои подключения» и карточки сервера.
+
+Границы правил: `R-T*` — настройки, `R-O*` — Hub как authorization server, `R-B*` — брокер токенов
+целевых систем, `R-P*` — MCP-proxy, `R-W*` — веб-интерфейс, `R-M*` — модель данных и миграции,
+`R-N*` — наблюдаемость, эксплуатация и моки.
+
+### 9.2. Вне объёма I-3
+
+Раздел 5 («Вне объёма итерации») относится к I-1; для I-3 вне объёма остаются:
+
+- нативные серверы (`mode: native`, ТЭГ) — Hub их не проксирует и не авторизует (I-2);
+- провайдеры-заглушки `pat` / `pat_via_password` (§6.4 R-11 req-mvp) — в этой итерации не реализуются;
+- документация P-19 (`docs/*.md`: «как подключить facade-сервер», «как добавить сервер в каталог») —
+  каталог `docs/` вне зоны записи dev-агента (`pipeline.config.yaml`), выполняется вне конвейера;
+  в зоне конвейера обязателен только `deploy/.env.example` (R-N3);
+- изменение `catalog.yaml` репозитория: спека расширяет **схему** каталога только необязательными полями
+  (R-P8), существующий файл остаётся валидным и не требует правок;
+- нагрузочный тест k6 на 30 000 VU (S-07), sticky-сессии, партиционирование аудита, CDN, HTTP/2-тюнинг;
+- отзыв ключей LiteLLM, доверие `X-Forwarded-For`, CORS — как и в I-1.
+
+### 9.3. Факты `[проверить]` и как они параметризованы
+
+| Факт требования | Решение спеки |
+|---|---|
+| GitLab MCP принимает OAuth-токен в `Authorization: Bearer` | Значение и имя заголовка берутся **только** из `credential_headers` каталога (`Authorization: "Bearer {{access_token}}"`); смена на `Private-Token` — правка каталога, кода не требует (R-P2) |
+| Atlassian MCP принимает OAuth-токен DC в `X-Atlassian-*-Personal-Token` | То же: имя и шаблон заголовка — из каталога (R-P2) |
+| Ротация refresh-токенов Jira/Confluence DC | Реализация не полагается на ротацию: новый `refresh_token` в ответе сохраняется, его отсутствие — не ошибка, прежний остаётся действующим (R-B6) |
+| Кэширование конфигурации клиентом при недоступности Hub (S-09) | Вне объёма I-3 |
+
+## 10. Настройки I-3 (R-T*)
+
+- **R-T1. Новые переменные.** Читаются тем же механизмом, что и в R-K1 (pydantic-settings). Переменные
+  с префиксом `HUB_` — часть `Settings`; переменные `KEYCLOAK_*` читаются без префикса `HUB_`
+  (явные псевдонимы имён окружения). Ни одна новая переменная не является обязательной безусловно —
+  окружение I-1 запускает Hub и в ревизии 2 (R-T3).
+
+  | Переменная | По умолчанию | Назначение |
+  |---|---|---|
+  | `HUB_WEB_AUTH` | `litellm` | Способ входа в веб-интерфейс: `keycloak` (OIDC) или `litellm` (CLI-SSO флоу I-1, временный) |
+  | `HUB_CONSENT` | `always` | `always` — экран прав при каждом `/oauth/authorize`; `remember` — повторно не показывать при совпадении сохранённого согласия |
+  | `HUB_OAUTH_ALLOWED_REDIRECTS` | `["http://127.0.0.1:*","http://localhost:*"]` | JSON-массив масок допустимых `redirect_uri` при DCR (`*` — любая последовательность символов) |
+  | `HUB_ACCESS_TOKEN_TTL` | `3600` | Срок жизни access-токена Hub, с |
+  | `HUB_REFRESH_TOKEN_TTL` | `2592000` | Срок жизни refresh-токена Hub, с (30 дней) |
+  | `HUB_AUTH_CODE_TTL` | `60` | Срок жизни кода авторизации, с |
+  | `HUB_OAUTH_TX_TTL` | `600` | Срок жизни транзакции `/oauth/authorize` в KV, с |
+  | `HUB_WEB_SESSION_TTL` | `28800` | Срок жизни веб-сессии пользователя, с |
+  | `HUB_RATE_LIMIT_REGISTER` | `10` | Регистраций клиента (`/oauth/register`) в 60 с на IP |
+  | `HUB_RATE_LIMIT_TOKEN` | `60` | Обращений к `/oauth/token` в 60 с на пару (`client_id`, IP) |
+  | `HUB_RATE_LIMIT_MCP` | `120` | Запросов к `/mcp/{alias}` в 60 с на пару (пользователь, alias) |
+  | `HUB_MAX_SSE_PER_USER` | `4` | Одновременных SSE-потоков на пользователя (по всем alias) |
+  | `HUB_MAX_BODY_BYTES` | `1048576` | Максимальный размер тела запроса к `/mcp/{alias}`, байт |
+  | `HUB_UPSTREAM_TIMEOUT` | `30.0` | Таймаут соединения и ожидания первого байта ответа upstream, с |
+  | `HUB_UPSTREAM_SSE_IDLE_TIMEOUT` | `300.0` | Таймаут бездействия внутри установленного SSE-потока, с |
+  | `HUB_UPSTREAM_IDLE_TTL` | `600` | Простой, после которого upstream-сессия считается закрытой (P-12), с |
+  | `HUB_CLIENT_SESSION_TTL` | `86400` | Срок жизни клиентской (виртуальной) MCP-сессии, с |
+  | `HUB_TOOLS_CACHE_TTL` | `300` | TTL кэша `tools/list`, с |
+  | `HUB_TOKEN_REFRESH_LEAD` | `300` | За сколько секунд до `expires_at` обновлять upstream-токен |
+  | `HUB_TOKEN_REFRESH_INTERVAL` | `60` | Период фоновой задачи обновления, с |
+  | `HUB_TOKEN_REFRESH_ENABLED` | `true` | Включение фоновой задачи обновления (в тестах отключается) |
+  | `HUB_CB_FAILURES` | `5` | Порог circuit-breaker: подряд идущих 5xx/таймаутов upstream |
+  | `HUB_CB_RESET` | `30` | Время «открытого» состояния circuit-breaker, с |
+  | `HUB_CONNECTION_CACHE_TTL` | `60` | TTL кэша подключения (права, срок токена) в KV, с |
+  | `HUB_DB_AUTO_MIGRATE` | `true` | Применять миграции при старте (R-M1) |
+  | `KEYCLOAK_ISSUER` | пусто | Issuer OIDC (обязателен при `HUB_WEB_AUTH=keycloak`) |
+  | `KEYCLOAK_CLIENT_ID` | `opencode-mcp-hub` | OIDC-клиент Hub |
+  | `KEYCLOAK_CLIENT_SECRET` | пусто | Секрет OIDC-клиента (обязателен при `HUB_WEB_AUTH=keycloak`) |
+  | `KEYCLOAK_SCOPES` | `openid profile email` | Запрашиваемые scope OIDC |
+  | `KEYCLOAK_JWKS_TTL` | `3600` | TTL кэша JWKS issuer'а, с |
+
+- **R-T2. Валидация.** Правила R-K2 распространяются на новые переменные:
+  - все `*_TTL`, `*_LIMIT`, `*_BYTES`, `HUB_CB_*`, `HUB_MAX_SSE_PER_USER`, `HUB_TOKEN_REFRESH_*`
+    (кроме `_ENABLED`) — целые/дробные > 0; иначе — ошибка старта с именем переменной;
+  - `HUB_WEB_AUTH ∈ {keycloak, litellm}`, `HUB_CONSENT ∈ {always, remember}` — иное значение — ошибка
+    старта с именем переменной и перечнем допустимых;
+  - `HUB_OAUTH_ALLOWED_REDIRECTS` — строка JSON, разбираемая в непустой массив непустых строк; иначе —
+    ошибка старта с именем переменной;
+  - при `HUB_WEB_AUTH=keycloak` обязательны `KEYCLOAK_ISSUER` и `KEYCLOAK_CLIENT_SECRET`: отсутствие
+    любой — ошибка старта, текст содержит имя переменной; при `HUB_WEB_AUTH=litellm` они не требуются;
+  - `HUB_SECRET_KEY` (подпись JWT Hub, HS256) и `HUB_ENCRYPTION_KEY` (Fernet, шифрование токенов систем)
+    в ревизии 2 действительно используются; требования к их формату — прежние (R-K1, R-K2).
+- **R-T3. Обратная совместимость.** Приложение, запущенное с окружением I-1 (четыре обязательные
+  переменные и валидный каталог, без единой новой переменной), стартует и обслуживает как эндпоинты I-1,
+  так и эндпоинты I-3 с дефолтами из таблицы R-T1. Дефолт `HUB_WEB_AUTH=litellm` выбран именно поэтому:
+  Keycloak-клиент — внешняя зависимость D-5, и её отсутствие не должно ломать старт.
+- **R-T4. Секреты.** Правило R-K3 расширяется: `KEYCLOAK_CLIENT_SECRET`, `client_secret` провайдеров,
+  токены целевых систем (access/refresh, в т.ч. в зашифрованном виде), refresh-токены Hub, коды
+  авторизации, идентификаторы веб-сессий и CSRF-токены, `code_verifier` — не попадают в логи,
+  `audit_log.details`, метрики, HTML-страницы, ответы `/api/*`, `/oauth/*` (кроме собственно выдачи
+  токена клиенту в теле `/oauth/token`), `/.well-known/*`, `/remote-config`.
+
+## 11. Hub как authorization server для facade-серверов (R-O*)
+
+Во всех правилах `<HUB>` — нормализованный `HUB_PUBLIC_URL`; `{alias}` — alias сервера каталога с
+`mode: facade`, который не `unconfigured`. Для неизвестного alias, `mode: native` и `unconfigured`
+серверов эндпоинты `/mcp/{alias}` и `/.well-known/oauth-protected-resource/mcp/{alias}` отвечают
+404 `{error:"not_found"}`.
+
+- **R-O1. Метаданные authorization server (P-01).** `GET /.well-known/oauth-authorization-server` и
+  `GET /.well-known/oauth-authorization-server/mcp/{alias}` (вариант с суффиксом пути ресурса) —
+  без аутентификации, `Cache-Control: public, max-age=300`, 200:
+
+  ```json
+  {"issuer": "<HUB>",
+   "authorization_endpoint": "<HUB>/oauth/authorize",
+   "token_endpoint": "<HUB>/oauth/token",
+   "registration_endpoint": "<HUB>/oauth/register",
+   "revocation_endpoint": "<HUB>/oauth/revoke",
+   "response_types_supported": ["code"],
+   "grant_types_supported": ["authorization_code", "refresh_token"],
+   "code_challenge_methods_supported": ["S256"],
+   "token_endpoint_auth_methods_supported": ["none"],
+   "revocation_endpoint_auth_methods_supported": ["none"],
+   "scopes_supported": ["<alias>:readonly", "<alias>:readwrite", …]}
+  ```
+
+  `scopes_supported` — объединение по всем видимым facade-серверам каталога в порядке файла:
+  для каждого — `<alias>:readonly`, затем `<alias>:readwrite`. Вариант с суффиксом отдаёт то же тело
+  (issuer общий), но 404, если alias неизвестен/не facade. Ответ не зависит от аутентификации и не
+  содержит секретов.
+- **R-O2. Метаданные защищённого ресурса (P-02).** `GET /.well-known/oauth-protected-resource/mcp/{alias}`
+  → 200 `{"resource":"<HUB>/mcp/{alias}", "authorization_servers":["<HUB>"],
+  "scopes_supported":["{alias}:readonly","{alias}:readwrite"], "bearer_methods_supported":["header"],
+  "resource_name":"<title сервера>", "resource_documentation":"<docs_url или null>"}`,
+  `Cache-Control: public, max-age=300`.
+  Любой запрос к `/mcp/{alias}` без заголовка `Authorization: Bearer` → 401
+  `{error:"unauthorized", message:"…", hint:"…"}` с заголовком
+  `WWW-Authenticate: Bearer resource_metadata="<HUB>/.well-known/oauth-protected-resource/mcp/{alias}"`.
+- **R-O3. Динамическая регистрация клиента (P-03).** `POST /oauth/register` (RFC 7591, публичный клиент),
+  без аутентификации, `Content-Type: application/json`:
+  - принимаются поля `redirect_uris` (обяз., непустой массив строк), `client_name` (опц., ≤ 128),
+    `grant_types` (опц., подмножество `["authorization_code","refresh_token"]`),
+    `response_types` (опц., только `["code"]`), `token_endpoint_auth_method` (опц., только `"none"`),
+    `scope` (опц.); прочие поля RFC 7591 принимаются и игнорируются;
+  - каждый `redirect_uri` проверяется: абсолютный URI без фрагмента; допустимы схемы `http` **только**
+    для loopback-хостов `127.0.0.1`/`localhost`/`[::1]` (любой порт) и `https`; кроме того, URI должен
+    совпасть хотя бы с одной маской `HUB_OAUTH_ALLOWED_REDIRECTS` (сравнение по маске с `*`, регистр
+    схемы и хоста не важен). Нарушение → 400 `{"error":"invalid_redirect_uri","error_description":"…"}`;
+  - иные нарушения метаданных (пустой `redirect_uris`, `token_endpoint_auth_method != none`,
+    `response_types != ["code"]`, `grant_types` вне списка) → 400
+    `{"error":"invalid_client_metadata","error_description":"…"}`;
+  - успех → 201 `{"client_id":"<uuid4-hex>", "client_id_issued_at":<unix>, "redirect_uris":[…],
+    "grant_types":["authorization_code","refresh_token"], "response_types":["code"],
+    "token_endpoint_auth_method":"none", "client_name":…}`; `client_secret` не выдаётся никогда;
+    запись в `oauth_clients` (R-M2), аудит `oauth_client_registered`;
+  - rate-limit `HUB_RATE_LIMIT_REGISTER` в 60 с на IP соединения → 429 `{error:"rate_limited"}`
+    с `Retry-After` (как R-L8).
+- **R-O4. `GET /oauth/authorize` — валидация (P-04).** Параметры: `response_type=code`, `client_id`,
+  `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `state` (опц., но возвращается как есть),
+  `scope` (опц.), `resource` (опц.). Порядок проверок:
+  1. `client_id` неизвестен, `redirect_uri` отсутствует или не принадлежит этому клиенту → **редирект не
+     выполняется**: 400 HTML-страница с русским текстом ошибки и кодом `invalid_client`/`invalid_redirect_uri`
+     (тело содержит `error=` в машиночитаемом виде в `<meta name="hub-error">`). Совпадение `redirect_uri`
+     со строкой регистрации — точное; для loopback-хостов допускается отличающийся порт при совпадении
+     схемы, хоста и пути (RFC 8252);
+  2. далее ошибки возвращаются редиректом на `redirect_uri` с `error`, `error_description`, `state`:
+     `unsupported_response_type` (`response_type != code`), `invalid_request` (нет `code_challenge`,
+     `code_challenge_method != S256`), `invalid_target` (`resource` не соответствует ни одному
+     facade-alias), `invalid_scope` (scope не из `scopes_supported` или относится к другому alias,
+     чем `resource`).
+- **R-O5. `GET /oauth/authorize` — alias, scope и веб-сессия (P-04).**
+  - alias определяется по `resource` (`<HUB>/mcp/{alias}`, сравнение после нормализации без завершающего
+    `/`); если `resource` не задан — по префиксу `scope` (`<alias>:…`); если не задано ни то, ни другое,
+    либо они указывают на разные alias — `invalid_request` (редирект по R-O4.2);
+  - scope: `<alias>:readonly` или `<alias>:readwrite`; не задан → `<alias>:readonly`;
+  - веб-сессия (R-W1): нет валидной cookie-сессии → 302 на `/auth/login?next=<исходный URL authorize>`;
+    после успешного входа пользователь возвращается на тот же URL и флоу продолжается;
+  - создаётся транзакция `oauthtx:<tx_id>` в KV с TTL `HUB_OAUTH_TX_TTL` (все параметры запроса,
+    `user_id`, alias, scope, шаг флоу). Истёкшая транзакция при возврате из целевой системы или с экрана
+    прав → 400 HTML «Сессия авторизации истекла, начните заново».
+- **R-O6. `GET /oauth/authorize` — подключение и экран прав (P-04).**
+  1. если у пользователя нет подключения к целевой системе для alias со статусом `connected` (или токен
+     непригоден и не обновляется — R-B5) → запускается OAuth целевой системы (R-B2) с возвратом в ту же
+     транзакцию; после успеха — шаг 2;
+  2. экран прав (R-W3): пресет `readonly` отмечен по умолчанию, галочки групп `permission_model`,
+     кнопки «Разрешить»/«Отмена». Выбор сохраняется в `connections` (`preset`, `groups`) и в `consents`;
+  3. `HUB_CONSENT=remember`: если для тройки (`user_id`, `client_id`, `alias`) есть сохранённое согласие
+     с тем же `scope`, экран не показывается и код выдаётся сразу; `HUB_CONSENT=always` — экран
+     показывается всегда;
+  4. «Отмена» → редирект на `redirect_uri` с `error=access_denied` и `state`.
+- **R-O7. Выдача кода (P-04).** Код — ≥ 32 байта случайности (urlsafe), хранится как sha256 в
+  `oauth_codes`, TTL `HUB_AUTH_CODE_TTL`, привязан к `client_id`, `redirect_uri`, `code_challenge`,
+  `scope`, `resource`, `user_id`, `connection_id`. Редирект 302 на `redirect_uri` с `code` и `state`
+  (`state` возвращается байт-в-байт; если не был передан — параметр отсутствует). Транзакция удаляется.
+  Аудит `oauth_code_issued`.
+- **R-O8. `POST /oauth/token` — `grant_type=authorization_code` (P-05).** Тело
+  `application/x-www-form-urlencoded`: `grant_type`, `code`, `code_verifier`, `redirect_uri`, `client_id`.
+  Аутентификация клиента не требуется и не принимается (`token_endpoint_auth_method: none`);
+  переданный `client_secret` игнорируется. Проверки и ошибки (все — 400 JSON, кроме `invalid_client` — 401):
+  - неизвестный `client_id` → `invalid_client`;
+  - код неизвестен, истёк или уже использован → `invalid_grant`; **повторное предъявление уже
+    использованного кода дополнительно отзывает всю цепочку токенов, выданных по этому коду** (R-O10);
+  - `client_id`/`redirect_uri` не совпадают с сохранёнными при выдаче кода → `invalid_grant`;
+  - `code_verifier` отсутствует или `BASE64URL(SHA256(code_verifier)) != code_challenge` → `invalid_grant`;
+  - успех → 200 `{"access_token":"<JWT>", "token_type":"Bearer", "expires_in":<HUB_ACCESS_TOKEN_TTL>,
+    "refresh_token":"<opaque>", "scope":"<alias>:<preset>"}`, заголовки `Cache-Control: no-store`,
+    `Pragma: no-cache`; код помечается использованным; аудит `oauth_token_issued`
+    (details: `client_id`, `alias`, `grant`, без значений токенов).
+- **R-O9. Формат токенов Hub (P-05).** Access-токен — JWT, `alg: HS256`, ключ `HUB_SECRET_KEY`,
+  claims: `iss` = `<HUB>`, `sub` = `user_id`, `aud` = `<HUB>/mcp/{alias}`, `scope`, `cid` = id подключения,
+  `client_id`, `jti` (uuid4-hex), `iat`, `exp` = `iat + HUB_ACCESS_TOKEN_TTL`. Refresh-токен — непрозрачная
+  строка ≥ 32 байт случайности (urlsafe), в БД хранится только sha256; срок — `HUB_REFRESH_TOKEN_TTL`.
+  Ни один токен не хранится в БД в открытом виде.
+- **R-O10. `grant_type=refresh_token`, ротация и отзыв цепочки (P-05).**
+  - Тело: `grant_type=refresh_token`, `refresh_token`, `client_id`, опц. `scope` (только сужение до
+    `<alias>:readonly`; расширение → `invalid_scope`).
+  - Успех → новая пара (новый access + новый refresh); предъявленный refresh переводится в состояние
+    `rotated` и больше не принимается; новый принадлежит той же цепочке (`chain_id`), срок цепочки
+    отсчитывается от первой выдачи и не продлевается сверх `HUB_REFRESH_TOKEN_TTL`.
+  - Предъявление refresh в состоянии `rotated`/`revoked` (повторное использование) → 400 `invalid_grant`
+    **и отзыв всей цепочки**: все refresh цепочки → `revoked`, все выданные по ней access-токены с ещё
+    не истёкшим `exp` заносятся в denylist KV (`jtiden:<jti>` с TTL до `exp`); аудит
+    `oauth_refresh_reuse_detected`. Последующие запросы `/mcp/{alias}` с этими access-токенами → 401.
+  - Истёкший refresh → `invalid_grant`; refresh, выданный другому `client_id`, → `invalid_grant`.
+  - Rate-limit `HUB_RATE_LIMIT_TOKEN` на пару (`client_id`, IP) → 429 `{error:"rate_limited"}` + `Retry-After`.
+- **R-O11. `POST /oauth/revoke` (P-06).** Тело: `token`, опц. `token_type_hint`, опц. `client_id`.
+  Ответ всегда 200 с пустым JSON-объектом `{}` (в т.ч. для неизвестного токена — RFC 7009);
+  отсутствие параметра `token` → 400 `invalid_request`. Отзыв refresh-токена отзывает всю его цепочку
+  и заносит все связанные `jti` в denylist; отзыв access-токена заносит его `jti` в denylist до `exp`
+  и отзывает цепочку refresh, выданную вместе с ним. Аудит `oauth_token_revoked`.
+- **R-O12. Проверка access-токена на горячем пути без БД (P-07).** Для `/mcp/{alias}`:
+  подпись HS256 → `exp` (с допуском 0 с) → `aud` == `<HUB>/mcp/{alias}` → `jti` отсутствует в denylist KV.
+  Ошибки: невалидная подпись/формат, истёкший, отозванный (`jti` в denylist) → 401
+  `{error:"unauthorized"}` + `WWW-Authenticate: Bearer resource_metadata="…", error="invalid_token"`;
+  валидный токен с чужим `aud` → 403 `{error:"forbidden"}`. Данные подключения (статус, права,
+  `expires_at` upstream-токена) читаются из KV-кэша `conn:<user_id>:<alias>` (TTL
+  `HUB_CONNECTION_CACHE_TTL`), который наполняется из БД при промахе и инвалидируется при любом изменении
+  подключения (смена прав, обновление токена, `needs_reauth`, отключение). Обращений к БД на успешном
+  горячем пути при попадании в кэш нет. Подключение с `cid` отсутствует или принадлежит другому
+  пользователю → 401.
+- **R-O13. Формат ошибок OAuth и общие правила.** Все ответы `/oauth/token`, `/oauth/register`,
+  `/oauth/revoke` — JSON RFC 6749/7591 `{"error":"…","error_description":"<русский текст>"}` (поле
+  `error_description` обязательно для 4xx), `Cache-Control: no-store`. Формат `{error, message}` из R-A7
+  здесь не применяется; на остальных маршрутах Hub он сохраняется. Заголовок `X-Content-Type-Options:
+  nosniff` и `X-Request-ID` (R-S4) присутствуют и здесь.
+
+## 12. Брокер токенов целевых систем (R-B*)
+
+- **R-B1. Провайдер из каталога (P-08).** Параметры OAuth целевой системы берутся только из
+  `catalog.yaml` (`auth`): `authorize_url`, `token_url`, `revoke_url` (опц.), `client_id`, `client_secret`
+  (`Secret`/`EnvRef`, читается лениво), `pkce`, `scopes.readonly|readwrite`. Реализация — общий клиент
+  `authorization_code` (confidential, `client_secret_post`), с PKCE S256 при `pkce: true`.
+  Запрашиваемые scope = `scopes[<пресет>]`, соединённые пробелом (GitLab: `read_api read_user
+  read_repository` / `api read_user`; Jira/Confluence DC: `READ` / `WRITE`).
+  Отсутствие переменной окружения для `client_secret`/`client_id` в момент использования → ошибка
+  подключения: пользователю — страница/JSON `{error:"server_unconfigured"}`, в лог — имя переменной
+  без значения.
+- **R-B2. OAuth целевой системы и `/oauth/callback/{alias}` (P-04, P-08).** Callback фиксирован:
+  `<HUB>/oauth/callback/{alias}` (совпадает с D-2/D-3). Hub генерирует `state` (≥ 32 байта случайности),
+  связывает его с транзакцией (`oauthstate:<state>` → `tx_id`, TTL транзакции), при `pkce: true`
+  генерирует `code_verifier`/`code_challenge` и хранит verifier в транзакции. Проверки в callback:
+  - `state` отсутствует/неизвестен/истёк/уже использован → 400 HTML + машинный код `invalid_state`;
+  - параметр `error` от системы → страница с русским пояснением и кнопкой «Повторить», транзакция
+    завершается; если authorize-транзакция принадлежала клиенту MCP — редирект на его `redirect_uri`
+    с `error=access_denied`;
+  - `state` принадлежит другому пользователю (веб-сессия сменилась) → 400 `invalid_state`;
+  - успех → обмен `code` на токены на `token_url` (с `client_secret`, `redirect_uri`, `code_verifier`);
+    ошибка обмена (4xx/5xx/сеть/невалидное тело) → 502 HTML/JSON `upstream_auth_failed`, токены не
+    сохраняются, транзакция остаётся живой до TTL.
+- **R-B3. Сохранение токенов (P-08).** Успешный обмен → upsert `connections` (`status: connected`,
+  `preset`, `groups`, `revision += 1`) и `upstream_tokens`: `access_token_enc`, `refresh_token_enc`
+  (если выдан), `expires_at` (= now + `expires_in`, если задан; иначе `NULL`), `scopes`, `token_type`,
+  `obtained_at`. Шифрование — Fernet (AES-128-CBC + HMAC-SHA256) ключом `HUB_ENCRYPTION_KEY`; в БД
+  открытых значений токенов нет. Кэш `conn:<user_id>:<alias>` инвалидируется. Аудит `connection_connected`.
+- **R-B4. Обновление токенов (P-09).** Токен считается пригодным, если `expires_at` пуст или
+  `expires_at − now > 0`.
+  - Фоновая задача (при `HUB_TOKEN_REFRESH_ENABLED=true`, период `HUB_TOKEN_REFRESH_INTERVAL`) обновляет
+    подключения, у которых `expires_at − now ≤ HUB_TOKEN_REFRESH_LEAD` и есть `refresh_token`.
+  - «По требованию»: 401 от upstream MCP или истёкший токен перед вызовом → синхронное обновление, после
+    успеха исходный запрос к upstream повторяется **ровно один раз** с новым токеном.
+  - Гонки: обновление выполняется под блокировкой `refreshlock:<connection_id>` в KV (атомарный
+    set-if-absent, TTL 30 с). Не захвативший блокировку ждёт до 5 с, перечитывает подключение и использует
+    обновлённый токен; если за это время токен не обновился — отвечает как при провале (R-B5).
+  - Успех → новые значения зашифрованы, `last_refresh_at`, инвалидация кэша, аудит `connection_refreshed`.
+- **R-B5. Провал обновления → `needs_reauth` (P-09).** Провал (ошибка `invalid_grant`/4xx от системы,
+  отсутствие `refresh_token` при истёкшем access, исчерпание попыток при 5xx/сети) переводит подключение
+  в `status: needs_reauth` с `needs_reauth_reason`, инвалидирует кэш, пишет аудит
+  `connection_needs_reauth`. При этом:
+  - access/refresh-токены Hub, выданные клиенту, **остаются валидными** и не отзываются;
+  - вызовы `/mcp/{alias}` отвечают JSON-RPC ошибкой `-32002` с русским `message` и
+    `data.hint_url = <HUB>/ui/servers/{alias}`;
+  - повторная авторизация (пользователь проходит `/oauth/authorize` тем же клиентом или нажимает
+    «Переподключить» на странице) восстанавливает подключение **без новой регистрации клиента (DCR)**;
+    после восстановления прежние access-токены клиента снова работают (тот же `cid`).
+- **R-B6. Ротация refresh целевой системы (факт `[проверить]`).** Если ответ `token_url` содержит новый
+  `refresh_token` — сохраняется он; если не содержит — сохраняется прежний, и это не ошибка. Если система
+  ответила `invalid_grant` на использование refresh — см. R-B5.
+- **R-B7. Смена прав (P-10).** `PUT /api/me/connections/{alias}/permissions` с телом
+  `{preset: "readonly"|"readwrite", groups: [id, …]}`:
+  - неизвестный alias/не facade → 404; чужое подключение недоступно (доступ только к своим);
+  - неизвестный `id` группы или группа с `preset: none` в списке → 400 `invalid_request`;
+  - при `preset: readonly` группы с `preset: readwrite` в набор не включаются, даже если переданы;
+  - успех → 200 `{alias, status, preset, groups}`, `revision += 1`, инвалидация кэша подключения и кэша
+    `tools/list`; **следующий** MCP-вызов уходит на upstream с новым заголовком групп, переподключение
+    не требуется; аудит `connection_permissions_changed`;
+  - если новый пресет требует scope целевой системы шире выданных (`readonly → readwrite`), подключение
+    переводится в `needs_reauth` с пояснением «нужно заново разрешить доступ в <система>», 200 с
+    `status: "needs_reauth"`; фактические права применяются после повторного OAuth системы.
+- **R-B8. Отключение и переподключение (P-06, P-16).** `DELETE /api/me/connections/{alias}`:
+  best-effort `POST revoke_url` (если задан в каталоге; ошибка отзыва не блокирует), удаление
+  `upstream_tokens`, `connections.status = not_connected` (или удаление строки — эквивалентно для
+  `/api/catalog`), отзыв **всех** клиентских токенов Hub этого подключения (цепочки refresh → `revoked`,
+  их access `jti` → denylist), инвалидация кэшей, аудит `connection_disconnected`. После этого
+  `/mcp/{alias}` с прежним токеном → 401, `/remote-config` не содержит alias.
+- **R-B9. Токены систем не выходят наружу (P-08).** Значения upstream-токенов не появляются в ответах
+  `/api/*`, `/oauth/*`, HTML-страницах, `/metrics`, логах и `audit_log.details`; наружу отдаются только
+  производные признаки (`status`, `preset`, `groups`, `updated_at`, при необходимости `expires_at`).
+
+## 13. MCP-proxy (R-P*)
+
+- **R-P1. Маршруты и доступ (P-11).** `POST /mcp/{alias}`, `GET /mcp/{alias}`, `DELETE /mcp/{alias}`.
+  Аутентификация — только access-токен Hub (R-O12); ключ LiteLLM здесь не принимается. Порядок проверок:
+  alias существует, `mode: facade`, не `unconfigured` (иначе 404) → токен (401/403 по R-O12) → лимит
+  тела (413) → rate-limit (429) → статус подключения (R-P11) → circuit-breaker (R-P10) → проксирование.
+- **R-P2. Заголовки запроса к upstream (P-11).** К `upstream_url` сервера передаются:
+  - тело запроса без изменений (байт-в-байт), метод — тот же;
+  - проброшенные заголовки клиента: `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Last-Event-ID`,
+    `Accept-Encoding`;
+  - `Mcp-Session-Id` — **upstream-идентификатор** из мэппинга (R-P4), а не клиентский;
+  - `credential_headers` каталога: в значении шаблон `{{access_token}}` заменяется на расшифрованный
+    access-токен целевой системы; значения-ссылки `env:VAR` — на значение переменной окружения; иные
+    вхождения `{{…}}` — ошибка каталога (R-C1);
+  - `static_headers` каталога (после подстановки `env:VAR`);
+  - заголовок групп: имя — `permission_model.header` (`Enabled-Groups`), значение — идентификаторы через
+    запятую без пробелов: сначала все `always` в порядке каталога, затем выбранные пользователем группы
+    в порядке каталога, без дублей. Группы с `preset: none` не включаются никогда; при `preset: readonly`
+    подключения группы с `preset: readwrite` не включаются. Для `permission_model.kind != header_groups`
+    заголовок не добавляется;
+  - удаляются заголовки клиента: `Authorization`, `Cookie`, `X-Forwarded-*`, `Host`, а также любые
+    заголовки, имена которых совпадают с `credential_headers`/`static_headers`/заголовком групп.
+- **R-P3. Потоковость и таймауты (P-11).** Ответ upstream передаётся клиенту потоково, без буферизации
+  тела: `Content-Type` (в т.ч. `text/event-stream`), `Cache-Control`, `Last-Event-ID`-совместимые данные
+  и код статуса сохраняются; события SSE доходят до клиента по мере поступления (Hub не ждёт конца
+  потока). Таймаут соединения и первого байта — `HUB_UPSTREAM_TIMEOUT`; для установленного SSE-потока
+  действует таймаут бездействия `HUB_UPSTREAM_SSE_IDLE_TIMEOUT`; превышение → поток закрывается,
+  в лог — `upstream_timeout`, клиенту (если ответ ещё не начат) — 502 с JSON-RPC `-32004`.
+  Заголовок upstream `Mcp-Session-Id` клиенту не пересылается (см. R-P4).
+- **R-P4. Виртуализация сессий (P-12).** Идентификатор сессии, который видит клиент, выдаёт Hub:
+  - при успешном ответе upstream на `initialize` Hub создаёт `client_session_id` (uuid4-hex), запись
+    `mcpsess:<client_session_id>` в KV (`user_id`, `alias`, `connection_id`, `upstream_session_id`,
+    `protocol_version`, `client_info`, `upstream_last_used_at`) с TTL `HUB_CLIENT_SESSION_TTL`,
+    и возвращает клиенту заголовок `Mcp-Session-Id: <client_session_id>`;
+  - при последующих запросах клиентский `Mcp-Session-Id` заменяется на `upstream_session_id`;
+    TTL записи и `upstream_last_used_at` продлеваются;
+  - запись хранится только в KV (реплики Hub без sticky-сессий); запись принадлежит пользователю —
+    `Mcp-Session-Id` чужого пользователя или другого alias трактуется как неизвестный;
+  - неизвестный/истёкший `client_session_id` → 404 с JSON-RPC ошибкой `-32000` и текстом «Сессия не
+    найдена, выполните initialize» (клиент по протоколу MCP переинициализируется).
+- **R-P5. Пересоздание upstream-сессии (P-12).** Upstream-сессия считается закрытой, если
+  `now − upstream_last_used_at > HUB_UPSTREAM_IDLE_TTL`, либо upstream ответил 404 / ошибкой
+  «неизвестная сессия» на запрос с `Mcp-Session-Id`. В этом случае Hub прозрачно:
+  1. (best-effort) шлёт `DELETE` на upstream со старым `Mcp-Session-Id`;
+  2. повторяет `initialize` с сохранёнными `protocolVersion` и `clientInfo` и уведомление
+     `notifications/initialized`, получает новый `upstream_session_id`;
+  3. повторяет исходный запрос — **ровно один раз**; клиент получает обычный ответ и **тот же**
+     `Mcp-Session-Id`, что и раньше.
+  Повторная ошибка после пересоздания → 502 + JSON-RPC `-32004`. Аудит/лог `upstream_session_recreated`.
+- **R-P6. `DELETE /mcp/{alias}` (P-11).** Закрывает upstream-сессию (DELETE на upstream с
+  `upstream_session_id`) и удаляет запись `mcpsess:*`; клиенту — статус upstream (или 204, если upstream
+  ответил ошибкой закрытия). Повторный запрос с тем же клиентским `Mcp-Session-Id` → 404 (R-P4).
+- **R-P7. Кэш `tools/list` (P-13).** Ответ на JSON-RPC метод `tools/list` **без** параметра `cursor`
+  кэшируется в KV под ключом `toolscache:<alias>:<catalog_version>:<sha256(preset|groups)>` на
+  `HUB_TOOLS_CACHE_TTL`. Кэшируется результат **до** фильтрации (фильтр применяется при каждой отдаче).
+  Попадание в кэш → upstream не вызывается, клиенту отдаётся `application/json` c `id` из запроса.
+  Кэш инвалидируется при смене прав (R-B7), перезагрузке каталога (R-C4) и по TTL; запросы с `cursor`
+  и вызовы в рамках SSE-ответа не кэшируются.
+- **R-P8. Фильтр инструментов (P-13).** Схема каталога расширяется **необязательными** полями
+  (существующий `catalog.yaml` остаётся валидным; отсутствие полей = фильтр не применяется):
+  - `permission_model` вида `header_groups`: `tool_filter: {allow: [маска, …], deny: [маска, …]}` (опц.)
+    и у каждой группы — `tools: [маска, …]` (опц.);
+  - `permission_model` вида `tool_filter`: как в I-1, `presets.<пресет>.tools` — allow-маски.
+
+  Маска — шаблон `fnmatch` (`*`, `?`, `[…]`), регистр важен. Итоговые наборы для пользователя:
+  `allow` = `tool_filter.allow` ∪ `tools` всех включённых групп (`always` + выбранные); если оба источника
+  пусты — `allow = ["*"]`. `deny` = `tool_filter.deny`. Инструмент доступен, если совпал хотя бы с одной
+  маской `allow` и **ни с одной** маской `deny` (deny приоритетнее).
+  - В ответе `tools/list` недоступные инструменты удаляются (в т.ч. в SSE-ответе upstream);
+  - `tools/call` недоступного (или отсутствующего в отфильтрованном списке) инструмента → запрос на
+    upstream **не отправляется**, ответ 200 с JSON-RPC ошибкой
+    `{"code":-32001,"message":"Инструмент <name> недоступен с текущими правами",
+    "data":{"hint_url":"<HUB>/ui/servers/{alias}","tool":"<name>"}}`;
+  - если тело — batch (JSON-массив), проверяются все элементы; при наличии хотя бы одного запрещённого
+    `tools/call` весь запрос отклоняется одним JSON-RPC error `-32001` с `id` первого запрещённого
+    элемента, upstream не вызывается.
+- **R-P9. Лимиты (P-14).** На пару (пользователь, alias) — `HUB_RATE_LIMIT_MCP` запросов в 60 с
+  (скользящее окно, KV): превышение → 429 `Retry-After` и тело JSON-RPC error `-32003` («Слишком много
+  запросов»). Одновременных SSE-потоков на пользователя (по всем alias) — не более
+  `HUB_MAX_SSE_PER_USER`: превышение → 429 с JSON-RPC `-32003` и `data.reason:"too_many_streams"`;
+  счётчик уменьшается при завершении/разрыве потока (в т.ч. при ошибке). Тело запроса больше
+  `HUB_MAX_BODY_BYTES` (по `Content-Length` или фактически прочитанным байтам) → 413
+  `{error:"payload_too_large"}`, upstream не вызывается.
+- **R-P10. Circuit-breaker (P-14).** На alias: `HUB_CB_FAILURES` подряд идущих ошибок upstream
+  (5xx, таймаут, сетевая ошибка) переводят выключатель в открытое состояние на `HUB_CB_RESET` секунд
+  (состояние в KV `cb:<alias>`, общее для реплик). В открытом состоянии запросы к upstream не идут:
+  ответ 503 + JSON-RPC `-32004` `upstream_unavailable` с `data.hint_url` и `Retry-After`. По истечении
+  `HUB_CB_RESET` пропускается один пробный запрос: успех → счётчик сбрасывается и выключатель
+  закрывается; ошибка → окно открывается снова. Успешный ответ обнуляет счётчик ошибок.
+- **R-P11. Ошибки, понятные клиенту (P-15).** Все ошибки Hub на `/mcp/{alias}` для запросов с JSON-RPC
+  телом отдаются как JSON-RPC error (`jsonrpc: "2.0"`, `id` из запроса или `null`) с русским `message` и
+  `data.hint_url`:
+
+  | Ситуация | HTTP | JSON-RPC `code` | `data` |
+  |---|---|---|---|
+  | Нет токена / невалидный / истёкший / отозванный | 401 (+`WWW-Authenticate`) | — (тело `{error:"unauthorized"}`) | — |
+  | Токен для другого alias (`aud`) | 403 | — (`{error:"forbidden"}`) | — |
+  | Подключение `not_connected` | 200 | `-32002` | `hint_url`, `reason:"not_connected"` |
+  | Подключение `needs_reauth` | 200 | `-32002` | `hint_url`, `reason:"needs_reauth"` |
+  | Нет прав / скрытый инструмент | 200 | `-32001` | `hint_url`, `tool` |
+  | Превышен лимит | 429 (+`Retry-After`) | `-32003` | `retry_after` |
+  | Upstream недоступен / таймаут / circuit-breaker | 502 (503 при открытом выключателе) | `-32004` | `hint_url` |
+  | Неизвестная сессия | 404 | `-32000` | — |
+  | Тело больше лимита | 413 | — (`{error:"payload_too_large"}`) | — |
+
+  Для `GET`/`DELETE` (без JSON-RPC тела) те же ситуации отдаются JSON-объектом `{error, message, hint_url}`
+  c тем же HTTP-статусом. Ответы upstream (в т.ч. его собственные JSON-RPC ошибки) не переписываются.
+
+## 14. Веб-интерфейс Hub (R-W*)
+
+- **R-W1. Веб-сессия и вход через OIDC (P-16).** `GET /auth/login?next=<путь>`:
+  - при `HUB_WEB_AUTH=keycloak` — 302 на `KEYCLOAK_ISSUER` `authorization_endpoint` (берётся из
+    `/.well-known/openid-configuration` issuer'а, кэш JWKS/метаданных `KEYCLOAK_JWKS_TTL`) с
+    `client_id`, `redirect_uri=<HUB>/auth/callback`, `response_type=code`, `scope=KEYCLOAK_SCOPES`,
+    `state`, `nonce`, PKCE S256;
+  - `GET /auth/callback`: неизвестный/повторный/истёкший `state` → 400; ошибка провайдера → 400 с русским
+    текстом; успех → обмен кода на токены, проверка `id_token` (подпись по JWKS issuer'а, `iss`, `aud`,
+    `exp`, `nonce`) — нарушение любой проверки → 400, сессия не создаётся;
+  - `user_id` = первый непустой из claims `preferred_username`, `email`, `sub`; `email` = claim `email`;
+    выполняется upsert `users` (как R-L5, без создания `api_keys`);
+  - создаётся веб-сессия: строка ≥ 32 байта случайности, в БД (`sessions`) хранится sha256, cookie
+    `hub_session` — `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` (если `HUB_PUBLIC_URL` начинается с
+    `https`), срок `HUB_WEB_SESSION_TTL`; редирект на `next` (только относительный путь внутри Hub;
+    внешний/абсолютный `next` заменяется на `/ui/connections`);
+  - `POST /auth/logout` (CSRF-токен обязателен) удаляет сессию и cookie.
+- **R-W2. Временный режим `HUB_WEB_AUTH=litellm` (P-16).** Страница `/auth/login` показывает тот же экран
+  входа; внутри выполняется CLI-SSO флоу I-1: Hub создаёт сессию входа (R-L1), показывает ссылку/кнопку
+  на `browser_url` и код `user_code`, страница опрашивает Hub (HTMX) до `ready` (R-L2, R-L3, включая
+  экран выбора команды при двух и более командах). По `ready` Hub создаёт веб-сессию (R-W1) для того же
+  `user_id`, сохраняет ключ (R-L5) и перенаправляет на `next`. Отличий в поведении последующих страниц нет.
+- **R-W3. Экран прав (P-04, P-16).** `GET /oauth/authorize` при необходимости согласия отдаёт HTML:
+  название и описание сервера, имя клиента (`client_name` или `client_id`), запрошенный scope,
+  переключатель пресета (`Только чтение` отмечен по умолчанию), галочки групп `permission_model` с
+  русскими `title` из каталога (группы с `preset: none` не показываются; группы `always` показаны
+  включёнными и неизменяемыми), кнопки «Разрешить» и «Отмена». Отправка — `POST /oauth/consent`
+  (`tx`, CSRF-токен, `preset`, `groups[]`, `action`): неизвестная/истёкшая транзакция → 400;
+  чужая транзакция (другая веб-сессия) → 403; `action=deny` → редирект с `error=access_denied`;
+  `action=allow` → сохранение прав в `connections`/`consents` и выдача кода (R-O7).
+- **R-W4. «Мои подключения» (P-16).** `GET /ui/connections` (веб-сессия обязательна, иначе редирект на
+  вход): список видимых пользователю серверов каталога со статусом (`Не подключён`, `Подключён`,
+  `Нужна повторная авторизация`), текущим пресетом и группами, кнопками «Отключить»
+  (`DELETE /api/me/connections/{alias}`) и «Переподключить» (переход на флоу подключения). Отображаются
+  только подключения текущего пользователя.
+- **R-W5. Карточка сервера (P-16).** `GET /ui/servers/{alias}` (веб-сессия обязательна): `title`,
+  `description`, `owner`, `contact`, `docs_url`, `status`, режим, адрес для клиента
+  (`<HUB>/mcp/{alias}` для facade), статус подключения и полный список групп прав с возможностью
+  изменить их (`PUT /api/me/connections/{alias}/permissions`). Это страница, на которую указывает
+  `data.hint_url` в JSON-RPC ошибках (R-P11). Неизвестный, `unconfigured` или невидимый пользователю
+  alias → 404 (HTML).
+- **R-W6. Общие правила страниц (P-16).** Шаблоны Jinja2, интерактивность — HTMX, весь текст на русском,
+  `Content-Type: text/html; charset=utf-8`, `Cache-Control: private, no-store`. Для всех небезопасных
+  методов при аутентификации по cookie обязателен CSRF-токен (скрытое поле формы или заголовок
+  `X-CSRF-Token`), привязанный к веб-сессии: отсутствие/несовпадение → 403 `{error:"forbidden"}`.
+  Эндпоинты `/api/me/*` принимают **либо** Bearer-ключ LiteLLM (R-L6), **либо** веб-сессию с CSRF;
+  прочие правила R-A7 сохраняются. HTML не содержит токенов, секретов и внутренних URL (`upstream_url`).
+
+## 15. Модель данных и миграции (R-M*)
+
+- **R-M1. Миграции: Alembic (решение).** `create_all` заменяется на Alembic. Каталог версий —
+  внутри пакета (`src/hub/migrations/`, `script_location` задаётся программно через `alembic.config.Config`,
+  файл `alembic.ini` в корне не требуется — корень вне зоны записи dev-агента). Базовая ревизия
+  повторяет схему I-1 (`users`, `api_keys`, `connections`, `audit_log`), следующая добавляет объекты I-3.
+  При `HUB_DB_AUTO_MIGRATE=true` (дефолт) миграции применяются при старте (lifespan) до обслуживания
+  запросов — поведение AC-65 сохраняется. CLI: `mcp-hub db upgrade [--revision head]`,
+  `mcp-hub db current` (печатает текущую ревизию, код 0). Ошибка миграции → приложение не поднимается,
+  сообщение содержит имя ревизии.
+- **R-M2. Новые таблицы.**
+
+  | Таблица | Поля |
+  |---|---|
+  | `oauth_clients` | `id` PK; `client_id` TEXT UNIQUE; `client_name` TEXT NULL; `redirect_uris` JSON; `grant_types` JSON; `response_types` JSON; `token_endpoint_auth_method` TEXT (`none`); `scope` TEXT NULL; `created_at`; `created_ip` TEXT NULL; `last_used_at` DATETIME NULL |
+  | `oauth_codes` | `id` PK; `code_sha256` TEXT UNIQUE (индекс); `client_id` TEXT (индекс); `user_id` FK→users; `alias` TEXT; `connection_id` FK→connections NULL; `redirect_uri` TEXT; `code_challenge` TEXT; `code_challenge_method` TEXT (`S256`); `scope` TEXT; `resource` TEXT; `created_at`; `expires_at`; `used_at` DATETIME NULL |
+  | `refresh_tokens` | `id` PK; `token_sha256` TEXT UNIQUE (индекс); `chain_id` TEXT (индекс); `parent_id` INTEGER NULL; `client_id` TEXT; `user_id` FK→users; `connection_id` FK→connections; `alias` TEXT; `scope` TEXT; `access_jti` TEXT NULL; `access_exp` DATETIME NULL; `status` TEXT (`active`\|`rotated`\|`revoked`); `created_at`; `expires_at`; `used_at` DATETIME NULL |
+  | `upstream_tokens` | `id` PK; `connection_id` FK→connections UNIQUE; `access_token_enc` TEXT; `refresh_token_enc` TEXT NULL; `token_type` TEXT; `scopes` JSON; `expires_at` DATETIME NULL; `obtained_at`; `updated_at`; `refresh_failed_at` DATETIME NULL; `last_error` TEXT NULL (код ошибки, без секретов) |
+  | `sessions` | `id` PK; `session_sha256` TEXT UNIQUE (индекс); `csrf_sha256` TEXT; `user_id` FK→users (индекс); `auth_method` TEXT (`keycloak`\|`litellm`); `created_at`; `expires_at` |
+  | `consents` | `id` PK; `user_id` FK→users; `client_id` TEXT; `alias` TEXT; `scope` TEXT; `preset` TEXT; `groups` JSON; `created_at`; `updated_at`; UNIQUE(`user_id`,`client_id`,`alias`) |
+
+- **R-M3. Изменения существующих таблиц.** `connections` дополняется: `needs_reauth_reason` TEXT NULL;
+  `last_refresh_at` DATETIME NULL; `revision` INTEGER NOT NULL DEFAULT 0 (инкремент при любом изменении
+  прав/статуса — используется как часть ключей кэша); `provider_account` TEXT NULL (идентификатор
+  пользователя в целевой системе, если система его вернула). Существующие поля и уникальность
+  (`user_id`, `alias`) сохраняются; допустимые значения `status` — `not_connected` | `connected` |
+  `needs_reauth` (как в I-1). Таблицы `users`, `api_keys`, `audit_log` не меняются.
+- **R-M4. KeyValueStore.** Протокол `KeyValueStore` (R-S2) расширяется атомарными операциями:
+  `set_if_absent(key, value, ttl) -> bool` (блокировки), `incr(key, delta, ttl) -> int` /
+  `decr(key, delta) -> int` (счётчик SSE-потоков); обе реализации (in-memory и Redis — через `SET NX PX`
+  и Lua/`INCRBY`) их поддерживают. Ключи ревизии 2:
+
+  | Ключ | Значение | TTL |
+  |---|---|---|
+  | `oauthtx:<tx_id>` | параметры `/oauth/authorize`, `user_id`, alias, scope, шаг флоу, `provider_state`, `provider_verifier` | `HUB_OAUTH_TX_TTL` |
+  | `oauthstate:<state>` | `tx_id` (для `/oauth/callback/{alias}`) | `HUB_OAUTH_TX_TTL` |
+  | `jtiden:<jti>` | `1` (denylist отозванных access-токенов) | до `exp` токена |
+  | `conn:<user_id>:<alias>` | `{connection_id, status, preset, groups, revision, token_expires_at}` | `HUB_CONNECTION_CACHE_TTL` |
+  | `mcpsess:<client_session_id>` | `{user_id, alias, connection_id, upstream_session_id, protocol_version, client_info, upstream_last_used_at}` | `HUB_CLIENT_SESSION_TTL` |
+  | `toolscache:<alias>:<catalog_version>:<hash прав>` | результат `tools/list` до фильтрации | `HUB_TOOLS_CACHE_TTL` |
+  | `refreshlock:<connection_id>` | владелец блокировки | 30 с |
+  | `cb:<alias>` | `{failures, open_until}` | `HUB_CB_RESET` × 2 |
+  | `sse:<user_id>` | счётчик активных SSE-потоков | 1 ч (обновляется) |
+  | `rl:mcp:<user_id>:<alias>`, `rl:register:<ip>`, `rl:token:<client_id>:<ip>` | окна rate-limit | 60 с |
+  | `oidc:jwks:<issuer>`, `oidc:meta:<issuer>` | JWKS и метаданные OIDC | `KEYCLOAK_JWKS_TTL` |
+
+- **R-M5. Совместимость с БД I-1.** Если в БД уже есть таблицы I-1, созданные `create_all`, и нет таблицы
+  `alembic_version` — при старте (или `mcp-hub db upgrade`) Hub помечает БД базовой ревизией (`stamp`)
+  и применяет последующие миграции; данные `users`, `api_keys`, `connections`, `audit_log` сохраняются.
+  На пустой БД применяются все ревизии подряд. Повторный запуск — идемпотентен.
+
+## 16. Наблюдаемость, эксплуатация, тесты (R-N*)
+
+- **R-N1. Метрики (P-14).** К метрикам R-S4 добавляются:
+  `hub_mcp_requests_total{alias,method,status}` (counter), `hub_mcp_request_duration_seconds{alias}`
+  (histogram, даёт p50/p95), `hub_upstream_sessions_active{alias}` (gauge, по записям `mcpsess:*`),
+  `hub_upstream_errors_total{alias,kind}` (`kind ∈ {timeout, http_5xx, network, circuit_open}`),
+  `hub_oauth_tokens_issued_total{grant}` (`grant ∈ {authorization_code, refresh_token}`),
+  `hub_token_refresh_total{alias,result}` (`result ∈ {ok, failed}`). Значения токенов, `user_id` и другие
+  персональные данные в лейблы не попадают.
+- **R-N2. Аудит (P-06, P-09).** Новые действия в `audit_log`: `oauth_client_registered`,
+  `oauth_code_issued`, `oauth_token_issued`, `oauth_token_revoked`, `oauth_refresh_reuse_detected`,
+  `connection_connected`, `connection_refreshed`, `connection_needs_reauth`,
+  `connection_permissions_changed`, `connection_disconnected`, `web_login`. `details` содержит только
+  несекретные поля (`client_id`, `alias`, `grant`, `preset`, `groups`, `reason`, код ошибки); значения
+  токенов, кодов, `code_verifier`, секретов — никогда (R-T4). Отдельные MCP-вызовы в аудит не пишутся
+  (только метрики и логи).
+- **R-N3. `deploy/.env.example` (P-19).** Файл содержит все переменные таблицы R-T1 (закомментированные
+  или с дефолтными значениями) с русскими пояснениями; секреты — с пустым значением/`change-me`.
+- **R-N4. Тесты и моки (P-18).** Тесты — только против локальных моков, без сети. Обязательный состав:
+
+  | Мок | Ветки |
+  |---|---|
+  | AS целевой системы (`authorize_url`, `token_url`, `revoke_url` из тестового каталога, respx) | обмен кода → `{access_token, refresh_token, expires_in, token_type, scope}`; проверка `client_id`/`client_secret`/`redirect_uri`/`code_verifier`; refresh с новым refresh; refresh без нового refresh; `400 invalid_grant`; `500`; сетевая ошибка; `revoke` → 200 |
+  | Upstream MCP (streamable-http, `upstream_url`, respx) | `POST /mcp`: `initialize` (выдаёт `Mcp-Session-Id`), `tools/list` (`application/json`), `tools/call`, ответ `text/event-stream` из нескольких событий; `401` (истёк токен системы); `404` (неизвестная сессия); `405` на `GET` без сессии; `500`; таймаут; `DELETE /mcp` → 204; фиксация полученных заголовков для проверок R-P2 |
+  | OIDC (Keycloak) | `/.well-known/openid-configuration`, `/authorize` (редирект с `code`), `/token` (`id_token` с корректной подписью, `nonce`, `iss`, `aud`), JWKS; ветки: неверная подпись, неверный `nonce`, ошибка `access_denied` |
+  | LiteLLM (моки I-1) | для `HUB_WEB_AUTH=litellm` и обратной совместимости — без изменений |
+
+  Обязателен сквозной сценарий: DCR → `/oauth/authorize` (вход в веб) → OAuth целевой системы → экран
+  прав → код → `/oauth/token` → `initialize`/`tools/list`/`tools/call` через proxy → refresh → revoke.
+  Нагрузочный smoke (100 параллельных SSE-потоков через мок) — в отдельном маркере pytest
+  (`@pytest.mark.load`), в обычном прогоне не выполняется. Часы подменяемые (TTL кодов, токенов, idle
+  сессий, кэшей, окон rate-limit), KV — in-memory, БД — SQLite (после миграций).
+
+## 17. Контракты эндпоинтов I-3
+
+| Метод и путь | Auth | Запрос | Ответы |
+|---|---|---|---|
+| `GET /.well-known/oauth-authorization-server` | нет | — | 200 метаданные AS (R-O1) |
+| `GET /.well-known/oauth-authorization-server/mcp/{alias}` | нет | — | 200 те же метаданные; 404 `not_found` |
+| `GET /.well-known/oauth-protected-resource/mcp/{alias}` | нет | — | 200 PRM (R-O2); 404 `not_found` |
+| `POST /oauth/register` | нет, rate-limit | JSON RFC 7591 | 201 `{client_id, …}`; 400 `invalid_redirect_uri`/`invalid_client_metadata`; 429 `rate_limited` |
+| `GET /oauth/authorize` | веб-сессия | query RFC 6749 + PKCE + `resource` | 302 на `redirect_uri` c `code`/`error`; 302 на `/auth/login`; 200 HTML (экран прав); 400 HTML |
+| `POST /oauth/consent` | веб-сессия + CSRF | форма `{tx, preset, groups[], action}` | 302 на `redirect_uri`; 400; 403 |
+| `GET /oauth/callback/{alias}` | веб-сессия | `code`/`error`, `state` | 302 (продолжение флоу); 400 `invalid_state`; 502 `upstream_auth_failed` |
+| `POST /oauth/token` | нет (public client), rate-limit | form: `authorization_code` \| `refresh_token` | 200 `{access_token, token_type, expires_in, refresh_token, scope}`; 400 `invalid_grant`/`invalid_request`/`invalid_scope`; 401 `invalid_client`; 429 |
+| `POST /oauth/revoke` | нет | form `{token, token_type_hint?}` | 200 `{}`; 400 `invalid_request` |
+| `POST /mcp/{alias}` | Bearer JWT Hub | JSON-RPC (объект или batch) | 200 (JSON или SSE, потоково); 401/403; 404; 413; 429; 502/503 (см. R-P11) |
+| `GET /mcp/{alias}` | Bearer JWT Hub | `Mcp-Session-Id`, `Last-Event-ID` | 200 SSE (потоково); 401/403/404/429; 502/503 |
+| `DELETE /mcp/{alias}` | Bearer JWT Hub | `Mcp-Session-Id` | 200/204; 401/403/404 |
+| `PUT /api/me/connections/{alias}/permissions` | Bearer ключ LiteLLM или веб-сессия + CSRF | `{preset, groups[]}` | 200 `{alias, status, preset, groups}`; 400 `invalid_request`; 401; 404 |
+| `DELETE /api/me/connections/{alias}` | Bearer ключ LiteLLM или веб-сессия + CSRF | — | 200 `{alias, status:"not_connected"}`; 401; 404 |
+| `GET /auth/login` | нет | `?next=` | 302 на OIDC / 200 HTML (режим `litellm`) |
+| `GET /auth/callback` | нет | `code`, `state` | 302 на `next`; 400 |
+| `POST /auth/logout` | веб-сессия + CSRF | — | 302 на `/auth/login`; 403 |
+| `GET /ui/connections` | веб-сессия | — | 200 HTML; 302 на вход |
+| `GET /ui/servers/{alias}` | веб-сессия | — | 200 HTML; 302 на вход; 404 HTML |
+
+Примеры ошибок ревизии 2:
+
+```json
+{"error": "invalid_grant", "error_description": "Код авторизации недействителен или уже использован"}
+{"jsonrpc": "2.0", "id": 3, "error": {"code": -32002,
+  "message": "Подключение к GitLab требует повторной авторизации",
+  "data": {"reason": "needs_reauth", "hint_url": "https://hub.example/ui/servers/gitlab"}}}
+{"jsonrpc": "2.0", "id": 7, "error": {"code": -32001,
+  "message": "Инструмент create_merge_request недоступен с текущими правами",
+  "data": {"tool": "create_merge_request", "hint_url": "https://hub.example/ui/servers/gitlab"}}}
+```
+
+## 18. Принятые решения ревизии 2
+
+Даны человеком (считаются решёнными, не переспрашиваются):
+
+30. Hub для facade-серверов — стандартный MCP authorization server: RFC 9728 PRM на
+    `/.well-known/oauth-protected-resource/mcp/{alias}`, RFC 8414 на `/.well-known/oauth-authorization-server`,
+    RFC 7591 DCR публичного клиента (`token_endpoint_auth_method=none`), PKCE S256 обязателен,
+    гранты `authorization_code` + `refresh_token` с ротацией и отзывом цепочки, `/oauth/revoke`.
+31. Access-токен Hub — JWT HS256 по `HUB_SECRET_KEY`, `exp` 1 ч, claims `aud`/`scope`/`sub`/`cid`/`jti`;
+    refresh — opaque, 30 дней; проверка на горячем пути без БД (подпись + denylist `jti` в KV).
+32. Веб-сессия для `/oauth/authorize` — OIDC Keycloak (`KEYCLOAK_*`) **и** временный режим
+    `HUB_WEB_AUTH=litellm` (CLI-SSO флоу I-1 внутри браузерной страницы); описаны оба.
+33. Брокер токенов целевых систем — общий клиент `authorization_code` с параметрами из `catalog.yaml`
+    (GitLab с PKCE; Jira/Confluence DC `/rest/oauth2/latest/*`, `READ`/`WRITE`); токены шифруются ключом
+    `HUB_ENCRYPTION_KEY`; фоновое обновление с блокировкой в KV; при провале — `needs_reauth`.
+34. Экран прав при `authorize`: пресет `readonly` по умолчанию, галочки групп `permission_model`;
+    `HUB_CONSENT=always|remember`.
+35. MCP-proxy `POST|GET|DELETE /mcp/{alias}`: потоковый streamable-http, удаление клиентского
+    `Authorization`, подстановка `credential_headers` (`{{access_token}}`) и `static_headers`, заголовок
+    групп (`always` + выбранные), виртуализация сессий (`Mcp-Session-Id` выдаёт Hub, upstream-сессия
+    лениво, idle TTL 600 с, прозрачное пересоздание с повтором `initialize`), кэш `tools/list` 300 с,
+    фильтр инструментов (скрытый `tools/call` → `-32001 forbidden`), rate-limit, лимит SSE,
+    circuit-breaker, JSON-RPC ошибки с `data.hint_url`.
+36. `remote-config` / `api/me/connections` отражают `connected|needs_reauth`; `mcp.<alias>` в well-known —
+    с `oauth: {}`. Совместимость: `/remote-config` по-прежнему включает **только** `connected`
+    (`{enabled:true}`, AC-61/AC-62 не меняются); `needs_reauth` виден в `/api/me/connections`,
+    `/api/catalog` и на страницах Hub.
+37. Страницы Hub: вход, экран прав, «Мои подключения», карточка сервера (Jinja2 + HTMX, русский язык).
+38. Миграции БД — **Alembic** (R-M1); явные `ALTER` при старте отвергнуты как неотслеживаемые.
+39. Тесты — только против локальных моков: мок AS целевых систем, мок upstream MCP (SSE, сессии,
+    401/404/5xx), мок OIDC.
+40. Все новые настройки `HUB_*`/`KEYCLOAK_*` — с дефолтами в таблице R-T1.
+
+Приняты spec-агентом как рабочие допущения (детализация решений выше, требований не меняют):
+
+41. Шифрование токенов систем — Fernet (ключ `HUB_ENCRYPTION_KEY` уже валидируется как Fernet в R-K2);
+    вариант «AES-GCM» из требования покрывается тем же полем настройки.
+42. `HUB_WEB_AUTH` по умолчанию — `litellm`: иначе окружение I-1 перестало бы стартовать (D-5 не выдан).
+43. `HUB_CONSENT` по умолчанию — `always` (более строгий вариант).
+44. Ошибки `authorize` с неизвестным `client_id`/чужим `redirect_uri` не редиректятся (RFC 6749 §4.1.2.1);
+    остальные — редиректом с `error`/`state`.
+45. Повторное предъявление кода отзывает выданную по нему цепочку токенов (RFC 6819).
+46. `redirect_uri` сравнивается точно; для loopback допускается другой порт (RFC 8252).
+47. Ключи denylist — `jtiden:<jti>` с TTL до `exp`; отзыв access влечёт отзыв связанной цепочки refresh.
+48. Alias определяется из `resource`, при его отсутствии — из префикса `scope`; конфликт → `invalid_request`.
+49. `scope` по умолчанию — `<alias>:readonly`; `readonly`-scope не включает группы с `preset: readwrite`.
+50. Заголовок групп — идентификаторы через запятую, `always` сначала, порядок каталога, без дублей.
+51. Фильтр инструментов — необязательные поля каталога (`tool_filter`, `groups[].tools`); их отсутствие
+    означает «все инструменты доступны», поэтому текущий `catalog.yaml` менять не требуется.
+52. Кэш `tools/list` хранит нефильтрованный ответ; ключ включает `catalog_version` и хеш прав;
+    запросы с `cursor` не кэшируются.
+53. Клиентская MCP-сессия живёт `HUB_CLIENT_SESSION_TTL` (24 ч), upstream-сессия — `HUB_UPSTREAM_IDLE_TTL`
+    (10 мин) с прозрачным пересозданием; неизвестная клиентская сессия → 404 (клиент переинициализируется).
+54. Повтор запроса после пересоздания сессии или обновления токена — ровно один раз.
+55. HTTP-статусы MCP-ошибок: 401/403 (токен), 200 + JSON-RPC `-32001`/`-32002` (права/подключение),
+    429 (лимиты), 413 (тело), 502/503 (upstream/выключатель), 404 (сессия/alias).
+56. Веб-сессия — cookie `hub_session` (HttpOnly, SameSite=Lax, Secure при https), хранение sha256 в БД;
+    CSRF-токен обязателен для небезопасных методов при cookie-аутентификации.
+57. `user_id` из OIDC — `preferred_username` → `email` → `sub` (первый непустой).
+58. Дополнительная таблица `consents` (для `HUB_CONSENT=remember`) — сверх перечня решения 30.
+59. `KEYCLOAK_*` читаются без префикса `HUB_`; обязательны только при `HUB_WEB_AUTH=keycloak`.
+60. Документация P-19 (`docs/`) — вне зоны записи конвейера; в объёме итерации только `deploy/.env.example`.
+
+## 19. Покрытие правил ревизии 2 критериями приёмки
+
+| Правило | Критерии |
+|---|---|
+| R-T1 | AC-70, AC-73 |
+| R-T2 | AC-71, AC-72 |
+| R-T3 | AC-73 |
+| R-T4 | AC-74 |
+| R-O1 | AC-75, AC-76 |
+| R-O2 | AC-77, AC-78, AC-79 |
+| R-O3 | AC-80, AC-81, AC-82, AC-148 |
+| R-O4 | AC-83, AC-84, AC-148 |
+| R-O5 | AC-85, AC-86 |
+| R-O6 | AC-87, AC-88, AC-89 |
+| R-O7 | AC-90 |
+| R-O8 | AC-91, AC-92, AC-93 |
+| R-O9 | AC-94 |
+| R-O10 | AC-95, AC-96 |
+| R-O11 | AC-97 |
+| R-O12 | AC-98, AC-99, AC-130 |
+| R-O13 | AC-100, AC-101 |
+| R-B1 | AC-102 |
+| R-B2 | AC-103 |
+| R-B3 | AC-104 |
+| R-B4 | AC-105, AC-106 |
+| R-B5 | AC-107, AC-108, AC-149 |
+| R-B6 | AC-109 |
+| R-B7 | AC-110, AC-111 |
+| R-B8 | AC-112 |
+| R-B9 | AC-113 |
+| R-P1 | AC-114 |
+| R-P2 | AC-115 |
+| R-P3 | AC-116 |
+| R-P4 | AC-117 |
+| R-P5 | AC-118, AC-119 |
+| R-P6 | AC-120 |
+| R-P7 | AC-121 |
+| R-P8 | AC-122, AC-123, AC-124 |
+| R-P9 | AC-125, AC-126, AC-127 |
+| R-P10 | AC-128 |
+| R-P11 | AC-129, AC-130 |
+| R-W1 | AC-131, AC-132 |
+| R-W2 | AC-133 |
+| R-W3 | AC-134 |
+| R-W4 | AC-135 |
+| R-W5 | AC-136 |
+| R-W6 | AC-137 |
+| R-M1 | AC-138 |
+| R-M2 | AC-139 |
+| R-M3 | AC-140 |
+| R-M4 | AC-141 |
+| R-M5 | AC-142 |
+| R-N1 | AC-143 |
+| R-N2 | AC-144 |
+| R-N3 | AC-145 |
+| R-N4 | AC-146, AC-147 |
+
+Сквозной сценарий P-18 — AC-147; обязательные негативные сценарии требования: чужой redirect — AC-81,
+AC-83, AC-148; неверный PKCE — AC-92; повтор кода — AC-90; повтор refresh с отзывом цепочки — AC-96;
+истёкший upstream-токен без refresh — AC-108; `needs_reauth` — AC-107, AC-129, AC-149; лимиты — AC-82,
+AC-101, AC-125, AC-126, AC-127; idle-сессия и пересоздание — AC-118, AC-119; кэш `tools/list` — AC-121;
+фильтр инструментов — AC-122, AC-123, AC-124.

@@ -354,3 +354,425 @@ criteria:
     given: "пакет установлен (entrypoint mcp-hub)"
     when: "запускается mcp-hub --help и mcp-hub catalog --help"
     then: "код выхода 0; вывод содержит 'serve' и 'catalog'; для catalog — 'validate' и опцию '--path'"
+
+  # ==========================================================================
+  # Ревизия 2 — итерация I-3 (spec.md, часть II, разделы 9–18).
+  # Все проверки — против локальных моков: мок AS целевой системы, мок upstream MCP
+  # (streamable-http/SSE), мок OIDC, моки LiteLLM из I-1; часы подменяемые, KV in-memory, SQLite.
+  # ==========================================================================
+
+  # --- Настройки (R-T1..R-T4) ---
+  - id: AC-70
+    text: "Дефолты новых настроек применяются, если переменные не заданы"
+    given: "заданы только обязательные переменные I-1 и валидный каталог с facade-сервером 'gitlab'"
+    when: "пройден флоу до POST /oauth/token и запрошен GET /.well-known/oauth-authorization-server"
+    then: "в ответе /oauth/token expires_in == 3600; в теле access-токена exp - iat == 3600; экран прав показывается при каждом authorize (HUB_CONSENT=always); страница входа работает в режиме litellm (HUB_WEB_AUTH=litellm); второй tools/list в пределах 300 с не идёт на upstream"
+  - id: AC-71
+    text: "Невалидные значения новых настроек делают старт невозможным с указанием имени переменной"
+    given: "окружение с обязательными переменными I-1"
+    when: "create_app() вызывается поочерёдно с HUB_ACCESS_TOKEN_TTL='0', HUB_WEB_AUTH='bad', HUB_CONSENT='x', HUB_OAUTH_ALLOWED_REDIRECTS='not json', HUB_MAX_SSE_PER_USER='-1'"
+    then: "каждый вызов завершается ошибкой, текст которой содержит имя соответствующей переменной; для HUB_WEB_AUTH и HUB_CONSENT текст содержит перечень допустимых значений"
+  - id: AC-72
+    text: "Режим keycloak требует KEYCLOAK_ISSUER и KEYCLOAK_CLIENT_SECRET, режим litellm — нет"
+    given: "окружение с обязательными переменными I-1"
+    when: "create_app() с HUB_WEB_AUTH='keycloak' без KEYCLOAK_ISSUER; затем без KEYCLOAK_CLIENT_SECRET; затем с обоими; затем с HUB_WEB_AUTH='litellm' без KEYCLOAK_*"
+    then: "первые два вызова — ошибка старта с текстом, содержащим 'KEYCLOAK_ISSUER' и 'KEYCLOAK_CLIENT_SECRET' соответственно; третий и четвёртый — приложение создаётся"
+  - id: AC-73
+    text: "Окружение I-1 без единой новой переменной поднимает Hub с эндпоинтами I-3"
+    given: "окружение ровно из четырёх обязательных переменных I-1 и каталога репозитория"
+    when: "create_app(); GET /health; GET /.well-known/oauth-authorization-server; GET /.well-known/oauth-protected-resource/mcp/gitlab; GET /.well-known/opencode"
+    then: "все четыре запроса — 200; ответ /.well-known/opencode совпадает с ожиданиями AC-58/AC-59 (поведение I-1 не изменилось)"
+  - id: AC-74
+    text: "Секреты и токены ревизии 2 не попадают в логи, аудит, метрики и HTML"
+    given: "перехват логов; KEYCLOAK_CLIENT_SECRET='KC-S3CRET'; выполнен сквозной сценарий (регистрация клиента, authorize, OAuth целевой системы с токенами 'ups-access-1'/'ups-refresh-1', выдача токенов Hub, вызов через proxy)"
+    when: "просматриваются записи логов, строки audit_log, тело GET /metrics и HTML страниц /ui/connections и /ui/servers/gitlab"
+    then: "нигде не встречаются 'KC-S3CRET', 'ups-access-1', 'ups-refresh-1', значение refresh-токена Hub, значение кода авторизации, code_verifier, значение cookie hub_session и CSRF-токен"
+
+  # --- Hub как authorization server (R-O1..R-O13) ---
+  - id: AC-75
+    text: "Метаданные authorization server соответствуют RFC 8414 и настройкам Hub"
+    given: "HUB_PUBLIC_URL='https://hub.test'; каталог с facade-серверами 'gitlab' и 'jira' и native 'tag'"
+    when: "GET /.well-known/oauth-authorization-server без аутентификации"
+    then: "200; issuer == 'https://hub.test'; authorization_endpoint == 'https://hub.test/oauth/authorize'; token_endpoint == '.../oauth/token'; registration_endpoint == '.../oauth/register'; revocation_endpoint == '.../oauth/revoke'; response_types_supported == ['code']; grant_types_supported == ['authorization_code','refresh_token']; code_challenge_methods_supported == ['S256']; token_endpoint_auth_methods_supported == ['none']; scopes_supported == ['gitlab:readonly','gitlab:readwrite','jira:readonly','jira:readwrite'] (native 'tag' отсутствует); заголовок Cache-Control == 'public, max-age=300'"
+  - id: AC-76
+    text: "Вариант метаданных AS с суффиксом пути ресурса отдаёт то же тело, для не-facade alias — 404"
+    given: "каталог с facade 'gitlab', native 'tag'"
+    when: "GET /.well-known/oauth-authorization-server/mcp/gitlab; GET /.well-known/oauth-authorization-server/mcp/tag; GET /.well-known/oauth-authorization-server/mcp/nope"
+    then: "первый — 200 с телом, идентичным ответу без суффикса; второй и третий — 404 с телом {error:'not_found'}"
+  - id: AC-77
+    text: "Метаданные защищённого ресурса соответствуют RFC 9728"
+    given: "HUB_PUBLIC_URL='https://hub.test'; facade-сервер 'gitlab' с title и docs_url"
+    when: "GET /.well-known/oauth-protected-resource/mcp/gitlab"
+    then: "200; resource == 'https://hub.test/mcp/gitlab'; authorization_servers == ['https://hub.test']; scopes_supported == ['gitlab:readonly','gitlab:readwrite']; bearer_methods_supported == ['header']; resource_name равен title сервера; тело не содержит upstream_url, client_secret, credential_headers"
+  - id: AC-78
+    text: "Запрос к /mcp/{alias} без Bearer-токена отвечает 401 с указанием метаданных ресурса"
+    given: "facade-сервер 'gitlab'"
+    when: "POST /mcp/gitlab с телом initialize и без заголовка Authorization; затем GET /mcp/gitlab без Authorization"
+    then: "оба ответа — 401 {error:'unauthorized', message, hint}; заголовок WWW-Authenticate содержит 'Bearer' и resource_metadata=\"https://hub.test/.well-known/oauth-protected-resource/mcp/gitlab\"; upstream не вызывался"
+  - id: AC-79
+    text: "Метаданные ресурса и proxy недоступны для неизвестного, native и unconfigured alias"
+    given: "каталог: facade 'gitlab', native 'tag', beta-facade 'u' в состоянии unconfigured"
+    when: "GET /.well-known/oauth-protected-resource/mcp/{tag|u|nope}; POST /mcp/{tag|u|nope} с валидным токеном пользователя"
+    then: "все ответы — 404 {error:'not_found'}"
+  - id: AC-80
+    text: "Динамическая регистрация публичного клиента возвращает client_id без client_secret"
+    given: "HUB_OAUTH_ALLOWED_REDIRECTS по умолчанию"
+    when: "POST /oauth/register с {redirect_uris:['http://127.0.0.1:19876/mcp/oauth/callback'], client_name:'OpenCode', grant_types:['authorization_code','refresh_token'], response_types:['code'], token_endpoint_auth_method:'none'}"
+    then: "201; в теле непустой client_id и client_id_issued_at (unix-время), token_endpoint_auth_method == 'none', redirect_uris как в запросе; поле client_secret отсутствует; в audit_log появилась запись oauth_client_registered без секретов; повторная регистрация выдаёт другой client_id"
+  - id: AC-81
+    text: "Недопустимые redirect_uri и метаданные клиента отклоняются при регистрации"
+    given: "HUB_OAUTH_ALLOWED_REDIRECTS = ['http://127.0.0.1:*','http://localhost:*']"
+    when: "POST /oauth/register поочерёдно с redirect_uris ['http://evil.test/cb'], ['myapp://cb'], ['https://hub.test/cb#frag'], []; затем с валидным redirect и token_endpoint_auth_method='client_secret_post'; затем с response_types=['token']"
+    then: "первые три — 400 {error:'invalid_redirect_uri', error_description}; пустой список и два последних — 400 {error:'invalid_client_metadata', error_description}; ни в одном случае клиент не сохранён"
+  - id: AC-82
+    text: "Регистрация клиентов ограничена по IP"
+    given: "HUB_RATE_LIMIT_REGISTER=2"
+    when: "с одного IP выполняются три подряд валидных POST /oauth/register в пределах 60 с; затем часы сдвигаются на 61 с и запрос повторяется"
+    then: "первые два — 201; третий — 429 {error:'rate_limited'} с заголовком Retry-After >= 1 и без создания клиента; после сдвига часов — снова 201"
+  - id: AC-83
+    text: "Ошибки client_id/redirect_uri на authorize не редиректятся, а показываются страницей"
+    given: "зарегистрированы клиенты A (redirect 'http://127.0.0.1:19876/cb') и B (redirect 'http://127.0.0.1:20000/cb'); есть веб-сессия пользователя"
+    when: "GET /oauth/authorize с неизвестным client_id; затем с client_id клиента A и redirect_uri клиента B; затем с client_id A вовсе без redirect_uri"
+    then: "все три — 400 text/html, без заголовка Location; тело содержит машиночитаемый код invalid_client или invalid_redirect_uri; код авторизации не выдан"
+  - id: AC-84
+    text: "Прочие ошибки authorize возвращаются редиректом на зарегистрированный redirect_uri"
+    given: "зарегистрирован клиент A с redirect 'http://127.0.0.1:19876/cb'; есть веб-сессия; каталог с facade 'gitlab'"
+    when: "GET /oauth/authorize с response_type='token'; без code_challenge; с code_challenge_method='plain'; с resource='https://hub.test/mcp/nope'; со scope='gitlab:admin'"
+    then: "каждый ответ — 302 на 'http://127.0.0.1:19876/cb' с параметрами error и state (state сохранён байт-в-байт): unsupported_response_type, invalid_request, invalid_request, invalid_target, invalid_scope соответственно; параметр code отсутствует"
+  - id: AC-85
+    text: "authorize без веб-сессии отправляет на вход и возвращает пользователя обратно"
+    given: "зарегистрированный клиент, cookie сессии отсутствует; HUB_WEB_AUTH='litellm' с моком LiteLLM"
+    when: "GET /oauth/authorize с корректными параметрами; затем выполняется вход; затем повторяется исходный URL"
+    then: "первый ответ — 302 на /auth/login с параметром next, равным исходному URL authorize (в закодированном виде); после успешного входа установлена cookie hub_session и повторный запрос authorize продолжает флоу (экран прав или подключение к системе), а не редиректит на вход"
+  - id: AC-86
+    text: "Alias и scope определяются по resource, при его отсутствии — по scope; конфликт отклоняется"
+    given: "каталог с facade 'gitlab' и 'jira'; веб-сессия; зарегистрированный клиент"
+    when: "GET /oauth/authorize (а) с resource='https://hub.test/mcp/gitlab' без scope; (б) без resource со scope='jira:readwrite'; (в) с resource='https://hub.test/mcp/gitlab' и scope='jira:readonly'; (г) без resource и без scope"
+    then: "(а) флоу идёт для alias 'gitlab', итоговый scope == 'gitlab:readonly'; (б) для alias 'jira', scope 'jira:readwrite'; (в) и (г) — редирект с error=invalid_request"
+  - id: AC-87
+    text: "При отсутствии подключения authorize сначала проводит OAuth целевой системы, затем показывает экран прав"
+    given: "веб-сессия пользователя u1; подключения к 'gitlab' нет; мок AS целевой системы"
+    when: "GET /oauth/authorize (корректные параметры); далее выполняется редирект на authorize_url мока и возврат на /oauth/callback/gitlab с кодом"
+    then: "Hub редиректит на authorize_url из каталога с client_id каталога, redirect_uri == 'https://hub.test/oauth/callback/gitlab', state, code_challenge (pkce true) и scope 'read_api read_user read_repository'; после callback мок AS получил обмен кода с client_secret и code_verifier; создана строка connections со status 'connected'; пользователю показан HTML-экран прав"
+  - id: AC-88
+    text: "HUB_CONSENT управляет повторным показом экрана прав"
+    given: "пользователь уже подключён к 'gitlab' и один раз дал согласие клиенту A на scope 'gitlab:readonly'"
+    when: "повторный GET /oauth/authorize тем же клиентом с тем же scope при HUB_CONSENT='remember'; затем при HUB_CONSENT='always'; затем при 'remember', но со scope 'gitlab:readwrite'"
+    then: "первый — сразу 302 на redirect_uri с code (экран прав не показан); второй — 200 HTML с экраном прав; третий — 200 HTML с экраном прав (scope отличается от сохранённого согласия)"
+  - id: AC-89
+    text: "Отказ на экране прав возвращает клиенту access_denied"
+    given: "открыт экран прав с транзакцией tx; веб-сессия пользователя"
+    when: "POST /oauth/consent с action='deny', валидным CSRF-токеном и tx"
+    then: "302 на redirect_uri клиента с error='access_denied' и исходным state; параметр code отсутствует; код авторизации в БД не создан"
+  - id: AC-90
+    text: "Код авторизации одноразовый и живёт HUB_AUTH_CODE_TTL"
+    given: "HUB_AUTH_CODE_TTL=60; получен код c и по нему уже выданы токены"
+    when: "повторный POST /oauth/token с тем же кодом; отдельно — обмен кода спустя 61 с после выдачи"
+    then: "оба запроса — 400 {error:'invalid_grant', error_description}; после повторного предъявления кода выданные по нему access-токен и refresh-токен отозваны: запрос к /mcp/gitlab с ними → 401, а refresh grant → 400 invalid_grant"
+  - id: AC-91
+    text: "Обмен кода на токены при верном PKCE выдаёт пару токенов"
+    given: "получен код c для alias 'gitlab', scope 'gitlab:readonly'; известен code_verifier"
+    when: "POST /oauth/token с grant_type='authorization_code', code, code_verifier, redirect_uri, client_id"
+    then: "200; тело содержит access_token, token_type == 'Bearer', expires_in == 3600, непустой refresh_token, scope == 'gitlab:readonly'; заголовок Cache-Control == 'no-store'; в audit_log запись oauth_token_issued без значений токенов"
+  - id: AC-92
+    text: "Неверный или отсутствующий code_verifier отклоняется"
+    given: "получен код c с code_challenge от известного verifier"
+    when: "POST /oauth/token с code_verifier='wrong-verifier'; затем без параметра code_verifier"
+    then: "оба — 400 {error:'invalid_grant', error_description}; токены не выданы; код после этого остаётся неиспользованным и корректный обмен по-прежнему возможен"
+  - id: AC-93
+    text: "Несовпадение client_id или redirect_uri при обмене кода отклоняется"
+    given: "код c выдан клиенту A с redirect 'http://127.0.0.1:19876/cb'; зарегистрирован клиент B"
+    when: "POST /oauth/token с кодом c и client_id клиента B; затем с client_id A и redirect_uri 'http://127.0.0.1:20000/cb'; затем с неизвестным client_id"
+    then: "первые два — 400 {error:'invalid_grant'}; третий — 401 {error:'invalid_client'}; токены не выданы"
+  - id: AC-94
+    text: "Access-токен Hub — JWT HS256 с обязательным набором claims"
+    given: "HUB_SECRET_KEY='hub-secret'; выдан токен для пользователя u1, alias 'gitlab', подключения с id N"
+    when: "токен декодируется с проверкой подписи по HUB_SECRET_KEY"
+    then: "заголовок alg == 'HS256'; claims: iss == 'https://hub.test', sub == 'u1', aud == 'https://hub.test/mcp/gitlab', scope == 'gitlab:readonly', cid == N, client_id равен client_id клиента, jti непустой и уникальный между двумя выдачами, exp - iat == 3600; refresh_token не является JWT и в БД хранится только его sha256 (поиск открытого значения в таблице refresh_tokens ничего не находит)"
+  - id: AC-95
+    text: "Refresh grant выдаёт новую пару и делает предъявленный refresh недействительным"
+    given: "выданы access A1 и refresh R1"
+    when: "POST /oauth/token с grant_type='refresh_token', refresh_token=R1, client_id; затем повторный запрос /mcp/gitlab с новым access A2"
+    then: "200 с новыми access A2 != A1 и refresh R2 != R1, scope прежний; вызов /mcp/gitlab с A2 проходит; строка R1 переведена в состояние rotated"
+  - id: AC-96
+    text: "Повторное использование отозванного refresh отзывает всю цепочку"
+    given: "выполнена ротация: R1 → R2 → R3, действует access A3"
+    when: "POST /oauth/token с refresh_token=R1 (уже rotated); затем POST /oauth/token с R3; затем POST /mcp/gitlab с A3"
+    then: "первый — 400 {error:'invalid_grant'}; второй — 400 {error:'invalid_grant'} (вся цепочка отозвана); третий — 401 {error:'unauthorized'} (jti токена A3 в denylist); в audit_log есть запись oauth_refresh_reuse_detected"
+  - id: AC-97
+    text: "Отзыв токена всегда отвечает 200 и делает выданные токены недействительными"
+    given: "действуют access A и refresh R одной цепочки"
+    when: "POST /oauth/revoke с token=R; затем POST /mcp/gitlab с A; затем refresh grant с R; затем revoke неизвестного токена 'nope'; затем POST /oauth/revoke без параметра token"
+    then: "первый — 200 с телом {}; второй — 401; третий — 400 invalid_grant; четвёртый — 200 {}; пятый — 400 {error:'invalid_request'}; в audit_log есть oauth_token_revoked"
+  - id: AC-98
+    text: "Проверка access-токена: подпись, срок, аудитория"
+    given: "действующий токен для alias 'gitlab'; каталог с facade 'gitlab' и 'jira'"
+    when: "POST /mcp/gitlab с изменённой последней буквой подписи; с токеном, у которого exp в прошлом; с токеном, подписанным другим ключом; с валидным токеном для 'gitlab', но по адресу /mcp/jira"
+    then: "первые три — 401 {error:'unauthorized'} с заголовком WWW-Authenticate, содержащим resource_metadata и error=\"invalid_token\"; четвёртый — 403 {error:'forbidden'}; upstream не вызывался ни разу"
+  - id: AC-99
+    text: "Горячий путь использует denylist и кэш подключения без обращения к БД"
+    given: "выполнен успешный вызов /mcp/gitlab (кэш conn:u1:gitlab заполнен); HUB_CONNECTION_CACHE_TTL=60"
+    when: "выполняется второй такой же вызов при заблокированной БД (сессии БД выбрасывают ошибку); затем токен отзывается и вызов повторяется; затем меняются права (PUT permissions) и вызов повторяется"
+    then: "второй вызов проходит успешно без обращения к БД; после отзыва — 401 (jti в denylist KV); после смены прав кэш инвалидирован и запрос к upstream уходит с новым заголовком групп"
+  - id: AC-100
+    text: "Ошибки OAuth-эндпоинтов имеют формат RFC 6749 и не кэшируются"
+    given: "приложение запущено"
+    when: "POST /oauth/token с grant_type='password'; POST /oauth/token без параметров; POST /oauth/register с телом, не являющимся JSON"
+    then: "ответы — JSON с ключами error и error_description (русский текст), без ключей message/hint формата R-A7; для /oauth/token заголовок Cache-Control == 'no-store'; все ответы содержат X-Content-Type-Options: nosniff и X-Request-ID; коды: unsupported_grant_type, invalid_request, invalid_client_metadata"
+  - id: AC-101
+    text: "Обращения к /oauth/token ограничены по паре client_id и IP"
+    given: "HUB_RATE_LIMIT_TOKEN=3"
+    when: "с одного IP выполняются четыре подряд запроса /oauth/token одного client_id в пределах 60 с; затем запрос с другим client_id"
+    then: "четвёртый — 429 {error:'rate_limited'} с Retry-After; запрос другого client_id — обрабатывается обычным образом (лимит раздельный)"
+
+  # --- Брокер токенов целевых систем (R-B1..R-B9) ---
+  - id: AC-102
+    text: "Параметры OAuth целевой системы берутся из каталога, включая scopes по пресету и PKCE"
+    given: "каталог: 'gitlab' с pkce true и scopes readonly ['read_api','read_user','read_repository'] / readwrite ['api','read_user']; client_secret задан как env:GL_SECRET со значением 'gl-secret'"
+    when: "пользователь подключается к 'gitlab' с пресетом readonly; затем другой пользователь — с пресетом readwrite"
+    then: "мок AS получил authorize с scope 'read_api read_user read_repository' и 'api read_user' соответственно, с code_challenge_method='S256'; обмен кода выполнен с client_secret 'gl-secret'; значение 'gl-secret' не встречается ни в одном ответе Hub и ни в одной записи лога"
+  - id: AC-103
+    text: "Callback целевой системы проверяет state"
+    given: "начата транзакция подключения к 'gitlab' с state S"
+    when: "GET /oauth/callback/gitlab без state; со state 'other'; со state S дважды подряд; со state S из другой веб-сессии; с параметром error='access_denied' и валидным state"
+    then: "запросы без state, с чужим state и повторный со state S — 400 с машинным кодом invalid_state; из другой веб-сессии — 400 invalid_state; при error='access_denied' пользователь получает страницу с русским пояснением (или редирект клиента с error=access_denied), токены не сохраняются"
+  - id: AC-104
+    text: "Токены целевой системы сохраняются только в зашифрованном виде"
+    given: "мок AS выдаёт access 'ups-access-1', refresh 'ups-refresh-1', expires_in 7200"
+    when: "пользователь завершает подключение к 'gitlab'; затем читается содержимое таблиц upstream_tokens и connections"
+    then: "connections.status == 'connected'; в upstream_tokens поля access_token_enc и refresh_token_enc не содержат подстрок 'ups-access-1'/'ups-refresh-1'; расшифровка ключом HUB_ENCRYPTION_KEY даёт исходные значения; expires_at примерно равен now + 7200; в audit_log запись connection_connected без значений токенов"
+  - id: AC-105
+    text: "Фоновое обновление идёт заранее и защищено блокировкой от гонок"
+    given: "HUB_TOKEN_REFRESH_LEAD=300; подключение с expires_at через 200 с и refresh-токеном; мок AS отвечает на refresh новой парой"
+    when: "запускается цикл фонового обновления; параллельно из двух корутин инициируется обновление того же подключения"
+    then: "мок AS получил ровно один запрос refresh; в БД сохранены новые значения, last_refresh_at обновлён; вторая корутина использует уже обновлённый токен; при expires_at через 3600 с фоновая задача обновление не запускает"
+  - id: AC-106
+    text: "401 от upstream вызывает обновление токена и однократный повтор запроса"
+    given: "подключение с действующим (по времени) токеном; upstream отвечает 401 на первый вызов и 200 на последующий; мок AS обновляет токен"
+    when: "POST /mcp/gitlab с методом tools/list"
+    then: "клиент получает 200 с результатом; upstream получил два запроса, второй — с новым access-токеном в credential_headers; при повторном 401 после обновления клиент получает JSON-RPC ошибку -32002 и третьего запроса к upstream не было"
+  - id: AC-107
+    text: "Провал обновления переводит подключение в needs_reauth, токены клиента остаются валидными"
+    given: "подключение с истекающим токеном; мок AS отвечает на refresh 400 invalid_grant"
+    when: "выполняется обновление (фоновое или по требованию); затем POST /mcp/gitlab; затем GET /api/me/connections"
+    then: "connections.status == 'needs_reauth' с заполненным needs_reauth_reason; ответ /mcp — 200 с JSON-RPC error code -32002, русским message и data.hint_url == 'https://hub.test/ui/servers/gitlab', data.reason == 'needs_reauth'; refresh-токен Hub клиента по-прежнему обменивается на новую пару (401 не возвращается); /api/me/connections показывает status 'needs_reauth'; в audit_log есть connection_needs_reauth"
+  - id: AC-108
+    text: "Истёкший upstream-токен без refresh-токена сразу даёт needs_reauth"
+    given: "подключение, у которого expires_at в прошлом и refresh_token_enc пуст"
+    when: "POST /mcp/gitlab с методом tools/list"
+    then: "запрос к upstream не отправляется; ответ — 200 с JSON-RPC error -32002, data.reason == 'needs_reauth'; статус подключения — needs_reauth"
+  - id: AC-109
+    text: "Ротация refresh-токена целевой системы необязательна"
+    given: "подключение с refresh 'ups-refresh-1'"
+    when: "мок AS отвечает на refresh парой с новым refresh 'ups-refresh-2'; затем (для другого подключения) — ответом без поля refresh_token"
+    then: "в первом случае сохранён 'ups-refresh-2'; во втором сохранён прежний refresh, статус остаётся connected, ошибки нет; оба подключения остаются рабочими для последующих вызовов"
+  - id: AC-110
+    text: "Смена прав применяется к следующему вызову без переподключения"
+    given: "подключение 'gitlab' с пресетом readonly и группами ['code_review']; выполнен tools/list (кэш заполнен)"
+    when: "PUT /api/me/connections/gitlab/permissions с {preset:'readonly', groups:['code_review','devops']}; затем POST /mcp/gitlab с tools/list"
+    then: "200 {alias:'gitlab', status, preset:'readonly', groups:['code_review','devops']}; следующий запрос ушёл на upstream (кэш tools/list инвалидирован) с заголовком Enabled-Groups == 'core,code_review,devops'; повторного OAuth не потребовалось; в audit_log есть connection_permissions_changed"
+  - id: AC-111
+    text: "Расширение прав до readwrite требует повторной авторизации в целевой системе"
+    given: "подключение 'gitlab' с пресетом readonly (scopes целевой системы readonly)"
+    when: "PUT /api/me/connections/gitlab/permissions с {preset:'readwrite', groups:['repo_write']}; затем PUT с неизвестной группой 'nope'; затем PUT с группой 'admin' (preset none); затем PUT с {preset:'readonly', groups:['repo_write']}"
+    then: "первый — 200 со status 'needs_reauth' и пояснением на русском; второй и третий — 400 {error:'invalid_request'}; четвёртый — 200, при этом группа repo_write в набор не попадает (в заголовке групп следующего вызова её нет)"
+  - id: AC-112
+    text: "Отключение отзывает токены системы и все клиентские токены подключения"
+    given: "подключение 'gitlab' с revoke_url в каталоге; действуют access A и refresh R клиента; в каталоге есть также 'jira'"
+    when: "DELETE /api/me/connections/gitlab; затем POST /mcp/gitlab с A; затем refresh grant с R; затем GET /remote-config и GET /api/catalog"
+    then: "200 {alias:'gitlab', status:'not_connected'}; мок AS получил запрос revoke; строка upstream_tokens удалена; вызов /mcp — 401; refresh grant — 400 invalid_grant; /remote-config не содержит 'gitlab'; /api/catalog показывает connection.status == 'not_connected'; в audit_log есть connection_disconnected"
+  - id: AC-113
+    text: "Токены целевой системы не выходят наружу через API, страницы и метрики"
+    given: "подключение с токенами 'ups-access-1'/'ups-refresh-1'"
+    when: "выполняются GET /api/catalog, GET /api/me/connections, GET /ui/connections, GET /ui/servers/gitlab, GET /metrics, GET /remote-config"
+    then: "ни один ответ не содержит 'ups-access-1', 'ups-refresh-1' или их зашифрованных значений; /api/me/connections содержит только alias, status, preset, groups, created_at, updated_at"
+
+  # --- MCP-proxy (R-P1..R-P11) ---
+  - id: AC-114
+    text: "Проксирование initialize и tools/list на upstream работает для подключённого пользователя"
+    given: "подключение 'gitlab' connected; мок upstream отвечает на initialize с Mcp-Session-Id 'up-1' и на tools/list списком из двух инструментов"
+    when: "POST /mcp/gitlab с JSON-RPC initialize, затем POST /mcp/gitlab с tools/list и полученным Mcp-Session-Id"
+    then: "оба ответа — 200 application/json с телом upstream (result без изменений, кроме фильтрации); upstream получил запросы по адресу upstream_url каталога тем же методом и с тем же телом"
+  - id: AC-115
+    text: "Заголовки к upstream: клиентский Authorization удалён, подставлены креды и группы"
+    given: "каталог 'gitlab': credential_headers {Authorization: 'Bearer {{access_token}}'}, static_headers {X-Static: 'env:GL_STATIC'} со значением 'st-1', permission_model header_groups с header 'Enabled-Groups', always ['core']; подключение с preset readonly и группами ['devops','code_review']; upstream-токен 'ups-access-1'"
+    when: "POST /mcp/gitlab с заголовками Authorization: Bearer <токен Hub>, Cookie: 'a=b', X-Forwarded-For: '1.2.3.4', Enabled-Groups: 'admin', Accept: 'application/json, text/event-stream', MCP-Protocol-Version: '2025-06-18'"
+    then: "upstream получил Authorization == 'Bearer ups-access-1', X-Static == 'st-1', Enabled-Groups == 'core,code_review,devops' (always первым, далее порядок каталога; подставленное клиентом значение 'admin' отброшено), Accept и MCP-Protocol-Version как у клиента; заголовки Cookie и X-Forwarded-For отсутствуют; токен Hub на upstream не передан"
+  - id: AC-116
+    text: "SSE-ответ upstream передаётся потоково, таймаут даёт понятную ошибку"
+    given: "мок upstream отвечает text/event-stream тремя событиями с паузами; HUB_UPSTREAM_TIMEOUT=1"
+    when: "POST /mcp/gitlab с Accept: text/event-stream; отдельно — запрос к upstream, который не отвечает дольше таймаута"
+    then: "в первом случае Content-Type ответа == 'text/event-stream', события доходят до клиента по мере поступления (первое событие получено до завершения потока), тело не буферизуется целиком; во втором — 502 с JSON-RPC error code -32004 и data.hint_url; заголовок Mcp-Session-Id upstream клиенту не передан"
+  - id: AC-117
+    text: "Клиент видит собственный Mcp-Session-Id, выданный Hub"
+    given: "мок upstream выдаёт Mcp-Session-Id 'up-1' на initialize"
+    when: "POST /mcp/gitlab с initialize; затем POST /mcp/gitlab с tools/list и полученным Mcp-Session-Id; затем POST с Mcp-Session-Id 'unknown-1'; затем POST с идентификатором сессии другого пользователя"
+    then: "клиенту вернулся Mcp-Session-Id != 'up-1'; при следующем вызове upstream получил Mcp-Session-Id == 'up-1'; запрос с 'unknown-1' и с чужим идентификатором — 404 с JSON-RPC error code -32000"
+  - id: AC-118
+    text: "Простаивающая upstream-сессия прозрачно пересоздаётся"
+    given: "HUB_UPSTREAM_IDLE_TTL=600; сессия установлена вызовом initialize с clientInfo {name:'opencode', version:'1.17.9'} и protocolVersion '2025-06-18'"
+    when: "часы сдвигаются на 601 с и выполняется POST /mcp/gitlab с tools/list и прежним клиентским Mcp-Session-Id"
+    then: "клиент получает 200 с результатом tools/list и тот же Mcp-Session-Id, что и раньше; upstream получил (best-effort DELETE старой сессии,) новый initialize с теми же clientInfo и protocolVersion, notifications/initialized и затем tools/list с новым upstream-идентификатором сессии"
+  - id: AC-119
+    text: "404 от upstream на существующей сессии вызывает одно пересоздание, повторная ошибка — -32004"
+    given: "установлена сессия; мок upstream отвечает 404 на первый запрос с сессией, затем нормально"
+    when: "POST /mcp/gitlab с tools/list; отдельно — сценарий, где upstream отвечает 404 и на повторный запрос после пересоздания"
+    then: "в первом случае клиент получает 200 и корректный результат (одно пересоздание); во втором — 502 с JSON-RPC error -32004 и повторных попыток больше одной не было"
+  - id: AC-120
+    text: "DELETE закрывает сессию у upstream и в Hub"
+    given: "установлена сессия (клиентский id S, upstream id 'up-1')"
+    when: "DELETE /mcp/gitlab с Mcp-Session-Id S; затем POST /mcp/gitlab с тем же S"
+    then: "upstream получил DELETE с Mcp-Session-Id 'up-1'; ответ клиенту — 200 или 204; последующий POST — 404 с JSON-RPC -32000; запись mcpsess в KV удалена"
+  - id: AC-121
+    text: "Кэш tools/list работает по TTL и инвалидируется при смене прав и перезагрузке каталога"
+    given: "HUB_TOOLS_CACHE_TTL=300; HUB_ADMIN_TOKEN задан"
+    when: "выполняется tools/list дважды подряд; затем часы +301 с и tools/list; затем меняются права и tools/list; затем POST /admin/catalog/reload и tools/list; затем tools/list с params.cursor='c1' дважды"
+    then: "второй вызов не дошёл до upstream (ответ из кэша, с id из запроса); после сдвига часов, после смены прав и после перезагрузки каталога вызовы уходят на upstream; оба вызова с cursor уходят на upstream (не кэшируются)"
+  - id: AC-122
+    text: "Недоступные инструменты не показываются в tools/list"
+    given: "каталог 'gitlab' с permission_model.header_groups и tool_filter {allow:['*'], deny:['admin_*']} и группой repo_write с tools ['create_*']; подключение с preset readonly, группы ['code_review']; upstream возвращает инструменты list_mrs, create_merge_request, admin_labels"
+    when: "POST /mcp/gitlab с tools/list (ответ upstream в формате application/json, затем тот же сценарий с SSE-ответом upstream)"
+    then: "в обоих случаях клиент получает только list_mrs: create_merge_request отсутствует (его allow-маска даёт только группа repo_write, не включённая при readonly), admin_labels отсутствует (deny); при отсутствии в каталоге tool_filter и tools у групп клиент получает все три инструмента"
+  - id: AC-123
+    text: "tools/call скрытого инструмента отклоняется JSON-RPC ошибкой -32001 без обращения к upstream"
+    given: "тот же каталог и права, что в AC-122"
+    when: "POST /mcp/gitlab с {jsonrpc:'2.0', id:7, method:'tools/call', params:{name:'create_merge_request', arguments:{}}}"
+    then: "200; тело — {jsonrpc:'2.0', id:7, error:{code:-32001, message:<русский текст с именем инструмента>, data:{tool:'create_merge_request', hint_url:'https://hub.test/ui/servers/gitlab'}}}; upstream запроса не получил; вызов разрешённого list_mrs проходит на upstream"
+  - id: AC-124
+    text: "Batch-запрос со скрытым вызовом отклоняется целиком"
+    given: "тот же каталог и права"
+    when: "POST /mcp/gitlab с телом-массивом [{id:1, method:'tools/list'}, {id:2, method:'tools/call', params:{name:'admin_labels'}}]"
+    then: "200 с одним JSON-RPC error {code:-32001} и id == 2; upstream запроса не получил"
+  - id: AC-125
+    text: "Rate-limit на пару пользователь/alias отвечает 429"
+    given: "HUB_RATE_LIMIT_MCP=2; подключения к 'gitlab' и 'jira'"
+    when: "выполняются три вызова /mcp/gitlab в пределах 60 с; затем вызов /mcp/jira; затем часы +61 с и вызов /mcp/gitlab"
+    then: "третий вызов gitlab — 429 с Retry-After >= 1 и телом JSON-RPC error code -32003, upstream не вызывался; вызов jira проходит (лимит раздельный); после сдвига часов вызовы снова проходят"
+  - id: AC-126
+    text: "Число одновременных SSE-потоков на пользователя ограничено"
+    given: "HUB_MAX_SSE_PER_USER=2; мок upstream держит SSE-поток открытым"
+    when: "пользователь открывает три параллельных SSE-запроса к /mcp/gitlab; затем один поток завершается и открывается новый"
+    then: "третий запрос — 429 с JSON-RPC error -32003 и data.reason == 'too_many_streams'; после завершения потока новый запрос принимается (счётчик уменьшился, в том числе при разрыве соединения)"
+  - id: AC-127
+    text: "Слишком большое тело запроса отклоняется до обращения к upstream"
+    given: "HUB_MAX_BODY_BYTES=1024"
+    when: "POST /mcp/gitlab с телом 2048 байт (с заголовком Content-Length и, отдельно, чанкованно без него)"
+    then: "оба — 413 {error:'payload_too_large', message}; upstream не вызывался"
+  - id: AC-128
+    text: "Circuit-breaker размыкает цепь после серии ошибок upstream и восстанавливается"
+    given: "HUB_CB_FAILURES=3, HUB_CB_RESET=30; мок upstream отвечает 500"
+    when: "выполняются четыре вызова подряд; затем часы +31 с и upstream снова отвечает 200, выполняется вызов; затем ещё вызов"
+    then: "первые три вызова дошли до upstream и вернули 502 с JSON-RPC -32004; четвёртый — 503 с JSON-RPC -32004 (upstream_unavailable) и Retry-After, без обращения к upstream; после сдвига часов пробный вызов уходит на upstream и возвращает 200, счётчик ошибок сброшен, следующий вызов проходит нормально"
+  - id: AC-129
+    text: "Обращение к неподключённому серверу даёт понятную JSON-RPC ошибку -32002"
+    given: "у пользователя нет подключения к 'gitlab', но есть валидный access-токен Hub с aud gitlab (подключение было удалено напрямую в БД)"
+    when: "POST /mcp/gitlab с tools/list; затем GET /mcp/gitlab"
+    then: "для POST — 200 с JSON-RPC error {code:-32002, message на русском, data:{reason:'not_connected', hint_url:'https://hub.test/ui/servers/gitlab'}}; для GET — тот же смысл в виде JSON {error, message, hint_url}; upstream не вызывался"
+  - id: AC-130
+    text: "Отозванный или истёкший токен на proxy отвечает 401 с указанием метаданных ресурса"
+    given: "действующий токен A, затем отозванный через /oauth/revoke"
+    when: "POST /mcp/gitlab с A после отзыва; затем с токеном, у которого exp в прошлом"
+    then: "оба — 401 {error:'unauthorized'}; заголовок WWW-Authenticate содержит Bearer, resource_metadata с адресом PRM и error=\"invalid_token\"; upstream не вызывался"
+
+  # --- Веб-интерфейс (R-W1..R-W6) ---
+  - id: AC-131
+    text: "Вход через OIDC создаёт веб-сессию и возвращает на next"
+    given: "HUB_WEB_AUTH='keycloak' с моком OIDC (метаданные, authorize, token, JWKS); id_token с preferred_username 'u1' и email 'u1@corp'"
+    when: "GET /auth/login?next=/ui/connections; затем возврат на /auth/callback с кодом и state; затем GET /auth/callback с чужим state; затем GET /auth/login?next=https://evil.test/"
+    then: "первый — 302 на authorize мока с client_id, redirect_uri 'https://hub.test/auth/callback', response_type=code, scope из KEYCLOAK_SCOPES, непустыми state, nonce и code_challenge; после callback — Set-Cookie hub_session с HttpOnly и SameSite=Lax (Secure при https) и редирект на /ui/connections; в users есть строка u1 с email; чужой state — 400 без создания сессии; внешний next заменён на /ui/connections"
+  - id: AC-132
+    text: "Некорректный id_token не создаёт сессию"
+    given: "мок OIDC, режим keycloak"
+    when: "callback обрабатывается с id_token: (а) подписанным чужим ключом; (б) с nonce, не равным сохранённому; (в) с iss другого издателя; (г) с истёкшим exp"
+    then: "во всех четырёх случаях — 400 с русским текстом ошибки, cookie hub_session не устанавливается, строка в sessions не создаётся"
+  - id: AC-133
+    text: "Режим HUB_WEB_AUTH=litellm проводит вход через CLI-SSO и создаёт ту же веб-сессию"
+    given: "HUB_WEB_AUTH='litellm'; моки LiteLLM из I-1 (start → pending → ready с user_id 'u1')"
+    when: "GET /auth/login?next=/ui/connections; страница выполняет опрос до ready"
+    then: "страница входа — 200 HTML на русском с ссылкой browser_url и кодом user_code; после ready установлена cookie hub_session для пользователя u1, создана строка в sessions с auth_method 'litellm', выполнен редирект на /ui/connections; ключ LiteLLM сохранён в api_keys (правило R-L5 не нарушено); в audit_log есть web_login"
+  - id: AC-134
+    text: "Экран прав показывает группы каталога и сохраняет выбор"
+    given: "каталог 'gitlab' с always ['core'] и группами code_review/devops/users (readonly), repo_write (readwrite), admin (none); открыт authorize со scope 'gitlab:readonly'"
+    when: "запрашивается страница экрана прав; затем POST /oauth/consent с preset='readonly', groups=['code_review'], action='allow' и валидным CSRF-токеном"
+    then: "HTML на русском содержит title сервера, имя клиента, названия групп из каталога, пресет 'Только чтение' выбран по умолчанию, группа admin (preset none) отсутствует, группа core показана как всегда включённая; после согласия в connections сохранены preset 'readonly' и groups ['code_review'], выдан код и выполнен редирект на redirect_uri"
+  - id: AC-135
+    text: "Страница «Мои подключения» показывает статусы только текущего пользователя"
+    given: "у u1 подключения gitlab (connected) и jira (needs_reauth); у u2 — confluence (connected); веб-сессия u1"
+    when: "GET /ui/connections; затем тот же запрос без cookie"
+    then: "200 HTML на русском: gitlab со статусом «Подключён», jira — «Нужна повторная авторизация» и кнопкой «Переподключить», кнопки «Отключить»; confluence пользователя u2 в выдаче отсутствует; без cookie — 302 на /auth/login"
+  - id: AC-136
+    text: "Карточка сервера доступна по hint_url и скрывает внутренние данные"
+    given: "веб-сессия; каталог: facade 'gitlab', beta-facade 'u' (unconfigured), сервер 'b' с audience ['devs']"
+    when: "GET /ui/servers/gitlab; GET /ui/servers/u; GET /ui/servers/b; GET /ui/servers/nope"
+    then: "первый — 200 HTML с title, description, owner, статусом, адресом 'https://hub.test/mcp/gitlab' и списком групп прав; в HTML нет upstream_url, client_secret, credential_headers и значений токенов; остальные три — 404 (HTML)"
+  - id: AC-137
+    text: "Небезопасные методы при cookie-аутентификации требуют CSRF-токен"
+    given: "веб-сессия u1 с CSRF-токеном T"
+    when: "POST /oauth/consent без CSRF-токена; PUT /api/me/connections/gitlab/permissions с cookie и без X-CSRF-Token; тот же PUT с корректным T; тот же PUT с Bearer-ключом LiteLLM и без CSRF; POST /auth/logout с T"
+    then: "запросы без CSRF при cookie-аутентификации — 403 {error:'forbidden'}; с корректным T — успешный ответ; с Bearer-ключом LiteLLM CSRF не требуется — успешный ответ; после logout cookie очищена и строка sessions удалена; все HTML-ответы имеют Content-Type text/html; charset=utf-8 и Cache-Control 'private, no-store'"
+
+  # --- Модель данных и миграции (R-M1..R-M5) ---
+  - id: AC-138
+    text: "Миграции Alembic применяются при старте и доступны через CLI"
+    given: "HUB_DATABASE_URL указывает на пустую SQLite; HUB_DB_AUTO_MIGRATE не задан (дефолт true)"
+    when: "create_app() и инициализация приложения (lifespan); затем запускается mcp-hub db current; затем приложение запускается повторно на той же БД"
+    then: "в БД есть таблица alembic_version с ревизией head и все таблицы I-1 и I-3; mcp-hub db current печатает текущую ревизию с кодом выхода 0; повторный запуск не меняет схему и не падает; при HUB_DB_AUTO_MIGRATE=false схема не создаётся автоматически"
+  - id: AC-139
+    text: "Новые таблицы созданы с требуемыми полями и ограничениями"
+    given: "БД после применения миграций"
+    when: "читается схема БД"
+    then: "существуют таблицы oauth_clients (client_id уникален), oauth_codes (code_sha256 уникален, есть code_challenge, redirect_uri, expires_at, used_at), refresh_tokens (token_sha256 уникален, есть chain_id, parent_id, status, access_jti, access_exp, expires_at), upstream_tokens (connection_id уникален, есть access_token_enc, refresh_token_enc, expires_at, scopes), sessions (session_sha256 уникален, есть csrf_sha256, user_id, expires_at, auth_method), consents (уникальность по user_id, client_id, alias) с полями из spec.md §15"
+  - id: AC-140
+    text: "Таблица connections расширена без нарушения правил I-1"
+    given: "БД после применения миграций"
+    when: "читается схема таблицы connections и выполняются проверки AC-65"
+    then: "в connections есть новые поля needs_reauth_reason, last_refresh_at, revision (не NULL, по умолчанию 0), provider_account; сохранены поля и уникальность (user_id, alias) из spec.md §6; таблицы users, api_keys, audit_log не изменились"
+  - id: AC-141
+    text: "KeyValueStore поддерживает атомарные примитивы и ключи ревизии 2 с их TTL"
+    given: "in-memory KeyValueStore с подменяемыми часами"
+    when: "дважды вызывается set_if_absent('refreshlock:1', v, ttl=30); затем часы +31 с и вызов повторяется; incr('sse:u1',1)/decr('sse:u1',1); после сквозного сценария читаются ключи KV"
+    then: "первый set_if_absent → True, второй → False, после истечения TTL → снова True; incr/decr возвращают корректные значения; в KV присутствуют ключи вида oauthtx:*, jtiden:*, conn:u1:gitlab, mcpsess:*, toolscache:gitlab:*, cb:gitlab с TTL из таблицы spec.md §15 (значение jtiden:* исчезает после истечения exp токена)"
+  - id: AC-142
+    text: "БД, созданная кодом I-1, доводится до актуальной схемы без потери данных"
+    given: "SQLite, созданная через create_all кода I-1, с записями в users, api_keys, connections, audit_log и без таблицы alembic_version"
+    when: "запускается приложение ревизии 2 (или mcp-hub db upgrade)"
+    then: "старт проходит успешно; появляется alembic_version с ревизией head и новые таблицы; все прежние строки users, api_keys, connections, audit_log сохранены; GET /api/me с прежним ключом отвечает 200"
+
+  # --- Наблюдаемость, эксплуатация, тесты (R-N1..R-N4) ---
+  - id: AC-143
+    text: "Метрики ревизии 2 присутствуют и размечены по alias"
+    given: "выполнены: успешный вызов /mcp/gitlab, вызов с ошибкой upstream, выдача токена по коду и по refresh, успешное и неуспешное обновление upstream-токена"
+    when: "GET /metrics"
+    then: "тело содержит hub_mcp_requests_total с меткой alias='gitlab', hub_mcp_request_duration_seconds_bucket с alias='gitlab', hub_upstream_sessions_active с alias='gitlab', hub_upstream_errors_total с kind, hub_oauth_tokens_issued_total с grant='authorization_code' и grant='refresh_token', hub_token_refresh_total с result='ok' и result='failed'; в метках нет user_id и значений токенов"
+  - id: AC-144
+    text: "Аудит фиксирует операции ревизии 2 без секретов"
+    given: "выполнен сквозной сценарий (регистрация клиента, согласие, выдача и обновление токенов, смена прав, отзыв, отключение, вход в веб)"
+    when: "читаются все строки audit_log"
+    then: "присутствуют действия oauth_client_registered, oauth_code_issued, oauth_token_issued, oauth_token_revoked, connection_connected, connection_permissions_changed, connection_disconnected, web_login; сериализованные details ни одной строки не содержат значений access/refresh-токенов Hub и системы, кода авторизации, code_verifier, client_secret, идентификатора веб-сессии"
+  - id: AC-145
+    text: "deploy/.env.example содержит все новые переменные"
+    given: "файл deploy/.env.example"
+    when: "файл читается и сравнивается с таблицей настроек spec.md §10 (R-T1)"
+    then: "для каждой переменной таблицы (HUB_WEB_AUTH, HUB_CONSENT, HUB_OAUTH_ALLOWED_REDIRECTS, HUB_ACCESS_TOKEN_TTL, HUB_REFRESH_TOKEN_TTL, HUB_AUTH_CODE_TTL, HUB_OAUTH_TX_TTL, HUB_WEB_SESSION_TTL, HUB_RATE_LIMIT_REGISTER, HUB_RATE_LIMIT_TOKEN, HUB_RATE_LIMIT_MCP, HUB_MAX_SSE_PER_USER, HUB_MAX_BODY_BYTES, HUB_UPSTREAM_TIMEOUT, HUB_UPSTREAM_SSE_IDLE_TIMEOUT, HUB_UPSTREAM_IDLE_TTL, HUB_CLIENT_SESSION_TTL, HUB_TOOLS_CACHE_TTL, HUB_TOKEN_REFRESH_LEAD, HUB_TOKEN_REFRESH_INTERVAL, HUB_TOKEN_REFRESH_ENABLED, HUB_CB_FAILURES, HUB_CB_RESET, HUB_CONNECTION_CACHE_TTL, HUB_DB_AUTO_MIGRATE, KEYCLOAK_ISSUER, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET, KEYCLOAK_SCOPES, KEYCLOAK_JWKS_TTL) в файле есть строка с этим именем; значения секретов пусты или равны change-me"
+  - id: AC-146
+    text: "Тесты не обращаются к сети, нагрузочный smoke вынесен в отдельный маркер"
+    given: "полный прогон тестов ревизии 2"
+    when: "выполняется обычный прогон (без дополнительных маркеров) с запретом реальных исходящих соединений"
+    then: "все тесты проходят без единого реального сетевого обращения (все внешние адреса перехвачены respx/моками); тест на 100 параллельных SSE-потоков помечен маркером load, зарегистрированным в конфигурации pytest, и в обычном прогоне не выполняется"
+
+  # --- Сквозной сценарий и восстановление (P-18) ---
+  - id: AC-147
+    text: "Сквозной сценарий стандартного MCP-клиента проходит целиком"
+    given: "чистая БД; моки: OIDC (или LiteLLM), AS целевой системы, upstream MCP; каталог с facade 'gitlab'"
+    when: "клиент выполняет: GET /mcp/gitlab без токена → чтение PRM и метаданных AS → POST /oauth/register → GET /oauth/authorize → вход в веб → OAuth целевой системы → экран прав → получение кода → POST /oauth/token → initialize → tools/list → tools/call → refresh grant → POST /oauth/revoke"
+    then: "каждый шаг возвращает ожидаемый результат: 401 с resource_metadata, 200 метаданные, 201 client_id, 302 с code, 200 с парой токенов, успешные JSON-RPC ответы через proxy (upstream получил персональные заголовки), новая пара по refresh, 200 на revoke; после revoke вызов /mcp/gitlab отвечает 401"
+  - id: AC-148
+    text: "Клиент не может использовать redirect_uri чужого клиента"
+    given: "зарегистрированы клиент A (redirect 'http://127.0.0.1:19876/cb') и клиент B (redirect 'http://127.0.0.1:20000/cb'); веб-сессия пользователя"
+    when: "GET /oauth/authorize с client_id клиента A и redirect_uri клиента B; затем — с client_id A и redirect_uri 'http://127.0.0.1:19876/cb/../evil'"
+    then: "оба — 400 HTML без Location и без выдачи кода; в oauth_codes новых строк не появилось"
+  - id: AC-149
+    text: "Повторная авторизация восстанавливает подключение без новой регистрации клиента"
+    given: "подключение в статусе needs_reauth; у клиента есть прежние access A и refresh R; клиент зарегистрирован ранее"
+    when: "пользователь проходит /oauth/authorize тем же client_id (или нажимает «Переподключить»), заново авторизуется в целевой системе; затем выполняется POST /mcp/gitlab с прежним access A"
+    then: "нового POST /oauth/register не потребовалось; connections.status снова 'connected' с прежним id подключения; вызов с прежним токеном A возвращает 200 (cid совпадает); refresh R по-прежнему обменивается на новую пару"
