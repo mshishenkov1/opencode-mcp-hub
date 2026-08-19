@@ -30,6 +30,7 @@ SESSION_PREFIX = "mcpsess:"
 SESSION_COUNTER_PREFIX = "mcpsessn:"
 TOOLS_CACHE_PREFIX = "toolscache:"
 CB_PREFIX = "cb:"
+CB_PROBE_SUFFIX = ":probe"  # право на пробный запрос в half-open (R-P10)
 SSE_PREFIX = "sse:"
 RATE_MCP_PREFIX = "rl:mcp:"
 RATE_WINDOW = 60.0
@@ -159,7 +160,16 @@ def filter_tools_payload(payload: Any, tools: ToolFilter) -> Any:
 
 
 class CircuitBreaker:
-    """Выключатель на alias, состояние — в KV (R-P10)."""
+    """Выключатель на alias, состояние — в KV (R-P10).
+
+    Состояние ``cb:<alias>`` = ``{failures, open_until}``. Пока ``open_until`` в будущем — окно
+    открыто, запросы на upstream не идут. По истечении окна выключатель переходит в half-open:
+    право на **один** пробный запрос захватывается атомарно (``set_if_absent`` по ключу
+    ``cb:<alias>:probe`` — работает и между репликами), остальные запросы в это время получают
+    быстрый отказ. Успех пробы закрывает выключатель и обнуляет счётчик, ошибка — открывает окно
+    снова на ``HUB_CB_RESET`` (счётчик при открытии не обнуляется, иначе провал пробы требовал бы
+    заново накопить ``HUB_CB_FAILURES`` ошибок).
+    """
 
     def __init__(self, kv: KeyValueStore, clock: Clock, settings: Settings) -> None:
         self.kv = kv
@@ -169,6 +179,9 @@ class CircuitBreaker:
     def _key(self, alias: str) -> str:
         return CB_PREFIX + alias
 
+    def _probe_key(self, alias: str) -> str:
+        return CB_PREFIX + alias + CB_PROBE_SUFFIX
+
     async def state(self, alias: str) -> dict[str, Any]:
         record = await self.kv.get(self._key(alias))
         if not isinstance(record, dict):
@@ -176,16 +189,31 @@ class CircuitBreaker:
         return record
 
     async def check(self, alias: str) -> float | None:
-        """``None`` — можно идти на upstream; иначе секунды до следующей попытки."""
+        """``None`` — можно идти на upstream; иначе секунды до следующей попытки.
+
+        В half-open ``None`` получает только тот запрос, который захватил право на пробу.
+        """
         record = await self.state(alias)
         open_until = float(record.get("open_until") or 0.0)
+        if open_until <= 0.0:
+            return None
         now = self.clock.time()
         if open_until > now:
             return open_until - now
-        return None
+        probe_ttl = float(self.settings.cb_reset)
+        claimed = await self.kv.set_if_absent(
+            self._probe_key(alias), {"until": now + probe_ttl}, ttl=probe_ttl
+        )
+        if claimed:
+            return None
+        # Пробный запрос уже выполняет кто-то другой — быстрый отказ до его завершения.
+        held = await self.kv.get(self._probe_key(alias))
+        until = float(held.get("until") or 0.0) if isinstance(held, dict) else 0.0
+        return max(until - now, 1.0)
 
     async def record_success(self, alias: str) -> None:
         """Успешный ответ обнуляет счётчик ошибок и закрывает выключатель (R-P10)."""
+        await self.kv.delete(self._probe_key(alias))
         await self.kv.set(
             self._key(alias),
             {"failures": 0, "open_until": 0.0},
@@ -194,11 +222,17 @@ class CircuitBreaker:
 
     async def record_failure(self, alias: str) -> None:
         record = await self.state(alias)
-        failures = int(record.get("failures") or 0) + 1
-        open_until = 0.0
-        if failures >= self.settings.cb_failures:
-            open_until = self.clock.time() + self.settings.cb_reset
-            failures = 0
+        failures = int(record.get("failures") or 0)
+        open_until = float(record.get("open_until") or 0.0)
+        now = self.clock.time()
+        if open_until > 0.0:
+            # Провал пробного запроса (или ошибка при уже открытом окне) — окно открывается снова.
+            failures = max(failures, self.settings.cb_failures)
+            open_until = now + self.settings.cb_reset
+            await self.kv.delete(self._probe_key(alias))
+        else:
+            failures += 1
+            open_until = now + self.settings.cb_reset if failures >= self.settings.cb_failures else 0.0
         await self.kv.set(
             self._key(alias),
             {"failures": failures, "open_until": open_until},
