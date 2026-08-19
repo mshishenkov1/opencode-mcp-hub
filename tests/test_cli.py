@@ -35,7 +35,8 @@ def test_catalog_validate_valid_returns_0(
     code, out = _run(["catalog", "validate", "--path", str(path)], capsys)
     assert code == 0
     assert "OK" in out
-    assert "1" in out and "2" in out  # версия и число серверов
+    assert "version=1" in out, out  # версия каталога из документа
+    assert "servers=2" in out, out  # число загруженных серверов
 
 
 @pytest.mark.ac("AC-21")

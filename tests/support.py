@@ -9,7 +9,11 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import io
 import json
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +22,10 @@ import httpx
 import respx
 import yaml
 from sqlalchemy import text
+
+from hub.clock import Clock
+from hub.kv import InMemoryKeyValueStore
+from hub.logging_ import JsonFormatter
 
 LITELLM_URL = "https://litellm.test"
 PUBLIC_URL = "https://hub.test"
@@ -364,6 +372,73 @@ def record_text(record: Any) -> str:
     """Полный текст записи лога: сообщение + все дополнительные атрибуты (``extra``)."""
     extras = {k: v for k, v in record.__dict__.items() if not k.startswith("_")}
     return record.getMessage() + " " + json.dumps(extras, default=str, ensure_ascii=False)
+
+
+class JsonLogLines:
+    """Строки, которые JSON-хендлер Hub записал бы в stderr (R-S4), разобранные как JSON."""
+
+    def __init__(self, buffer: io.StringIO) -> None:
+        self._buffer = buffer
+
+    def raw(self) -> list[str]:
+        return [ln for ln in self._buffer.getvalue().splitlines() if ln.strip()]
+
+    def records(self) -> list[dict[str, Any]]:
+        return [json.loads(ln) for ln in self.raw()]
+
+    def find(self, message: str) -> list[dict[str, Any]]:
+        return [r for r in self.records() if r.get("message") == message]
+
+
+def hub_json_handlers() -> list[logging.StreamHandler[Any]]:
+    """Хендлеры root-логгера с JSON-форматтером Hub (ожидается ровно один на процесс)."""
+    return [
+        h
+        for h in logging.getLogger().handlers
+        if isinstance(h, logging.StreamHandler) and isinstance(h.formatter, JsonFormatter)
+    ]
+
+
+@contextmanager
+def capture_json_logs() -> Iterator[JsonLogLines]:
+    """Перехватить вывод JSON-хендлера Hub (подмена потока stderr на буфер) на время блока."""
+    handlers = hub_json_handlers()
+    assert len(handlers) == 1, f"ожидается ровно один JSON-хендлер Hub на root-логгере: {handlers}"
+    handler = handlers[0]
+    buffer = io.StringIO()
+    previous = handler.setStream(buffer)
+    try:
+        yield JsonLogLines(buffer)
+    finally:
+        handler.setStream(previous)
+
+
+# ---------------------------------------------------------------------------
+# KeyValueStore: запись с журналом ключей (для проверки формата ключей §6)
+# ---------------------------------------------------------------------------
+
+
+class RecordingKeyValueStore(InMemoryKeyValueStore):
+    """In-memory KeyValueStore, запоминающий все ключи, под которыми что-либо записывалось."""
+
+    def __init__(self, clock: Clock | None = None) -> None:
+        super().__init__(clock)
+        self.written_keys: list[str] = []
+
+    async def set(self, key: str, value: Any, ttl: float | None = None) -> None:
+        self.written_keys.append(key)
+        await super().set(key, value, ttl)
+
+    async def rate_limit_hit(self, key: str, now: float, window: float, limit: int) -> tuple[bool, float]:
+        self.written_keys.append(key)
+        return await super().rate_limit_hit(key, now, window, limit)
+
+
+async def kv_session(app: Any, login_id: str) -> dict[str, Any] | None:
+    """Запись сессии входа ``login:<login_id>`` из KeyValueStore приложения (spec §6)."""
+    value = await app.state.kv.get(f"login:{login_id}")
+    assert value is None or isinstance(value, dict)
+    return value
 
 
 def bearer(key: str) -> dict[str, str]:
