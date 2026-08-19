@@ -9,26 +9,26 @@
 
 | Показатель | Значение |
 | --- | --- |
-| Собрано тестов во всём наборе | 941 |
-| Прошло | 886 |
-| Упало | 0 (после фикса `0f7a92e`; см. раздел 2) |
+| Собрано тестов во всём наборе | 944 |
+| Прошло | 889 |
+| Упало | 0 (после фикса `0f7a92e` и правок по резолюции диспута; см. разделы 2 и 6а) |
 | Пропущено | 55 (docker / load / live — выключены переменными окружения, как и раньше) |
-| Тестов режима oauth (`tests/oauth/`) | 205 |
+| Тестов режима oauth (`tests/oauth/`) | 208 |
 | Критериев приёмки | 79 (AC-01…AC-79) |
 | AC без теста | 0 |
 | AC без **зелёного** теста | 0 |
-| Покрытие `tag_mcp/` | 100,00 % (3094 оператора, 0 непокрытых) |
+| Покрытие `tag_mcp/` | 100,00 % (3109 операторов, 0 непокрытых) |
 | `ruff check tag_mcp tests scripts` | чисто |
 | `mypy tag_mcp` | чисто (32 файла) |
 
-Тесты по файлам: `settings` 26, `endpoints` 23, `registration` 32, `authorize` 29,
-`consent` 15, `callback_token` 15, `mcp_access` 9, `refresh_revoke` 10,
+Тесты по файлам: `settings` 26, `endpoints` 23, `registration` 32, `authorize` 30,
+`consent` 15, `callback_token` 15, `mcp_access` 9, `refresh_revoke` 12,
 `scopes_policy` 12, `storage_logs` 6, `delivery` 10, `edge_branches` 18.
 
 Команды (окружение `export PATH=/opt/homebrew/bin:$PATH`):
 
 ```
-uv run pytest -n auto -q                                          # 886 passed, 55 skipped
+uv run pytest -n auto -q                                          # 889 passed, 55 skipped
 uv run pytest --cov=tag_mcp --cov-report=term-missing -q -p no:randomly
 uv run ruff check tag_mcp tests scripts
 ```
@@ -104,12 +104,12 @@ URI `https://app.magnit.ru/safe/../evil` нормализуется в `https://
 `uv run pytest --cov=tag_mcp --cov-report=term-missing -q -p no:randomly`:
 
 ```
-TOTAL                              3094      0   100%
+TOTAL                              3109      0   100%
 Required test coverage of 100.0% reached. Total coverage: 100.00%
 ```
 
-Непокрытых строк нет ни в одном модуле, включая новые `oauth.py` (385),
-`oauth_redirects.py` (40), `oauth_ui.py` (16), `scopes.py` (34). ~22 строки,
+Непокрытых строк нет ни в одном модуле, включая новые `oauth.py` (394),
+`oauth_redirects.py` (46), `oauth_ui.py` (16), `scopes.py` (34). ~22 строки,
 остававшиеся непокрытыми на момент прошлого обрыва, закрыты тестами поведения в
 `tests/oauth/test_edge_branches.py` и `test_registration.py`: не-JSON ответ
 Mattermost на обмене кода, чужие тела в хуке снятия `scope`, `OPTIONS`-preflight
@@ -126,9 +126,9 @@ scopes между рестартами, не-200 ответ библиотеки
 
 | Место | Ветка | Почему недостижима из тестов |
 | --- | --- | --- |
-| `tag_mcp/oauth.py:512` | `return client` в `get_client` | Достижимо только если FastMCP вернёт клиента, который не `ProxyDCRClient` и не `TagDCRClient`; библиотека такого объекта не отдаёт, подсунуть его можно лишь патчем внутренностей — это был бы тест реализации, а не поведения из AC |
-| `tag_mcp/oauth.py:597` | `mapping is None` в `_remember_grant` | Маппинг `jti → upstream` пишется в том же вызове строкой выше; ветка срабатывает только при потере записи между двумя обращениями к хранилищу |
-| `tag_mcp/oauth.py:904` | `metadata is None` в `get_routes` | SDK всегда создаёт маршрут `/.well-known/oauth-authorization-server`; отсутствие означало бы смену контракта библиотеки |
+| `tag_mcp/oauth.py:524` | `return client` в `get_client` | Достижимо только если FastMCP вернёт клиента, который не `ProxyDCRClient` и не `TagDCRClient`; библиотека такого объекта не отдаёт, подсунуть его можно лишь патчем внутренностей — это был бы тест реализации, а не поведения из AC |
+| `tag_mcp/oauth.py:627` | `mapping is None` в `_remember_grant` | Маппинг `jti → upstream` пишется в том же вызове строкой выше; ветка срабатывает только при потере записи между двумя обращениями к хранилищу |
+| `tag_mcp/oauth.py:939` | `metadata is None` в `get_routes` | SDK всегда создаёт маршрут `/.well-known/oauth-authorization-server`; отсутствие означало бы смену контракта библиотеки |
 | `tag_mcp/httpauth.py:218`, `tag_mcp/middleware.py:108` | защитные проверки | Были в коде до итерации, приняты ранее |
 
 Плюс два блока `if TYPE_CHECKING:` — исключение настроено в `pyproject.toml` и в этой
@@ -162,10 +162,79 @@ scopes между рестартами, не-200 ответ библиотеки
 * Код продукта (`tag_mcp/`) не трогался; ранее принятые тесты не ослаблялись и не
   удалялись; `pyproject.toml`, `.claude/`, `.github/` не менялись.
 
+## 6а. После review-i2-1: диспут и индекс гранта
+
+### Резолюция диспута `test-dispute-i2-reject-log` — `uphold_dispute`
+
+Ожидание «в событии `oauth.reject` лежит присланный `redirect_uri` дословно»
+исполнено в пользу диспута: URI с userinfo в WARNING писать нельзя (R-61, R-62),
+AC-26 требует отказа и `reason=redirect_uri`, а не дословной строки.
+
+Изменены два параметризованных ожидания в `tests/oauth/test_authorize.py`
+(`test_authorize_rejects_a_redirect_uri_forbidden_by_section_73` и
+`test_authorize_form_post_rejects_the_same_redirect_uri`, случай
+`http://localhost@evil.example/cb`). Вместо равенства сырому URI обе проверки
+идут через общий помощник `assert_reject_hides_userinfo(record, redirect_uri)`:
+
+* `reason == "redirect_uri"`;
+* значение поля `redirect_uri` события равно
+  `tag_mcp.oauth_redirects.redirect_uri_for_log(redirect_uri)` (публичная функция,
+  импортируется тестом);
+* в этом значении нет `@`, а схема, хост и путь сохранены;
+* для URI с userinfo — сырая строка не встречается ни в одном поле записи и ни
+  в сообщении.
+
+Остальные проверки этих тестов не ослаблены: 400, `error=invalid_request`,
+непустой `error_description`, отсутствие `Location`, ноль транзакций и ровно одно
+событие отказа остались на месте. Для трёх параметров без userinfo
+(`https://x.example/a/../b`, `http://localhost:5000/a/../cb`, `javascript:alert(1)`)
+`redirect_uri_for_log` — тождество, то есть ожидание там прежнее.
+
+Добавлен отдельный тест `test_password_from_userinfo_never_reaches_any_log_field`
+(маркер AC-26): URI `http://victim:sup3r-secret-pw@evil.example/cb` через GET и через
+форму `POST /authorize` — оба отказа 400, в обоих событиях `redirect_uri` равен
+`http://evil.example/cb`, и ни пароль, ни имя пользователя не встречаются ни в одной
+записи логгера `tag_mcp` на уровне DEBUG и выше (проверяются готовое сообщение и все
+поля `extra`, включая списки).
+
+### Индекс гранта (`tag_mcp/oauth.py::_remember_grant`)
+
+Два теста в `tests/oauth/test_refresh_revoke.py`, оба смотрят на состояние
+хранилища, а не на внутренности вызова:
+
+* `test_grant_index_drops_dead_jtis_and_keeps_one_refresh_hash` (AC-49, AC-52) —
+  после двух ротаций refresh индекс содержит ровно четыре jti (три access и текущий
+  refresh), jti обоих отработавших refresh-токенов из него ушли вместе со своими
+  маппингами; `refresh_hashes` — один элемент; в хранилище одна запись индекса и
+  один refresh-токен. Отзыв текущего access после ротаций обнуляет все четыре
+  коллекции (`tag-mcp-grants`, `mcp-jti-mappings`, `mcp-refresh-tokens`,
+  `mcp-upstream-tokens`), а текущий refresh перестаёт работать — значит хранился
+  хэш именно текущего токена, а не устаревшего.
+* `test_unchanged_grant_index_is_not_written_again` (AC-49) — повторный вызов
+  `_remember_grant` с тем же набором токенов не трогает запись: сырые (зашифрованные)
+  значения коллекции `tag-mcp-grants` до и после совпадают побайтово. Тавтологии нет —
+  в конце теста та же величина записывается в хранилище явно, и шифротекст меняется:
+  Fernet недетерминирован, поэтому совпадение выше означает именно пропущенную запись,
+  а не совпадение шифротекстов.
+
+В `tests/oauth/conftest.py` добавлена одна константа коллекции — `GRANTS =
+"tag-mcp-grants"`, рядом с прежними именами коллекций.
+
+### Прогоны после правок
+
+`uv run pytest -n auto -q` дважды подряд (случайный порядок, разные seed):
+оба раза `889 passed, 55 skipped` (13,1 с и 13,9 с), упавших нет.
+`uv run pytest --cov=tag_mcp --cov-report=term-missing -q -p no:randomly` —
+`889 passed, 55 skipped`, `TOTAL 3109 0 100%`.
+`uv run ruff check tag_mcp tests scripts` — `All checks passed!`.
+Код продукта (`tag_mcp/`) не менялся; ранее принятые тесты не удалялись и не
+ослаблялись.
+
 ## 7. Таблица AC → тесты
 
 Собрана скриптом по маркерам `@pytest.mark.ac(...)` (pytest-плагин на
-`pytest_collection_modifyitems`), 205 привязок, все 79 критериев закрыты.
+`pytest_collection_modifyitems`), 209 привязок (у одного теста два маркера —
+AC-49 и AC-52), все 79 критериев закрыты.
 Имена файлов — сокращённо, без префикса `tests/oauth/test_` и расширения;
 `×N` — число параметризаций.
 
@@ -196,7 +265,7 @@ scopes между рестартами, не-200 ответ библиотеки
 | AC-23 | authorize ведёт на экран согласия либо сразу в Mattermost по TAG_MCP_CONSENT | `authorize`: test_remember_and_always_lead_to_the_consent_screen ×2<br>`authorize`: test_external_goes_straight_to_mattermost | 3 | зелено |
 | AC-24 | URL Mattermost по умолчанию не содержит scope, PKCE и resource | `authorize`: test_default_mattermost_url_has_no_scope_pkce_or_resource | 1 | зелено |
 | AC-25 | Настройки пробрасывания PKCE и upstream-scope действуют | `authorize`: test_forward_pkce_and_upstream_scope_reach_mattermost | 1 | зелено |
-| AC-26 | Умолчание TAG_MCP_ALLOWED_REDIRECTS: loopback любой порт и любой https | `authorize`: test_authorize_rejects_a_redirect_uri_forbidden_by_section_73 ×4<br>`authorize`: test_authorize_form_post_rejects_the_same_redirect_uri ×4<br>`edge_branches`: test_malformed_uris_never_match ×4<br>`registration`: test_default_allow_list_accepts_loopback_and_https ×5<br>`registration`: test_default_allow_list_rejects_everything_else ×5<br>`registration`: test_default_allow_list_rejects_dot_segments_in_redirect_path<br>`registration`: test_allow_list_function_rejects_the_same_uris ×6 | 29 | зелено |
+| AC-26 | Умолчание TAG_MCP_ALLOWED_REDIRECTS: loopback любой порт и любой https | `authorize`: test_authorize_rejects_a_redirect_uri_forbidden_by_section_73 ×4<br>`authorize`: test_authorize_form_post_rejects_the_same_redirect_uri ×4<br>`edge_branches`: test_malformed_uris_never_match ×4<br>`registration`: test_default_allow_list_accepts_loopback_and_https ×5<br>`registration`: test_default_allow_list_rejects_everything_else ×5<br>`registration`: test_default_allow_list_rejects_dot_segments_in_redirect_path<br>`registration`: test_allow_list_function_rejects_the_same_uris ×6<br>`authorize`: test_password_from_userinfo_never_reaches_any_log_field | 30 | зелено |
 | AC-27 | Собственный список шаблонов и пустое значение | `registration`: test_custom_patterns_replace_the_default<br>`registration`: test_empty_allow_list_means_the_default<br>`registration`: test_any_host_pattern_semantics ×6 | 8 | зелено |
 | AC-28 | Отказы логируются событием oauth.reject без секретов | `registration`: test_rejections_are_logged_without_secrets<br>`registration`: test_no_reject_event_for_a_good_registration | 2 | зелено |
 | AC-29 | Экран согласия — на русском, с названием ТЭГ MCP, клиентом, redirect и кнопками | `consent`: test_consent_screen_is_russian_and_names_everything<br>`consent`: test_consent_form_posts_to_the_same_path | 2 | зелено |
@@ -219,10 +288,10 @@ scopes между рестартами, не-200 ответ библиотеки
 | AC-46 | Недействительные JWT и отвергнутые upstream-токены дают 401 | `mcp_access`: test_invalid_jwts_and_rejected_upstream_tokens_give_401<br>`mcp_access`: test_jwt_for_another_audience_is_rejected<br>`mcp_access`: test_jti_mapping_is_what_binds_the_jwt_to_the_grant | 3 | зелено |
 | AC-47 | Истекающий upstream-токен обновляется прозрачно | `mcp_access`: test_expiring_upstream_token_is_refreshed_transparently | 1 | зелено |
 | AC-48 | Неудачный прозрачный refresh — 401 | `mcp_access`: test_failed_transparent_refresh_is_401 | 1 | зелено |
-| AC-49 | Refresh ротирует токены | `refresh_revoke`: test_refresh_rotates_both_tokens<br>`refresh_revoke`: test_old_access_token_keeps_working_after_refresh | 2 | зелено |
+| AC-49 | Refresh ротирует токены | `refresh_revoke`: test_refresh_rotates_both_tokens<br>`refresh_revoke`: test_old_access_token_keeps_working_after_refresh<br>`refresh_revoke`: test_grant_index_drops_dead_jtis_and_keeps_one_refresh_hash<br>`refresh_revoke`: test_unchanged_grant_index_is_not_written_again | 4 | зелено |
 | AC-50 | Refresh не расширяет, но может сузить scopes | `refresh_revoke`: test_refresh_cannot_widen_but_can_narrow_scopes | 1 | зелено |
 | AC-51 | Refresh JWT привязан к клиенту | `refresh_revoke`: test_refresh_token_is_bound_to_its_client<br>`refresh_revoke`: test_refresh_without_client_id_is_400 | 2 | зелено |
-| AC-52 | Отзыв access JWT завершает весь грант и вызывает logout в Mattermost | `refresh_revoke`: test_revoking_the_access_token_ends_the_whole_grant | 1 | зелено |
+| AC-52 | Отзыв access JWT завершает весь грант и вызывает logout в Mattermost | `refresh_revoke`: test_revoking_the_access_token_ends_the_whole_grant<br>`refresh_revoke`: test_grant_index_drops_dead_jtis_and_keeps_one_refresh_hash | 2 | зелено |
 | AC-53 | Отзыв refresh JWT, отключённый и упавший logout | `refresh_revoke`: test_revoking_refresh_token_disabled_logout_and_failed_logout | 1 | зелено |
 | AC-54 | Неизвестный или чужой токен на /revoke не ломает чужие гранты | `edge_branches`: test_revoke_with_an_explicit_empty_client_secret_is_accepted<br>`edge_branches`: test_revoke_token_ignores_tokens_without_a_grant<br>`refresh_revoke`: test_unknown_or_foreign_token_on_revoke_does_not_break_other_grants<br>`refresh_revoke`: test_revoke_without_client_id_is_400<br>`refresh_revoke`: test_revoke_accepts_a_public_client_without_client_secret_field | 5 | зелено |
 | AC-55 | authorize и выдача токена логируются | `callback_token`: test_authorize_and_token_are_logged | 1 | зелено |
