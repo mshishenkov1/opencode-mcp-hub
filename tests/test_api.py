@@ -725,3 +725,56 @@ async def test_log_level_setting_filters_request_logs(make_hub: HubFactory) -> N
     with capture_json_logs() as logs:
         assert (await verbose.get("/health")).status_code == 200
     assert len([r for r in logs.records() if r["message"].startswith("http_request")]) == 1
+
+
+# --- Усиление после mutation-прогона -----------------------------------------
+
+
+@pytest.mark.ac("AC-48")
+async def test_unauthorized_body_is_exact(hub: Hub) -> None:
+    """Тело 401 воспроизводится дословно: {error, message, hint} и ничего кроме (R-L6, R-A7)."""
+    resp = await hub.get("/api/me")
+    assert resp.status_code == 401
+    assert resp.json() == {
+        "error": "unauthorized",
+        "message": "Требуется ключ доступа",
+        "hint": UNAUTHORIZED_HINT,
+    }
+
+
+@pytest.mark.ac("AC-63")
+async def test_internal_error_body_is_exact(hub: Hub, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Тело 500 — фиксированный текст без деталей исключения (R-A7)."""
+    await seed_user_with_key(hub.app, "sk-ok")
+    broken = Database(build_engine(f"sqlite+aiosqlite:///{tmp_path}/no/such/dir/hub.db"))
+    original = hub.app.state.db
+    hub.app.state.db = broken
+    try:
+        async with _no_raise_client(hub) as client:
+            resp = await client.get("/api/me", headers=bearer("sk-ok"))
+    finally:
+        hub.app.state.db = original
+        await broken.dispose()
+    assert resp.status_code == 500
+    assert resp.json() == {"error": "internal_error", "message": "Внутренняя ошибка сервера"}
+
+
+@pytest.mark.ac("AC-64")
+async def test_request_log_record_has_exactly_declared_fields(hub: Hub) -> None:
+    """Состав полей записи о запросе фиксирован: лишние ключи (опечатки в extra) недопустимы."""
+    with capture_json_logs() as logs:
+        assert (await hub.get("/health", headers={"X-Request-ID": "req-fields"})).status_code == 200
+    record = logs.records()[0]
+    assert set(record) == {
+        "ts",
+        "level",
+        "logger",
+        "message",
+        "request_id",
+        "method",
+        "path",
+        "route",
+        "status",
+        "duration_ms",
+    }
+    assert record["request_id"] == "req-fields"

@@ -1562,3 +1562,308 @@ async def test_litellm_unavailable_on_start_is_logged_as_json_warning_with_reaso
     raw = "\n".join(logs.raw())
     assert re.search(r"[а-яА-Я]", raw), raw
     assert "\\u04" not in raw
+
+
+# --- Усиление после mutation-прогона -----------------------------------------
+
+LOG_BASE_FIELDS = {"ts", "level", "logger", "message", "request_id"}
+_UNAVAILABLE_MSG = {"message": "LiteLLM недоступен, повторите попытку позже"}
+
+
+def _single(records: list[dict[str, Any]], level: str, message: str) -> dict[str, Any]:
+    """Единственная запись JSON-лога заданного уровня с заданным событием."""
+    found = [r for r in records if r["level"] == level and r["message"] == message]
+    assert len(found) == 1, (message, records)
+    return found[0]
+
+
+@pytest.mark.ac("AC-26")
+@pytest.mark.parametrize("status", [404, 300], ids=["4xx", "3xx"])
+async def test_cli_start_non_2xx_upstream_is_502_even_with_valid_body(
+    hub: Hub, status: int
+) -> None:
+    """Любой ответ вне 2xx на /sso/cli/start — недоступность, даже если тело выглядит корректным."""
+    mock_start(hub.litellm, start_body(), status=status)
+    with capture_json_logs() as logs:
+        resp = await hub.post("/cli/start", json={"client": CLIENT})
+    assert resp.status_code == 502
+    assert resp.json() == {"status": "error", "error": "litellm_unavailable", **_UNAVAILABLE_MSG}
+    warning = _single(logs.records(), "WARNING", "litellm_cli_start_failed")
+    assert warning["reason"] == f"LiteLLM /sso/cli/start ответил {status}"
+    assert await _metric_active_sessions(hub) == 0
+
+
+@pytest.mark.ac("AC-26")
+async def test_cli_start_2xx_without_required_fields_reports_invalid_answer(hub: Hub) -> None:
+    """200 без login_id/poll_secret — это невалидный ответ LiteLLM, а не успешный старт."""
+    mock_start(hub.litellm, {"user_code": "ABCD-1234"})
+    with capture_json_logs() as logs:
+        resp = await hub.post("/cli/start", json={"client": CLIENT})
+    assert resp.status_code == 502
+    warning = _single(logs.records(), "WARNING", "litellm_cli_start_failed")
+    assert warning["reason"] == "LiteLLM /sso/cli/start вернул невалидный ответ"
+
+
+@pytest.mark.ac("AC-24")
+async def test_login_started_audit_details_carry_client_and_login_id(hub: Hub) -> None:
+    """Аудит старта входа связывает запись с сессией: details == {client, login_id} (R-S3)."""
+    start = await _start(hub)
+    rows = await audit_rows(hub.app, "login_started")
+    assert len(rows) == 1
+    assert rows[0]["details"] == {"client": CLIENT, "login_id": start["login_id"]}
+
+
+@pytest.mark.ac("AC-46")
+async def test_poll_5xx_warning_record_names_session_and_reason(hub: Hub) -> None:
+    """Недоступность LiteLLM при опросе диагностируется одной записью с login_id и причиной."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, None, status=500)
+    with capture_json_logs() as logs:
+        resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 502
+    warning = _single(logs.records(), "WARNING", "litellm_poll_failed")
+    assert set(warning) == LOG_BASE_FIELDS | {"login_id", "reason"}
+    assert warning["login_id"] == start["login_id"]
+    assert warning["reason"] == "LiteLLM /sso/cli/poll ответил 500"
+
+
+@pytest.mark.ac("AC-46")
+async def test_poll_4xx_is_logged_with_upstream_status(hub: Hub) -> None:
+    """Отказ LiteLLM (4xx) закрывает сессию и фиксируется записью с кодом апстрима."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, None, status=403)
+    with capture_json_logs() as logs:
+        resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 404
+    record = _single(logs.records(), "INFO", "litellm_poll_rejected")
+    assert set(record) == LOG_BASE_FIELDS | {"login_id", "upstream_status"}
+    assert record["login_id"] == start["login_id"]
+    assert record["upstream_status"] == 403
+
+
+@pytest.mark.ac("AC-42")
+async def test_key_generate_5xx_warning_record_names_session_and_reason(hub: Hub) -> None:
+    """5xx от /key/generate: 502 клиенту и запись с login_id и причиной."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, ready_body(_jwt(hub)))
+    mock_key_generate(hub.litellm, status=500)
+    with capture_json_logs() as logs:
+        resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 502
+    warning = _single(logs.records(), "WARNING", "litellm_key_generate_failed")
+    assert set(warning) == LOG_BASE_FIELDS | {"login_id", "reason"}
+    assert warning["login_id"] == start["login_id"]
+    assert warning["reason"] == "LiteLLM /key/generate ответил 500"
+
+
+@pytest.mark.ac("AC-42")
+async def test_key_generate_2xx_without_key_is_502_and_session_survives(hub: Hub) -> None:
+    """2xx без поля key — ключ не выдан: 502, сессия жива, повтор через 2 с получает ключ."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, ready_body(_jwt(hub)))
+    empty = mock_key_generate(hub.litellm, key=None)
+    with capture_json_logs() as logs:
+        resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 502
+    assert resp.json()["error"] == "litellm_unavailable"
+    warning = _single(logs.records(), "WARNING", "litellm_key_generate_no_key")
+    assert set(warning) == LOG_BASE_FIELDS | {"login_id"}
+    assert warning["login_id"] == start["login_id"]
+
+    empty.mock(return_value=httpx.Response(200, json={"key": "sk-late"}))
+    hub.clock.advance(2)
+    retry = await hub.poll(start["login_id"], start["poll_secret"])
+    assert retry.status_code == 200
+    assert retry.json()["key"] == "sk-late"
+
+
+@pytest.mark.ac("AC-42")
+async def test_key_generate_3xx_is_unavailable(hub: Hub) -> None:
+    """Перенаправление вместо ответа /key/generate — недоступность (2xx и 4xx исчерпывают контракт)."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, ready_body(_jwt(hub)))
+    mock_key_generate(hub.litellm, "sk-never", status=302)
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 502
+    assert resp.json()["error"] == "litellm_unavailable"
+    assert await fetch_rows(hub.app, "SELECT key_sha256 FROM api_keys") == []
+
+
+@pytest.mark.ac("AC-41")
+async def test_jwt_fallback_warning_record_fields(hub: Hub) -> None:
+    """Переход на JWT сопровождается одной записью с login_id, кодом апстрима и пользователем."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, ready_body(_jwt(hub)))
+    mock_key_generate(hub.litellm, status=403)
+    with capture_json_logs() as logs:
+        resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 200
+    assert resp.json()["key_kind"] == "jwt"
+    warning = _single(logs.records(), "WARNING", "key_generate_fallback_jwt")
+    assert set(warning) == LOG_BASE_FIELDS | {"login_id", "upstream_status", "user_id"}
+    assert warning["login_id"] == start["login_id"]
+    assert warning["upstream_status"] == 403
+    assert warning["user_id"] == "u1"
+
+
+@pytest.mark.ac("AC-44")
+async def test_login_completed_log_record_fields(hub: Hub) -> None:
+    """Завершение входа фиксируется записью {login_id, user_id, key_kind, team_id} без ключа."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, ready_body(_jwt(hub), team_id="t7"))
+    mock_key_generate(hub.litellm, "sk-test-3")
+    with capture_json_logs() as logs:
+        resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 200
+    record = _single(logs.records(), "INFO", "login_completed")
+    assert set(record) == LOG_BASE_FIELDS | {"login_id", "user_id", "key_kind", "team_id"}
+    assert record["login_id"] == start["login_id"]
+    assert record["user_id"] == "u1"
+    assert record["key_kind"] == "persistent"
+    assert record["team_id"] == "t7"
+    assert "sk-test-3" not in "\n".join(logs.raw())
+
+
+@pytest.mark.ac("AC-44")
+async def test_new_user_row_gets_default_group_all(hub: Hub) -> None:
+    """Созданный входом пользователь получает группу по умолчанию ['all'] (spec §6)."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, ready_body(_jwt(hub)))
+    mock_key_generate(hub.litellm, "sk-groups")
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).status_code == 200
+    rows = await fetch_rows(hub.app, "SELECT user_id, groups FROM users")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["groups"]) == ["all"]
+
+
+@pytest.mark.ac("AC-33")
+async def test_team_entries_without_team_id_are_skipped(hub: Hub) -> None:
+    """В списке teams записи без team_id игнорируются, а не ломают разбор ответа."""
+    start = await _start(hub)
+    ready = mock_poll(hub.litellm, ready_body(_jwt(hub), team_id="t1"), team_id="t1")
+    mock_poll(
+        hub.litellm,
+        {
+            "status": "ready",
+            "requires_team_selection": True,
+            "teams": [{"team_alias": "без id"}, {"team_id": "t1", "team_alias": "A"}],
+        },
+    )
+    mock_key_generate(hub.litellm, "sk-one-team")
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 200, resp.text
+    # осталась ровно одна пригодная команда → выбрана автоматически
+    assert resp.json()["team_id"] == "t1"
+    assert ready.called
+
+
+@pytest.mark.ac("AC-33")
+async def test_session_record_in_team_selection_keeps_declared_fields(hub: Hub) -> None:
+    """Ожидание выбора команды меняет только state/teams/team_id — состав записи не расширяется."""
+    start = await _start(hub)
+    before = await kv_session(hub.app, start["login_id"])
+    assert before is not None
+    mock_poll(hub.litellm, teams_body(("t1", "A"), ("t2", "B")))
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).status_code == 200
+
+    session = await kv_session(hub.app, start["login_id"])
+    assert session is not None
+    assert set(session) == set(before)
+    assert session["state"] == "team_selection"
+    assert session["team_id"] is None
+    assert session["teams"] == [
+        {"team_id": "t1", "team_alias": "A"},
+        {"team_id": "t2", "team_alias": "B"},
+    ]
+
+
+@pytest.mark.ac("AC-24")
+async def test_session_record_after_pending_poll_keeps_declared_fields(hub: Hub) -> None:
+    """Ответ pending не добавляет в запись сессии новых полей и не меняет состояние."""
+    start = await _start(hub)
+    before = await kv_session(hub.app, start["login_id"])
+    assert before is not None
+    mock_poll(hub.litellm, {"status": "pending"})
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).json() == {"status": "pending"}
+
+    session = await kv_session(hub.app, start["login_id"])
+    assert session is not None
+    assert set(session) == set(before)
+    assert session["state"] == "pending"
+    assert session["last_response"] == {"code": 200, "body": {"status": "pending"}}
+
+
+@pytest.mark.ac("AC-35")
+@pytest.mark.ac("AC-36")
+async def test_choose_team_error_messages_are_exact(hub: Hub) -> None:
+    """Ошибки выбора команды несут пояснение, а не только код (R-A7)."""
+    start = await _start(hub)
+    mock_poll(hub.litellm, teams_body(("t1", "A"), ("t2", "B")))
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).status_code == 200
+
+    outside = await hub.choose_team(start["login_id"], start["poll_secret"], {"team_id": "t9"})
+    assert outside.status_code == 400
+    assert outside.json() == {
+        "status": "error",
+        "error": "invalid_team",
+        "message": "Команда не входит в список доступных",
+    }
+
+    empty = await hub.choose_team(start["login_id"], start["poll_secret"], {})
+    assert empty.status_code == 400
+    assert empty.json() == {
+        "status": "error",
+        "error": "invalid_request",
+        "message": "Ожидается JSON-объект {team_id: string}",
+    }
+
+    fresh = await _start(hub, ll_id="ll-2")
+    conflict = await hub.choose_team(fresh["login_id"], fresh["poll_secret"], {"team_id": "t1"})
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "status": "error",
+        "error": "team_selection_not_required",
+        "message": "Сессия не ожидает выбора команды",
+    }
+
+
+@pytest.mark.ac("AC-27")
+async def test_cli_start_body_json_errors_and_blank_body(hub: Hub) -> None:
+    """Тело из пробелов равнозначно пустому; нечитаемый JSON — 400 с пояснением."""
+    start_route = mock_start(hub.litellm)
+    blank = await hub.post(
+        "/cli/start", content="   \n", headers={"Content-Type": "application/json"}
+    )
+    assert blank.status_code == 200, blank.text
+    assert start_route.call_count == 1
+
+    broken = await hub.post(
+        "/cli/start", content="{not json", headers={"Content-Type": "application/json"}
+    )
+    assert broken.status_code == 400
+    assert broken.json() == {
+        "status": "error",
+        "error": "invalid_request",
+        "message": "Тело запроса должно быть JSON",
+    }
+    assert start_route.call_count == 1
+
+
+@pytest.mark.ac("AC-40")
+async def test_jwt_claims_read_without_signature_and_without_padding(hub: Hub) -> None:
+    """Claims читаются из токена без подписи и без выравнивания base64 (подпись Hub не проверяет)."""
+    # длина payload-сегмента ≡ 3 (mod 4): без досыпания '=' base64 не декодируется
+    for filler in range(64):
+        token = make_jwt({"sub": "u9", "email": "u9@corp.test", "pad": "x" * filler})
+        if len(token.split(".")[1]) % 4 == 3:
+            break
+    else:  # pragma: no cover - гарантированно находится на первых итерациях
+        raise AssertionError("не удалось построить payload нужной длины")
+    unsigned = ".".join(token.split(".")[:2])  # только header.payload
+
+    start = await _start(hub)
+    mock_poll(hub.litellm, {"status": "ready", "key": unsigned, "teams": []})
+    mock_key_generate(hub.litellm, "sk-unsigned")
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["user"] == {"user_id": "u9", "email": "u9@corp.test"}
