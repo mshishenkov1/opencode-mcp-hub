@@ -603,12 +603,10 @@ async def mcp_post(alias: str, request: Request) -> Response:
             if isinstance(cached, dict):
                 body = filter_tools_payload({**cached, "id": ctx.request_id}, ctx.tools)
                 _record_metrics(ctx, method_label, 200)
-                return JSONResponse(
-                    body,
-                    headers=_passthrough_headers(
-                        httpx.Response(200), session.client_session_id if session else None
-                    ),
+                headers = (
+                    {"Mcp-Session-Id": session.client_session_id} if session is not None else {}
                 )
+                return JSONResponse(body, headers=headers)
 
         response = await _send(ctx, "POST", ctx.body, session)
         client_session_id = session.client_session_id if session else None
