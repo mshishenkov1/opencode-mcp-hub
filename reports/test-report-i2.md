@@ -9,31 +9,31 @@
 
 | Показатель | Значение |
 | --- | --- |
-| Собрано тестов во всём наборе | 931 |
-| Прошло | 875 |
-| Упало | 1 (`test_default_allow_list_rejects_dot_segments_in_redirect_path`, оставлен красным — BUG-I2-001) |
+| Собрано тестов во всём наборе | 941 |
+| Прошло | 886 |
+| Упало | 0 (после фикса `0f7a92e`; см. раздел 2) |
 | Пропущено | 55 (docker / load / live — выключены переменными окружения, как и раньше) |
-| Тестов режима oauth (`tests/oauth/`) | 195 |
+| Тестов режима oauth (`tests/oauth/`) | 205 |
 | Критериев приёмки | 79 (AC-01…AC-79) |
 | AC без теста | 0 |
 | AC без **зелёного** теста | 0 |
-| Покрытие `tag_mcp/` | 100,00 % (3064 оператора, 0 непокрытых) |
+| Покрытие `tag_mcp/` | 100,00 % (3094 оператора, 0 непокрытых) |
 | `ruff check tag_mcp tests scripts` | чисто |
 | `mypy tag_mcp` | чисто (32 файла) |
 
-Тесты по файлам: `settings` 26, `endpoints` 23, `registration` 32, `authorize` 19,
+Тесты по файлам: `settings` 26, `endpoints` 23, `registration` 32, `authorize` 29,
 `consent` 15, `callback_token` 15, `mcp_access` 9, `refresh_revoke` 10,
 `scopes_policy` 12, `storage_logs` 6, `delivery` 10, `edge_branches` 18.
 
 Команды (окружение `export PATH=/opt/homebrew/bin:$PATH`):
 
 ```
-uv run pytest -n auto -q                                          # 1 failed, 875 passed, 55 skipped
+uv run pytest -n auto -q                                          # 886 passed, 55 skipped
 uv run pytest --cov=tag_mcp --cov-report=term-missing -q -p no:randomly
 uv run ruff check tag_mcp tests scripts
 ```
 
-## 2. Решение по падавшему тесту: `code_bug`, тест оставлен красным
+## 2. Решение по падавшему тесту: `code_bug` → фикс принят
 
 `tests/oauth/test_registration.py::test_default_allow_list_rejects_dot_segments_in_redirect_path`.
 
@@ -53,11 +53,42 @@ R-24 — что проверка выполняется в том числе п�
 нормализованное значение. Правка — в коде продукта, трогать его нельзя, поэтому
 оформлен баг, а тест оставлен падающим как воспроизведение.
 
+Фикс `0f7a92e` принят — подробности в разделе 2а.
+
+## 2а. Верификация BUG-I2-001 (фикс `0f7a92e`)
+
+Проверка велась по спецификации (R-19, R-23, R-24, R-25) и AC-26; контекст решений
+DEV-AGENT не запрашивался.
+
+1. Падавший тест
+   `tests/oauth/test_registration.py::test_default_allow_list_rejects_dot_segments_in_redirect_path`
+   (`uv run pytest … -q -p no:randomly`) — **1 passed**. Тест не менялся и остаётся
+   в сьюте как регрессионный.
+2. Полный сьют `uv run pytest -n auto -q` — **886 passed, 55 skipped, 0 failed**.
+3. Покрытие `tag_mcp/` вернулось к 100,00 % (см. раздел 4): после фикса непокрытыми
+   оставались три строки в `tag_mcp/oauth.py` (263–264 — отказ `_QueryGuard` на
+   `GET /authorize`; 498 — разбор сырого `redirect_uri` формы `POST /authorize`).
+   Закрыты новыми тестами поведения в `tests/oauth/test_authorize.py`:
+
+   | Тест | Маркер | Что проверяет |
+   | --- | --- | --- |
+   | `test_authorize_rejects_a_redirect_uri_forbidden_by_section_73` ×4 | AC-26 | `GET /authorize` с сырым `redirect_uri` (`https://x.example/a/../b`, `http://localhost:5000/a/../cb`, `http://localhost@evil.example/cb`, `javascript:alert(1)`) → `400`, тело RFC 6749 §5.2 `{"error": "invalid_request", "error_description": …}`, `Location` нет, транзакция не создана, ровно одно событие `oauth.reject` с `reason=redirect_uri` и исходным (ненормализованным) URI |
+   | `test_authorize_form_post_rejects_the_same_redirect_uri` ×4 | AC-26 | то же для формы `POST /authorize` (SDK принимает оба метода) — те же четыре URI, тот же ответ и то же событие |
+   | `test_valid_redirect_still_reaches_the_consent_screen` | AC-21 | регрессия: обычный `GET /authorize` с законным redirect — `302` на `B/consent?txn_id=…`, транзакция одна, события `oauth.reject` нет |
+   | `test_valid_redirect_in_a_form_post_reaches_the_consent_screen` | AC-21 | регрессия: форма `POST /authorize` с законным redirect — тоже `302` на `B/consent?txn_id=…` |
+
+   Проверенное поведение соответствует R-19 (отказ без создания транзакции),
+   R-23 (dot-сегменты, userinfo и небезопасная схема отвергаются всегда, независимо
+   от allow-list), R-24 (обе точки проверки — DCR и `/authorize`) и R-25 (событие
+   `oauth.reject` с `reason=redirect_uri` и самим URI).
+4. Итог: **`bugs/BUG-I2-001.json` → `status: "fixed"`**. Код продукта не менялся,
+   ранее принятые тесты не ослаблялись.
+
 ## 3. Баги
 
 | ID | AC | Severity | Симптом | Падающий тест | Статус |
 | --- | --- | --- | --- | --- | --- |
-| BUG-I2-001 | AC-26 (R-23, R-24) | low | `POST /register` принимает `redirect_uri` с dot-сегментами: `201` и молчаливая нормализация вместо `400 invalid_redirect_uri` | `tests/oauth/test_registration.py::test_default_allow_list_rejects_dot_segments_in_redirect_path` | open |
+| BUG-I2-001 | AC-26 (R-23, R-24) | low | `POST /register` принимает `redirect_uri` с dot-сегментами: `201` и молчаливая нормализация вместо `400 invalid_redirect_uri` | `tests/oauth/test_registration.py::test_default_allow_list_rejects_dot_segments_in_redirect_path` | fixed (`0f7a92e`, верификация — раздел 2а) |
 
 Почему `low`, а не выше: эксплуатируемого обхода allow-list за нормализацией не
 нашлось — сохраняется и используется уже нормализованный URI, и он проходит те же
@@ -73,11 +104,11 @@ URI `https://app.magnit.ru/safe/../evil` нормализуется в `https://
 `uv run pytest --cov=tag_mcp --cov-report=term-missing -q -p no:randomly`:
 
 ```
-TOTAL                              3064      0   100%
+TOTAL                              3094      0   100%
 Required test coverage of 100.0% reached. Total coverage: 100.00%
 ```
 
-Непокрытых строк нет ни в одном модуле, включая новые `oauth.py` (355),
+Непокрытых строк нет ни в одном модуле, включая новые `oauth.py` (385),
 `oauth_redirects.py` (40), `oauth_ui.py` (16), `scopes.py` (34). ~22 строки,
 остававшиеся непокрытыми на момент прошлого обрыва, закрыты тестами поведения в
 `tests/oauth/test_edge_branches.py` и `test_registration.py`: не-JSON ответ
@@ -95,9 +126,9 @@ scopes между рестартами, не-200 ответ библиотеки
 
 | Место | Ветка | Почему недостижима из тестов |
 | --- | --- | --- |
-| `tag_mcp/oauth.py:458` | `return client` в `get_client` | Достижимо только если FastMCP вернёт клиента, который не `ProxyDCRClient` и не `TagDCRClient`; библиотека такого объекта не отдаёт, подсунуть его можно лишь патчем внутренностей — это был бы тест реализации, а не поведения из AC |
-| `tag_mcp/oauth.py:543` | `mapping is None` в `_remember_grant` | Маппинг `jti → upstream` пишется в том же вызове строкой выше; ветка срабатывает только при потере записи между двумя обращениями к хранилищу |
-| `tag_mcp/oauth.py:826` | `metadata is None` в `get_routes` | SDK всегда создаёт маршрут `/.well-known/oauth-authorization-server`; отсутствие означало бы смену контракта библиотеки |
+| `tag_mcp/oauth.py:512` | `return client` в `get_client` | Достижимо только если FastMCP вернёт клиента, который не `ProxyDCRClient` и не `TagDCRClient`; библиотека такого объекта не отдаёт, подсунуть его можно лишь патчем внутренностей — это был бы тест реализации, а не поведения из AC |
+| `tag_mcp/oauth.py:597` | `mapping is None` в `_remember_grant` | Маппинг `jti → upstream` пишется в том же вызове строкой выше; ветка срабатывает только при потере записи между двумя обращениями к хранилищу |
+| `tag_mcp/oauth.py:904` | `metadata is None` в `get_routes` | SDK всегда создаёт маршрут `/.well-known/oauth-authorization-server`; отсутствие означало бы смену контракта библиотеки |
 | `tag_mcp/httpauth.py:218`, `tag_mcp/middleware.py:108` | защитные проверки | Были в коде до итерации, приняты ранее |
 
 Плюс два блока `if TYPE_CHECKING:` — исключение настроено в `pyproject.toml` и в этой
@@ -105,16 +136,23 @@ scopes между рестартами, не-200 ответ библиотеки
 
 ## 5. Стабильность
 
-Полный прогон `uv run pytest -n auto -q` выполнен дважды подряд (плагин
-`pytest-randomly` каждый раз тасует порядок новым seed): оба раза
-`1 failed, 875 passed, 55 skipped`, 22,5 с и 23,5 с. Тесты, помеченные
+После фикса полный прогон `uv run pytest -n auto -q` выполнен дважды подряд
+(плагин `pytest-randomly` каждый раз тасует порядок новым seed): оба раза
+`886 passed, 55 skipped`, 13,7 с и 15,3 с. Тесты, помеченные
 `@pytest.mark.flaky_suspect`, отсутствуют — подозрений на нестабильность нет.
-Красный тест один и тот же в обоих прогонах, то есть это детерминированное
+`uv run ruff check tag_mcp tests scripts` — чисто.
+
+До фикса те же два прогона давали `1 failed, 875 passed, 55 skipped` (22,5 с и
+23,5 с) с одним и тем же красным тестом — то есть это было детерминированное
 расхождение с AC, а не флак.
 
 ## 6. Правки этой итерации
 
 * Дооформлен триаж падающего теста → `bugs/BUG-I2-001.json`; сам тест не менялся.
+* После фикса `0f7a92e`: в `tests/oauth/test_authorize.py` добавлены 10 тестов
+  поведения на отказ `/authorize` по сырому `redirect_uri` (GET и форма POST) и
+  на регрессию обычного флоу до `/consent`; `bugs/BUG-I2-001.json` переведён в
+  `status: "fixed"`.
 * Приведён к чистому `ruff check`: убраны 10 неактуальных директив `# noqa`
   (`S105`/`SLF001` не включены для `tests/`) в `tests/oauth/conftest.py`,
   `test_edge_branches.py`, `test_mcp_access.py`, `test_storage_logs.py` и
@@ -127,7 +165,7 @@ scopes между рестартами, не-200 ответ библиотеки
 ## 7. Таблица AC → тесты
 
 Собрана скриптом по маркерам `@pytest.mark.ac(...)` (pytest-плагин на
-`pytest_collection_modifyitems`), 195 привязок, все 79 критериев закрыты.
+`pytest_collection_modifyitems`), 205 привязок, все 79 критериев закрыты.
 Имена файлов — сокращённо, без префикса `tests/oauth/test_` и расширения;
 `×N` — число параметризаций.
 
@@ -153,12 +191,12 @@ scopes между рестартами, не-200 ответ библиотеки
 | AC-18 | Клиент без scope получает tag:read | `authorize`: test_client_without_scope_gets_tag_read<br>`authorize`: test_empty_scope_parameter_means_the_default | 2 | зелено |
 | AC-19 | TAG_MCP_DEFAULT_SCOPES меняет умолчание | `authorize`: test_default_scopes_setting_changes_the_default<br>`authorize`: test_explicit_scope_overrides_the_default | 2 | зелено |
 | AC-20 | Запрос недопустимого scope отклоняется без создания транзакции | `authorize`: test_unknown_scope_is_rejected_without_a_transaction<br>`authorize`: test_admin_scope_is_accepted_when_admin_is_enabled<br>`edge_branches`: test_scope_allowed_at_registration_but_not_now_is_rejected | 3 | зелено |
-| AC-21 | authorize с чужим redirect_uri отклоняется | `authorize`: test_foreign_redirect_uri_is_refused_without_redirect ×3<br>`authorize`: test_other_loopback_port_is_accepted | 4 | зелено |
+| AC-21 | authorize с чужим redirect_uri отклоняется | `authorize`: test_foreign_redirect_uri_is_refused_without_redirect ×3<br>`authorize`: test_other_loopback_port_is_accepted<br>`authorize`: test_valid_redirect_still_reaches_the_consent_screen<br>`authorize`: test_valid_redirect_in_a_form_post_reaches_the_consent_screen | 6 | зелено |
 | AC-22 | Несовпадающий resource отвергается | `authorize`: test_foreign_resource_is_rejected_with_invalid_target<br>`authorize`: test_own_resource_is_accepted ×3 | 4 | зелено |
 | AC-23 | authorize ведёт на экран согласия либо сразу в Mattermost по TAG_MCP_CONSENT | `authorize`: test_remember_and_always_lead_to_the_consent_screen ×2<br>`authorize`: test_external_goes_straight_to_mattermost | 3 | зелено |
 | AC-24 | URL Mattermost по умолчанию не содержит scope, PKCE и resource | `authorize`: test_default_mattermost_url_has_no_scope_pkce_or_resource | 1 | зелено |
 | AC-25 | Настройки пробрасывания PKCE и upstream-scope действуют | `authorize`: test_forward_pkce_and_upstream_scope_reach_mattermost | 1 | зелено |
-| AC-26 | Умолчание TAG_MCP_ALLOWED_REDIRECTS: loopback любой порт и любой https | `edge_branches`: test_malformed_uris_never_match ×4<br>`registration`: test_default_allow_list_accepts_loopback_and_https ×5<br>`registration`: test_default_allow_list_rejects_everything_else ×5<br>`registration`: test_default_allow_list_rejects_dot_segments_in_redirect_path<br>`registration`: test_allow_list_function_rejects_the_same_uris ×6 | 21 | 20 зелёных, 1 красный (BUG-I2-001) |
+| AC-26 | Умолчание TAG_MCP_ALLOWED_REDIRECTS: loopback любой порт и любой https | `authorize`: test_authorize_rejects_a_redirect_uri_forbidden_by_section_73 ×4<br>`authorize`: test_authorize_form_post_rejects_the_same_redirect_uri ×4<br>`edge_branches`: test_malformed_uris_never_match ×4<br>`registration`: test_default_allow_list_accepts_loopback_and_https ×5<br>`registration`: test_default_allow_list_rejects_everything_else ×5<br>`registration`: test_default_allow_list_rejects_dot_segments_in_redirect_path<br>`registration`: test_allow_list_function_rejects_the_same_uris ×6 | 29 | зелено |
 | AC-27 | Собственный список шаблонов и пустое значение | `registration`: test_custom_patterns_replace_the_default<br>`registration`: test_empty_allow_list_means_the_default<br>`registration`: test_any_host_pattern_semantics ×6 | 8 | зелено |
 | AC-28 | Отказы логируются событием oauth.reject без секретов | `registration`: test_rejections_are_logged_without_secrets<br>`registration`: test_no_reject_event_for_a_good_registration | 2 | зелено |
 | AC-29 | Экран согласия — на русском, с названием ТЭГ MCP, клиентом, redirect и кнопками | `consent`: test_consent_screen_is_russian_and_names_everything<br>`consent`: test_consent_form_posts_to_the_same_path | 2 | зелено |

@@ -15,5 +15,5 @@
   "suspected_area": "tag_mcp/oauth.py — TagOAuthProxy.register_client: allow-list применяется к уже разобранной pydantic-модели (AnyUrl нормализует путь). Проверку сырых строк redirect_uris из тела запроса, видимо, нужно делать до разбора модели (обёртка маршрута /register, рядом с _BodyGuard) либо сравнивать нормализованный URI с исходной строкой.",
   "impact": "Эксплуатируемого обхода allow-list не найдено: сохраняется и используется уже нормализованный URI, и он проходит те же шаблоны (проверено на TAG_MCP_ALLOWED_REDIRECTS='https://*.magnit.ru/safe/*' — 'https://app.magnit.ru/safe/../evil' нормализуется в '/evil' и отвергается). Расхождение с AC-26 — в наблюдаемом контракте /register, отсюда severity=low.",
   "iteration": 1,
-  "status": "open"
+  "status": "fixed"
 }
