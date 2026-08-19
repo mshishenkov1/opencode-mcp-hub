@@ -45,9 +45,9 @@ criteria:
     then: "ошибка старта; сообщение содержит 'servers[1].title'"
   - id: AC-09
     text: "Некорректный или повторяющийся alias — ошибка загрузки"
-    given: "каталог с alias 'Bad_Alias' (не по регэкспу) либо с двумя серверами alias 'gitlab'"
+    given: "каталог с alias 'Bad_Alias' (не по регэкспу ^[a-z][a-z0-9-]{0,31}$; также варианты '-x', '1abc', 'ABC', 'with space', 33 символа) либо с двумя серверами alias 'gitlab'; контрольные валидные alias: 'a' (1 символ) и 32 символа"
     when: "вызывается create_app()"
-    then: "ошибка старта; для дубликата сообщение содержит 'gitlab'; для некорректного — путь 'servers[0].alias'"
+    then: "ошибка старта; для дубликата сообщение содержит 'gitlab'; для каждого некорректного — путь 'servers[0].alias'; для контрольных валидных alias приложение создаётся (ревизия 1.1: alias 1–32 символа)"
   - id: AC-10
     text: "Поля, обязательные по режиму, проверяются: native без mcp_url и facade без upstream_url/auth/credential_headers невалидны"
     given: "каталог с native-сервером без mcp_url; каталог с facade-сервером без auth"
@@ -236,10 +236,10 @@ criteria:
     when: "GET /cli/poll для каждой; часы +2 с; повторный GET /cli/poll для первой"
     then: "первая: 502 {status:'error', error:'litellm_unavailable'}, повторный poll не 404 (сессия жива); вторая: 404 {status:'error', error:'login_expired'}, повторный poll тоже 404 (сессия удалена)"
   - id: AC-47
-    text: "Ответы /cli/* не раскрывают poll_secret и login_id LiteLLM"
+    text: "Ответы /cli/* не раскрывают poll_secret LiteLLM; login_id LiteLLM появляется только внутри browser_url ответа /cli/start (ревизия 1.1)"
     given: "мок LiteLLM с login_id 'll-1' и poll_secret 'll-secret'; полный сценарий start → poll (pending, team_selection_required, ready)"
     when: "просматриваются тела всех ответов /cli/*"
-    then: "ни одно тело не содержит 'll-secret'; поле login_id в /cli/start ≠ 'll-1'"
+    then: "ни одно тело не содержит 'll-secret'; поле login_id в /cli/start ≠ 'll-1'; после удаления значения browser_url из ответа /cli/start ни одно тело /cli/* не содержит подстроки 'll-1'; browser_url == '<LITELLM>/sso/key/generate?source=litellm-cli&key=ll-1'"
   - id: AC-48
     text: "Аутентификация Bearer: валидный ключ пропускается, отсутствие/неверный — 401 с подсказкой"
     given: "в api_keys есть ключ 'sk-ok' пользователя u1"
@@ -298,10 +298,10 @@ criteria:
     when: "GET /.well-known/opencode без заголовков"
     then: "200; заголовок Cache-Control == 'public, max-age=300' и есть ETag; auth == {command:[…], env:'MAGNIT_COPILOT_KEY'}; config.$schema == 'https://opencode.ai/config.json'; config.autoupdate == false; provider.magnit_prod.npm == '@ai-sdk/openai-compatible'; options.baseURL == 'https://litellm.test/v1'; options.apiKey == '{env:MAGNIT_COPILOT_KEY}'; remote_config == {url:'https://hub.test/remote-config', headers:{Authorization:'Bearer {env:MAGNIT_COPILOT_KEY}'}}"
   - id: AC-59
-    text: "well-known содержит mcp-запись для каждого видимого сервера без секретов"
-    given: "каталог: facade 'gitlab' (audience all), native 'tag' (audience all, mcp_url 'https://tag.test/mcp'), сервер 'b' (audience ['devs']), deprecated 'old' (audience all), beta 'u' unconfigured"
+    text: "well-known содержит mcp-запись для каждого видимого сервера без секретов и без ссылок каталога env:VAR (плейсхолдеры {env:<HUB_WELLKNOWN_ENV_NAME>} допустимы — ревизия 1.1)"
+    given: "HUB_WELLKNOWN_ENV_NAME='MAGNIT_COPILOT_KEY'; каталог: facade 'gitlab' (audience all, auth.client_secret 'env:GL_SECRET', credential_headers со значением 'env:GL_TOKEN', static_headers {'X-Static': 'env:GL_STATIC'}), native 'tag' (audience all, mcp_url 'https://tag.test/mcp'), сервер 'b' (audience ['devs']), deprecated 'old' (audience all), beta 'u' unconfigured"
     when: "GET /.well-known/opencode"
-    then: "config.mcp имеет ключи 'gitlab', 'tag', 'old' и не имеет 'b', 'u'; mcp.gitlab == {type:'remote', url:'https://hub.test/mcp/gitlab', enabled:false, oauth:{}}; mcp.tag.url == 'https://tag.test/mcp'; ни у одной записи нет ключа headers; тело не содержит 'upstream', 'client_secret', 'env:'"
+    then: "config.mcp имеет ключи 'gitlab', 'tag', 'old' и не имеет 'b', 'u'; mcp.gitlab == {type:'remote', url:'https://hub.test/mcp/gitlab', enabled:false, oauth:{}}; mcp.tag.url == 'https://tag.test/mcp'; ни у одной записи нет ключа headers; сериализованное тело config.mcp не содержит подстроки 'env:'; всё тело не содержит 'upstream', 'client_secret', 'credential_headers', 'static_headers', 'GL_SECRET', 'GL_TOKEN', 'GL_STATIC'; после удаления из тела всех вхождений '{env:MAGNIT_COPILOT_KEY}' подстрока 'env:' отсутствует (то есть все вхождения 'env:' — только плейсхолдеры provider.*.options.apiKey и remote_config.headers.Authorization из AC-58)"
   - id: AC-60
     text: "ETag well-known: 304 при совпадении If-None-Match, новый ETag после изменения каталога"
     given: "HUB_ADMIN_TOKEN='adm'; GET /.well-known/opencode вернул ETag E1 (формат: 16 hex-символов в кавычках)"
