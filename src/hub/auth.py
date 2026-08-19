@@ -92,4 +92,36 @@ async def authenticate(request: Request) -> AuthUser:
     return auth_user
 
 
-__all__ = ["AUTH_CACHE_PREFIX", "AUTH_CACHE_TTL", "AuthUser", "authenticate", "extract_bearer"]
+async def authenticate_key_or_session(request: Request) -> AuthUser:
+    """``/api/me/*``: ключ LiteLLM **либо** веб-сессия с CSRF для небезопасных методов (R-W6)."""
+    from hub.db import User
+    from hub.websession import CSRF_HEADER, check_csrf, session_token
+
+    if extract_bearer(request) is not None:
+        return await authenticate(request)
+    state = request.app.state
+    info = await state.web_sessions.load(session_token(request))
+    if info is None:
+        raise unauthorized()
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        check_csrf(info, request.headers.get(CSRF_HEADER))
+    await state.db.init()
+    async with state.db.session() as session:
+        user = await session.get(User, info.user_id)
+    return AuthUser(
+        user_id=info.user_id,
+        email=user.email if user else None,
+        groups=list(user.groups) if user and user.groups else ["all"],
+        key_kind="session",
+        created_at=None,
+    )
+
+
+__all__ = [
+    "AUTH_CACHE_PREFIX",
+    "AUTH_CACHE_TTL",
+    "AuthUser",
+    "authenticate",
+    "authenticate_key_or_session",
+    "extract_bearer",
+]

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from hub import __version__
+from hub.broker import TokenBroker, TokenRefresher
 from hub.catalog import Catalog, load_catalog
 from hub.clock import Clock, SystemClock
 from hub.crypto import TokenCipher
@@ -24,8 +25,16 @@ from hub.logging_ import configure_logging
 from hub.login import LoginService
 from hub.metrics import Metrics
 from hub.middleware import RequestContextMiddleware
+from hub.oauth import OAuthServer
 from hub.oidc import OIDCClient
-from hub.routes import admin_router, api_router, cli_router, system_router, web_router
+from hub.routes import (
+    admin_router,
+    api_router,
+    cli_router,
+    oauth_router,
+    system_router,
+    web_router,
+)
 from hub.settings import Settings
 from hub.templating import Templates
 from hub.websession import WebSessionService
@@ -152,6 +161,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.db.init()
+        await app.state.token_refresher.start()
         logger.info(
             "hub_started",
             extra={"version": __version__, "catalog_version": app.state.catalog.version},
@@ -159,6 +169,7 @@ def create_app(
         try:
             yield
         finally:
+            await app.state.token_refresher.stop()
             await app.state.kv.close()
             await app.state.db.dispose()
             if app.state.owns_http_client:
@@ -231,6 +242,23 @@ def create_app(
         kv=kv_store,
         clock=app_clock,
     )
+    app.state.broker = TokenBroker(
+        settings=settings,
+        db=db,
+        kv=kv_store,
+        clock=app_clock,
+        cipher=app.state.cipher,
+        metrics=metrics,
+        http=lambda: app.state.oauth_client,
+        catalog=lambda: app.state.catalog,
+        catalog_env=lambda: app.state.catalog_env,
+    )
+    app.state.oauth = OAuthServer(
+        settings=settings, db=db, kv=kv_store, clock=app_clock, metrics=metrics
+    )
+    app.state.token_refresher = TokenRefresher(
+        settings=settings, broker=app.state.broker, db=db, clock=app_clock
+    )
 
     app.add_exception_handler(HubError, _hub_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
@@ -242,6 +270,7 @@ def create_app(
     app.include_router(api_router)
     app.include_router(admin_router)
     app.include_router(web_router)
+    app.include_router(oauth_router)
 
     app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app

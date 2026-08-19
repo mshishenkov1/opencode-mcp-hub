@@ -117,6 +117,15 @@ class HeaderGroup(_Strict):
     id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     preset: Preset
+    # R-P8: необязательные маски инструментов группы (отсутствие поля = группа не расширяет allow).
+    tools: list[str] | None = None
+
+
+class ToolMasks(_Strict):
+    """Маски фильтра инструментов сервера (R-P8): необязательные поля каталога."""
+
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
 
 
 class PermissionHeaderGroups(_Strict):
@@ -124,6 +133,8 @@ class PermissionHeaderGroups(_Strict):
     header: str = Field(min_length=1)
     always: list[str] = Field(default_factory=list)
     groups: list[HeaderGroup] = Field(min_length=1)
+    # R-P8: необязательный общий фильтр инструментов сервера.
+    tool_filter: ToolMasks | None = None
 
     @model_validator(mode="after")
     def _unique_ids(self) -> PermissionHeaderGroups:
@@ -562,12 +573,17 @@ def load_catalog(path: str | os.PathLike[str], env: Mapping[str, str] | None = N
 
 
 __all__ = [
+    "AuthOAuth2",
     "Catalog",
     "CatalogError",
     "EnvRef",
+    "PermissionConsent",
+    "PermissionHeaderGroups",
+    "PermissionToolFilter",
     "Secret",
     "ServerEntry",
     "ServerModel",
+    "ToolMasks",
     "load_catalog",
     "parse_catalog",
 ]
