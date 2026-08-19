@@ -1,0 +1,19 @@
+{
+  "id": "BUG-I2-001",
+  "related_ac": "AC-26",
+  "severity": "low",
+  "title": "POST /register принимает redirect_uri с dot-сегментами (201 вместо 400 invalid_redirect_uri)",
+  "repro_steps": [
+    "Поднять сервер в режиме MM_HTTP_AUTH=oauth с TAG_MCP_ALLOWED_REDIRECTS по умолчанию",
+    "POST B/register с телом {\"client_name\": \"OpenCode\", \"redirect_uris\": [\"https://x.example/a/../b\"], \"grant_types\": [\"authorization_code\", \"refresh_token\"], \"response_types\": [\"code\"]}",
+    "Посмотреть статус ответа и сохранённого клиента"
+  ],
+  "expected": "AC-26 (правила R-23, R-24): URI с dot-сегментами отвергается всегда — ответ 400 с error='invalid_redirect_uri', клиент не сохраняется, в логе tag_mcp.oauth событие oauth.reject с reason='redirect_uri'",
+  "actual": "201 Created; тело ответа содержит redirect_uris=[\"https://x.example/b\"] — URI молча нормализован и сохранён; события oauth.reject нет. Собственный валидатор tag_mcp.oauth_redirects.redirect_uri_allowed этот URI отвергает (tests/oauth/test_registration.py::test_allow_list_function_rejects_the_same_uris[https://x.example/a/../b] зелёный), но до него доходит уже нормализованное значение: OAuthClientInformationFull.redirect_uris типизирован pydantic AnyUrl, который схлопывает '/a/../b' в '/b' при разборе тела запроса, а TagOAuthProxy.register_client (tag_mcp/oauth.py:460-468) работает с этим объектом, а не с сырым JSON.",
+  "failing_test": "tests/oauth/test_registration.py::test_default_allow_list_rejects_dot_segments_in_redirect_path",
+  "stacktrace": "tests/oauth/test_registration.py:140: AssertionError\n    response = await register(oauth.http(), redirect_uris=[DOT_SEGMENT_REDIRECT])\n>   assert response.status_code == 400, response.text\nE   AssertionError: {\"redirect_uris\":[\"https://x.example/b\"],\"token_endpoint_auth_method\":\"none\",\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":[\"code\"],\"scope\":\"tag:read tag:write tag:destructive tag:dm\",\"client_name\":\"OpenCode\",\"client_id\":\"cb765e3d-a08c-4b45-8979-2e80334b4185\",\"client_id_issued_at\":1787153378}\nE   assert 201 == 400\nE    +  where 201 = <Response [201 Created]>.status_code",
+  "suspected_area": "tag_mcp/oauth.py — TagOAuthProxy.register_client: allow-list применяется к уже разобранной pydantic-модели (AnyUrl нормализует путь). Проверку сырых строк redirect_uris из тела запроса, видимо, нужно делать до разбора модели (обёртка маршрута /register, рядом с _BodyGuard) либо сравнивать нормализованный URI с исходной строкой.",
+  "impact": "Эксплуатируемого обхода allow-list не найдено: сохраняется и используется уже нормализованный URI, и он проходит те же шаблоны (проверено на TAG_MCP_ALLOWED_REDIRECTS='https://*.magnit.ru/safe/*' — 'https://app.magnit.ru/safe/../evil' нормализуется в '/evil' и отвергается). Расхождение с AC-26 — в наблюдаемом контракте /register, отсюда severity=low.",
+  "iteration": 1,
+  "status": "open"
+}
