@@ -99,7 +99,12 @@ def groups_header(entry: ServerEntry, preset: str, groups: list[str]) -> tuple[s
 
 
 def tool_filter(entry: ServerEntry, preset: str, groups: list[str]) -> ToolFilter:
-    """Итоговый фильтр инструментов пользователя (R-P8)."""
+    """Итоговый фильтр инструментов пользователя (R-P8, AC-122).
+
+    ``allow`` — общие маски сервера и маски включённых групп. Маски групп, которые пользователю
+    не включены, действуют как запрет: инструмент, который «приносит» только выключенная группа,
+    не показывается, даже если общий ``allow`` — ``*`` (AC-122).
+    """
     model = entry.model.permission_model
     allow: list[str] = []
     deny: list[str] = []
@@ -108,11 +113,18 @@ def tool_filter(entry: ServerEntry, preset: str, groups: list[str]) -> ToolFilte
         if extra is not None:
             allow.extend(extra.allow)
             deny.extend(extra.deny)
-        by_id = {group.id: group for group in model.groups}
-        for gid in enabled_groups(entry, preset, groups):
-            group = by_id.get(gid)
-            if group is not None and group.tools:
-                allow.extend(group.tools)
+        enabled = set(enabled_groups(entry, preset, groups))
+        group_allow: list[str] = []
+        group_deny: list[str] = []
+        for group in model.groups:
+            if not group.tools:
+                continue
+            if group.id in enabled:
+                group_allow.extend(group.tools)
+            else:
+                group_deny.extend(group.tools)
+        allow.extend(group_allow)
+        deny.extend(mask for mask in group_deny if mask not in set(group_allow))
     elif isinstance(model, PermissionToolFilter):
         chosen = model.presets.get(preset)
         if chosen is not None:

@@ -27,10 +27,12 @@ from hub.metrics import Metrics
 from hub.middleware import RequestContextMiddleware
 from hub.oauth import OAuthServer
 from hub.oidc import OIDCClient
+from hub.proxy import CircuitBreaker, SessionStore, SseCounter, UpstreamClient
 from hub.routes import (
     admin_router,
     api_router,
     cli_router,
+    mcp_router,
     oauth_router,
     system_router,
     web_router,
@@ -259,6 +261,21 @@ def create_app(
     app.state.token_refresher = TokenRefresher(
         settings=settings, broker=app.state.broker, db=db, clock=app_clock
     )
+    app.state.sessions = SessionStore(kv_store, app_clock, settings)
+    app.state.breaker = CircuitBreaker(kv_store, app_clock, settings)
+    app.state.sse_counter = SseCounter(kv_store, settings)
+    app.state.upstream = UpstreamClient(lambda: app.state.upstream_client, settings)
+
+    async def _sessions_by_alias() -> dict[tuple[tuple[str, str], ...], float]:
+        aliases = [s.alias for s in app.state.catalog.servers if s.model.mode == "facade"]
+        counts = await app.state.sessions.active_by_alias(aliases)
+        return {(("alias", alias),): value for alias, value in counts.items()}
+
+    metrics.register_labeled_gauge(
+        "hub_upstream_sessions_active",
+        "Активные upstream-сессии MCP по серверам.",
+        _sessions_by_alias,
+    )
 
     app.add_exception_handler(HubError, _hub_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
@@ -271,6 +288,7 @@ def create_app(
     app.include_router(admin_router)
     app.include_router(web_router)
     app.include_router(oauth_router)
+    app.include_router(mcp_router)
 
     app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app
