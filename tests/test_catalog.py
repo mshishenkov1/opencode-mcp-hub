@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from hub.app import create_app
+from hub.catalog import CatalogError, EnvRef, Secret, load_catalog, parse_catalog
 from hub.settings import Settings
 from tests.conftest import Hub, HubFactory, base_settings_kwargs
 from tests.support import (
@@ -865,3 +866,244 @@ def test_ref_nested_inside_field_value(tmp_path: Path) -> None:
     dst = native_server("dst", audience={"$ref": "#/servers/gitlab/audience"})
     app = _create_app_with_catalog(tmp_path / "c.yaml", catalog_doc([src, dst]))
     assert app.state.catalog.get("dst").model.audience == ["all"]
+
+
+# --- Усиление после mutation-прогона -----------------------------------------
+
+
+def _catalog_error(document: dict[str, Any] | str, env: dict[str, str] | None = None) -> str:
+    """Текст ошибки загрузки каталога (без обращения к файловой системе приложения)."""
+    with pytest.raises(CatalogError) as excinfo:
+        parse_catalog(document, env if env is not None else {})
+    return str(excinfo.value)
+
+
+@pytest.mark.ac("AC-08")
+def test_top_level_error_messages_are_exact() -> None:
+    """Ошибки верхнего уровня формулируются дословно — их читает человек в логе старта (R-C1)."""
+    assert _catalog_error([1, 2]) == (
+        "каталог: ожидается объект верхнего уровня с полями version и servers"
+    )
+    assert _catalog_error({"version": 0, "servers": []}) == "version: ожидается целое число ≥ 1"
+    assert _catalog_error({"servers": []}) == "version: ожидается целое число ≥ 1"
+    assert _catalog_error({"version": 1}) == "servers: обязательное поле отсутствует"
+    assert _catalog_error({"version": 1, "servers": "x"}) == "servers: ожидается список"
+    assert _catalog_error({"version": 1, "servers": [], "defaults": "x"}) == (
+        "defaults: ожидается объект"
+    )
+
+
+@pytest.mark.ac("AC-08")
+def test_schema_error_messages_are_exact_and_joined() -> None:
+    """Ошибки схемы: путь до поля, русская формулировка, несколько ошибок через `; `."""
+    missing = native_server("tag")
+    del missing["title"]
+    assert _catalog_error(catalog_doc([facade_server("gitlab"), missing])) == (
+        "servers[1].title: обязательное поле отсутствует"
+    )
+
+    two = native_server("tag")
+    del two["title"]
+    two["bogus"] = 1
+    assert _catalog_error(catalog_doc([two])) == (
+        "servers[0].title: обязательное поле отсутствует; servers[0].bogus: неизвестное поле"
+    )
+
+    not_a_server = catalog_doc([])
+    not_a_server["servers"] = ["строка вместо объекта"]
+    assert _catalog_error(not_a_server) == "servers[0]: ожидается объект (описание сервера)"
+
+
+@pytest.mark.ac("AC-10")
+def test_mode_required_fields_reported_together() -> None:
+    """Все отсутствующие по режиму поля перечисляются в одном сообщении."""
+    facade = facade_server("gitlab")
+    del facade["upstream_url"]
+    del facade["auth"]
+    assert _catalog_error(catalog_doc([facade])) == (
+        "servers[0].upstream_url: обязательное поле для режима отсутствует; "
+        "servers[0].auth: обязательное поле для режима отсутствует"
+    )
+
+
+@pytest.mark.ac("AC-11")
+def test_permission_model_kind_errors_point_at_kind_field() -> None:
+    """Для discriminated union путь ошибки указывает на `permission_model.kind`, а не на объект."""
+    unknown = native_server("tag")
+    unknown["permission_model"] = {"kind": "magic", "presets": {"a": {}}}
+    assert _catalog_error(catalog_doc([unknown])) == (
+        "servers[0].permission_model.kind: недопустимое значение"
+    )
+
+    without = native_server("tag")
+    without["permission_model"] = {"presets": {"a": {}}}
+    assert _catalog_error(catalog_doc([without])) == (
+        "servers[0].permission_model.kind: обязательное поле отсутствует"
+    )
+
+
+@pytest.mark.ac("AC-11")
+def test_duplicate_group_ids_message_keeps_validator_text() -> None:
+    """Сообщение пользовательского валидатора попадает в вывод без служебного префикса pydantic."""
+    server = facade_server("gitlab")
+    server["permission_model"]["groups"] = [
+        {"id": "core", "title": "A", "preset": "readonly"},
+        {"id": "core", "title": "B", "preset": "none"},
+    ]
+    assert _catalog_error(catalog_doc([server])) == (
+        "servers[0].permission_model: groups: id 'core' повторяется"
+    )
+
+
+@pytest.mark.ac("AC-08")
+def test_non_string_secret_and_header_messages_are_exact() -> None:
+    """Секрет и значение заголовка должны быть строками — сообщение одинаковое для обоих полей."""
+    bad_secret = facade_server("gitlab")
+    bad_secret["auth"]["client_secret"] = 42
+    assert _catalog_error(catalog_doc([bad_secret])) == (
+        "servers[0].auth.client_secret: ожидается строка"
+    )
+
+    bad_header = facade_server("gitlab")
+    bad_header["credential_headers"] = {"Authorization": 42}
+    assert _catalog_error(catalog_doc([bad_header])) == (
+        "servers[0].credential_headers.Authorization: ожидается строка"
+    )
+
+
+@pytest.mark.ac("AC-09")
+def test_duplicate_alias_message_names_both_positions() -> None:
+    """Сообщение о дубликате alias указывает позицию первого вхождения."""
+    assert _catalog_error(catalog_doc([native_server("tag"), native_server("tag")])) == (
+        "servers[1].alias: alias 'tag' повторяется (уже задан в servers[0])"
+    )
+
+
+@pytest.mark.ac("AC-12")
+def test_missing_variable_messages_point_at_exact_path() -> None:
+    """Путь до незаданной переменной указывается точно, включая индекс элемента списка."""
+    in_list = native_server("tag")
+    in_list["audience"] = ["all", "${GRP}"]
+    assert _catalog_error(catalog_doc([in_list])) == (
+        "servers[0].audience[1]: не задана переменная окружения GRP"
+    )
+    assert _catalog_error({"version": 1, "servers": [], "defaults": {"a": {"b": "${MISS}"}}}) == (
+        "defaults.a.b: не задана переменная окружения MISS"
+    )
+
+
+@pytest.mark.ac("AC-15")
+def test_env_ref_in_disallowed_field_message_is_exact() -> None:
+    """Сообщение о запрещённой ссылке env:VAR перечисляет разрешённые поля."""
+    tail = "ссылка env:VAR недопустима в этом поле " "(разрешено только в auth.client_secret, credential_headers, static_headers)"
+    server = native_server("tag")
+    server["mcp_url"] = "env:SOME_URL"
+    assert _catalog_error(catalog_doc([server])) == f"servers[0].mcp_url: {tail}"
+
+    nested = native_server("tag")
+    nested["permission_model"] = {"kind": "consent", "presets": {"p": {"l": ["env:X"]}}}
+    assert _catalog_error(catalog_doc([nested])) == (
+        f"servers[0].permission_model.presets.p.l.0: {tail}"
+    )
+
+
+@pytest.mark.ac("AC-17")
+def test_ref_error_messages_are_exact() -> None:
+    """Каждая причина отказа по $ref формулируется отдельно и называет саму ссылку."""
+    gitlab = facade_server("gitlab")
+
+    def with_ref(ref: Any) -> dict[str, Any]:
+        tag = native_server("tag")
+        tag["permission_model"] = ref
+        return catalog_doc([gitlab, tag])
+
+    assert _catalog_error(with_ref({"$ref": "nope"})) == (
+        "servers[1].permission_model: некорректный формат ссылки 'nope' "
+        "(ожидается '#/servers/<alias>/<поле>')"
+    )
+    assert _catalog_error(with_ref({"$ref": "#/servers/none/permission_model"})) == (
+        "servers[1].permission_model: ссылка '#/servers/none/permission_model' "
+        "указывает на неизвестный alias 'none'"
+    )
+    assert _catalog_error(with_ref({"$ref": "#/servers/gitlab/nosuch"})) == (
+        "servers[1].permission_model: ссылка '#/servers/gitlab/nosuch' "
+        "указывает на отсутствующее поле 'nosuch' сервера 'gitlab'"
+    )
+    assert _catalog_error(with_ref({"$ref": "#/servers/gitlab/permission_model", "x": 1})) == (
+        "servers[1].permission_model: некорректная ссылка $ref "
+        "'#/servers/gitlab/permission_model'"
+    )
+
+
+@pytest.mark.ac("AC-17")
+def test_ref_to_value_with_nested_ref_inside_list_is_rejected() -> None:
+    """Вторая ступень запрещена и тогда, когда вложенный $ref спрятан в списке внутри значения."""
+    gitlab = facade_server("gitlab")
+    shared = facade_server("shared")
+    shared["permission_model"]["always"] = [{"$ref": "#/servers/gitlab/title"}]
+    tag = native_server("tag")
+    tag["permission_model"] = {"$ref": "#/servers/shared/permission_model"}
+    assert _catalog_error(catalog_doc([gitlab, shared, tag])) == (
+        "servers[2].permission_model: ссылка '#/servers/shared/permission_model' "
+        "указывает на значение, которое само содержит $ref (допустима только одна ступень)"
+    )
+
+
+@pytest.mark.ac("AC-17")
+def test_bad_ref_deep_inside_value_reports_full_path() -> None:
+    """Путь в сообщении ведёт к самой ссылке, а не к корню сервера."""
+    tag = native_server("tag")
+    tag["permission_model"] = {
+        "kind": "consent",
+        "presets": {"p": {"deep": [{"$ref": "#/servers/none/x"}]}},
+    }
+    assert _catalog_error(catalog_doc([tag])) == (
+        "servers[0].permission_model.presets.p.deep[0]: ссылка '#/servers/none/x' "
+        "указывает на неизвестный alias 'none'"
+    )
+
+
+@pytest.mark.ac("AC-14")
+def test_secret_values_are_lazy_env_refs_and_never_shown() -> None:
+    """`env:VAR` становится ленивой ссылкой, литерал — секретом; оба не раскрываются в repr."""
+    server = facade_server("gitlab")
+    server["auth"]["client_secret"] = "env:GL_SECRET"
+    server["credential_headers"] = {"Authorization": "env:GL_TOKEN"}
+    server["static_headers"] = {"X-Static": "static-value"}
+    catalog = parse_catalog(catalog_doc([server]), {})
+    model = catalog.servers[0].model
+    assert model.auth is not None
+
+    secret = model.auth.client_secret
+    assert isinstance(secret, EnvRef)
+    assert secret.get({"GL_SECRET": "s3cr3t"}) == "s3cr3t"
+    assert secret.get({}) is None  # переменная не требуется при загрузке
+    assert repr(secret) == "EnvRef(***)"
+    assert str(secret) == "EnvRef(***)"
+
+    assert model.credential_headers is not None
+    header = model.credential_headers["Authorization"]
+    assert isinstance(header, EnvRef)
+    assert header.get({"GL_TOKEN": "t0ken"}) == "t0ken"
+    assert model.static_headers is not None
+    assert model.static_headers["X-Static"] == "static-value"  # обычное значение остаётся строкой
+
+    literal = facade_server("gitlab")
+    literal["auth"]["client_secret"] = "literal-secret"
+    plain = parse_catalog(catalog_doc([literal]), {}).servers[0].model
+    assert plain.auth is not None
+    assert isinstance(plain.auth.client_secret, Secret)
+    assert plain.auth.client_secret.get({"literal-secret": "x"}) == "literal-secret"
+    assert repr(plain.auth.client_secret) == "Secret(***)"
+    assert "literal-secret" not in repr(plain.auth)
+
+
+@pytest.mark.ac("AC-08")
+def test_broken_yaml_message_names_file_and_reason(tmp_path: Path) -> None:
+    """Ошибка YAML сообщает и путь к файлу, и текст разбора."""
+    path = write_catalog(tmp_path / "broken.yaml", "version: 1\nservers: [\n")
+    with pytest.raises(CatalogError) as excinfo:
+        load_catalog(path, {})
+    message = str(excinfo.value)
+    assert message.startswith(f"ошибка разбора YAML в {path}: ")
+    assert len(message) > len(f"ошибка разбора YAML в {path}: ")
