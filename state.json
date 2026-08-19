@@ -1,12 +1,68 @@
 {
-  "run_id": null,
-  "stage": "idle",
+  "run_id": "i3-hub-oauth-facade-proxy-20260819",
+  "stage": "done",
   "current_agent": "orchestrator",
-  "requirements_file": null,
-  "branch": null,
+  "requirements_file": "examples/req-i3-hub-oauth-facade-proxy.md",
+  "branch": "pipeline/i3-hub-oauth-facade-proxy",
   "iteration": 0,
   "bugs": [],
   "escalations": [],
-  "gates": {},
-  "history": []
+  "gates": {
+    "G1": true,
+    "G2": true,
+    "G3": true,
+    "G4": true,
+    "G5": true,
+    "G6": true
+  },
+  "history": [
+    {
+      "ts": "2026-08-19T21:00:00",
+      "event": "I-3 start: spec rev2 закоммичен (AC-70..149), dev"
+    },
+    {
+      "ts": "2026-08-19T23:30:00",
+      "event": "dev I-3: 10 коммитов, 408 I-1 тестов зелёные, диспут R-P8; → test"
+    },
+    {
+      "ts": "2026-08-20T01:30:00",
+      "event": "test I-3: 612 passed, 149/149 AC, coverage 93%, багов нет; → review"
+    },
+    {
+      "ts": "2026-08-20T02:30:00",
+      "event": "review-i3-1 request_changes: 4 must_fix (dev: cb R-P10, permissions маски; test: AC-115, AC-131); диспут R-P8 uphold_test"
+    },
+    {
+      "ts": "2026-08-20T04:00:00",
+      "event": "dev после review-i3-1: 8 коммитов; spec 2.1 (156 AC); → test"
+    },
+    {
+      "ts": "2026-08-20T05:00:00",
+      "event": "test после review-i3-1/spec 2.1: 633 passed, 156/156 AC; → review цикл 2"
+    },
+    {
+      "ts": "2026-08-20T05:30:00",
+      "event": "review-i3-2 approve; → gates (no_proxy=*)"
+    },
+    {
+      "ts": "2026-08-20T00:00:20",
+      "event": "gates: FAIL -> gates-i3-hub-oauth-facade-proxy-20260819.json"
+    },
+    {
+      "ts": "2026-08-20T07:00:00",
+      "event": "gates I-3: G1,G2,G4,G5,G6 PASS; G3 — mutmut без deploy/.env.example (also_copy), перезапуск"
+    },
+    {
+      "ts": "2026-08-20T00:01:29",
+      "event": "gates: FAIL -> gates-i3-hub-oauth-facade-proxy-20260819.json"
+    },
+    {
+      "ts": "2026-08-20T00:32:11",
+      "event": "gates: ALL PASS -> gates-i3-hub-oauth-facade-proxy-20260819.json"
+    },
+    {
+      "ts": "2026-08-20T09:00:00",
+      "event": "I-3 done: все гейты зелёные (mutation 74%)"
+    }
+  ]
 }

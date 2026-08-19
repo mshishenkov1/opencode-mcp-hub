@@ -1,0 +1,37 @@
+{
+  "run_id": "i3-hub-oauth-facade-proxy-20260819",
+  "ts": "2026-08-20T00:32:11",
+  "all_passed": true,
+  "gates": {
+    "G1": {
+      "name": "Тесты",
+      "passed": true,
+      "detail": "все тесты зелёные, skip: 0"
+    },
+    "G2": {
+      "name": "Coverage-diff",
+      "passed": true,
+      "detail": "coverage-diff 92% >= 90%"
+    },
+    "G3": {
+      "name": "Mutation",
+      "passed": true,
+      "detail": "mutation score 74.0% (killed 6191, timeout 2, survived 2179, suspicious 0), порог 70%"
+    },
+    "G4": {
+      "name": "Статанализ",
+      "passed": true,
+      "detail": "линтер и типизация чистые"
+    },
+    "G5": {
+      "name": "Ревью",
+      "passed": true,
+      "detail": "review-i3-2.json: verdict=approve"
+    },
+    "G6": {
+      "name": "AC-трассировка",
+      "passed": true,
+      "detail": "/test_migrations.py::test_postgres_migrations_take_advisory_lock, tests/test_migrations.py::test_sqlite_migrations_do_not_take_lock, tests/test_migrations.py::test_lock_is_taken_before_revisions_are_applied, tests/test_settings_i3.py::test_start_without_redis_url_warns_about_unshared_state, tests/test_settings_i3.py::test_start_with_redis_url_does_not_warn |  | G6 OK: все 156 критериев покрыты тестами"
+    }
+  }
+}
