@@ -1358,18 +1358,28 @@ async def seed_connection(
     return conn
 
 
+async def register_client_directly(hub: Any, *, redirect_uri: str = LOOPBACK_REDIRECT) -> str:
+    """Зарегистрировать клиента в обход HTTP (не расходует окно rate-limit регистраций)."""
+    body = await hub.app.state.oauth.register_client(
+        {"redirect_uris": [redirect_uri], "client_name": "test-client"}, ip="127.0.0.1"
+    )
+    return str(body["client_id"])
+
+
 async def issue_hub_tokens(
     hub: Any,
     *,
     user_id: str = "u1",
     alias: str = "gitlab",
     connection_id: int | None = None,
-    client_id: str = "test-client",
+    client_id: str | None = None,
     scope: str | None = None,
     chain_id: str | None = None,
 ) -> dict[str, Any]:
     from hub.crypto import random_token
 
+    if client_id is None:
+        client_id = await register_client_directly(hub)
     return await hub.app.state.oauth.issue_tokens(
         client_id=client_id,
         user_id=user_id,
@@ -1387,15 +1397,28 @@ async def connected_client(
     alias: str = "gitlab",
     preset: str = "readonly",
     groups: tuple[str, ...] | list[str] = ("code_review",),
+    client_id: str | None = None,
     **conn_kwargs: Any,
 ) -> tuple[Any, dict[str, Any]]:
-    """Подключение + выданная пара токенов Hub для него."""
+    """Подключение + выданная пара токенов Hub для него (клиент регистрируется, если не задан)."""
     conn = await seed_connection(
         hub, user_id=user_id, alias=alias, preset=preset, groups=groups, **conn_kwargs
     )
     tokens = await issue_hub_tokens(
-        hub, user_id=user_id, alias=alias, connection_id=conn.id, scope=f"{alias}:{preset}"
+        hub,
+        user_id=user_id,
+        alias=alias,
+        connection_id=conn.id,
+        scope=f"{alias}:{preset}",
+        client_id=client_id,
     )
+    tokens["client_id"] = (
+        await fetch_rows(
+            hub.app,
+            "SELECT client_id FROM refresh_tokens WHERE token_sha256 = :d",
+            d=sha256_hex(tokens["refresh_token"]),
+        )
+    )[0]["client_id"]
     return conn, tokens
 
 
@@ -1423,3 +1446,16 @@ async def litellm_web_login(
     mock_poll(hub.litellm, ready_body(make_jwt(claims), user_id=user_id))
     mock_key_generate(hub.litellm, key)
     return await hub.client.get(f"/auth/login/poll/{login_id}")
+
+
+async def add_key(hub: Any, key: str, user_id: str = "u1", **kwargs: Any) -> None:
+    """Ключ LiteLLM для уже существующего (или создаваемого) пользователя."""
+    await ensure_user(hub, user_id)
+    await insert_key(hub.app, key, user_id, **kwargs)
+
+
+def parse_db_datetime(value: Any) -> datetime:
+    """Значение DATETIME из «сырого» SQL (SQLite отдаёт строку) → aware UTC."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    return datetime.fromisoformat(str(value)).replace(tzinfo=UTC)
