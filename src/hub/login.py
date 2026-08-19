@@ -163,7 +163,6 @@ class LoginService:
             "email": None,
             "last_call_at": None,
             "last_response": None,
-            "jwt_warned": False,
             "created_at": now,
             "expires_at": now + ttl,
         }
@@ -323,12 +322,12 @@ class LoginService:
             if isinstance(exp, int | float) and not isinstance(exp, bool):
                 expires_in = max(0, int(exp - self.clock.time()))
                 expires_at = datetime.fromtimestamp(float(exp), tz=UTC)
-            if not session.get("jwt_warned"):
-                session["jwt_warned"] = True
-                logger.warning(
-                    "key_generate_fallback_jwt",
-                    extra={"login_id": login_id, "upstream_status": resp.status_code, "user_id": user_id},
-                )
+            # R-L4: предупреждение один раз на сессию — ветка всегда завершает сессию (persist + drop),
+            # поэтому повторного срабатывания в той же сессии быть не может.
+            logger.warning(
+                "key_generate_fallback_jwt",
+                extra={"login_id": login_id, "upstream_status": resp.status_code, "user_id": user_id},
+            )
         else:  # pragma: no cover - 3xx не ожидается
             raise _unavailable()
 
