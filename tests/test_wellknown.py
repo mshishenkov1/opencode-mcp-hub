@@ -273,3 +273,49 @@ async def test_wellknown_if_none_match_star_and_weak(hub: Hub) -> None:
     assert (
         await hub.get("/.well-known/opencode", headers={"If-None-Match": f"W/{etag}"})
     ).status_code == 304
+
+
+# --- Усиление после mutation-прогона -----------------------------------------
+
+
+@pytest.mark.ac("AC-58")
+async def test_wellknown_body_is_compact_utf8_json_in_declared_order(
+    make_hub: HubFactory,
+) -> None:
+    """Тело — компактный UTF-8 JSON в порядке объявления полей (основа стабильного ETag, R-A8).
+
+    Компактность и порядок ключей проверяются на сырых байтах: сортировка ключей или отступы
+    изменили бы представление, а значит и ETag, при неизменном содержании.
+    """
+    hub = await make_hub(litellm_provider_name="Копилот «прод»")
+    resp = await hub.get("/.well-known/opencode")
+    raw = resp.content
+
+    # компактные разделители: после ':' и ',' нет пробелов
+    assert b'": ' not in raw and b'", ' not in raw and b"}, " not in raw
+    # не-ASCII сохраняются как есть, а не как \uXXXX-escape
+    assert "Копилот «прод»".encode() in raw
+    assert b"\\u" not in raw
+    # порядок ключей — как в build_wellknown, а не алфавитный (иначе mcp шёл бы до provider)
+    config = raw[raw.index(b'"config"') :]
+    assert config.index(b'"provider"') < config.index(b'"mcp"')
+    assert raw.index(b'"auth"') < raw.index(b'"config"') < raw.index(b'"remote_config"')
+    # сериализация в теле и в ETag — одна и та же
+    repeat = await hub.get("/.well-known/opencode")
+    assert repeat.content == raw
+    assert repeat.headers["ETag"] == resp.headers["ETag"]
+
+
+@pytest.mark.ac("AC-60")
+async def test_wellknown_if_none_match_accepts_comma_separated_list(hub: Hub) -> None:
+    """If-None-Match со списком тегов (RFC 9110): совпадение любого из них → 304."""
+    etag = (await hub.get("/.well-known/opencode")).headers["ETag"]
+    for header in (f'"0000000000000000",{etag}', f'{etag},"0000000000000000"'):
+        resp = await hub.get("/.well-known/opencode", headers={"If-None-Match": header})
+        assert resp.status_code == 304, header
+        assert resp.headers["ETag"] == etag
+    miss = await hub.get(
+        "/.well-known/opencode",
+        headers={"If-None-Match": '"0000000000000000","1111111111111111"'},
+    )
+    assert miss.status_code == 200
