@@ -27,7 +27,6 @@ from hub.settings import Settings
 logger = logging.getLogger("hub.proxy")
 
 SESSION_PREFIX = "mcpsess:"
-SESSION_COUNTER_PREFIX = "mcpsessn:"
 TOOLS_CACHE_PREFIX = "toolscache:"
 CB_PREFIX = "cb:"
 CB_PROBE_SUFFIX = ":probe"  # право на пробный запрос в half-open (R-P10)
@@ -241,12 +240,24 @@ class CircuitBreaker:
 
 
 class SessionStore:
-    """Виртуальные сессии MCP в KV (R-P4, R-P5)."""
+    """Виртуальные сессии MCP в KV (R-P4, R-P5).
+
+    Ключ — ``mcpsess:<alias>:<client_session_id>``: alias в ключе позволяет считать активные
+    сессии сервера по живым записям (``count_prefix``, R-N1), без отдельного счётчика, который
+    завышался бы на сессии, истёкшие по ``HUB_CLIENT_SESSION_TTL``.
+    """
 
     def __init__(self, kv: KeyValueStore, clock: Clock, settings: Settings) -> None:
         self.kv = kv
         self.clock = clock
         self.settings = settings
+
+    @staticmethod
+    def _prefix(alias: str) -> str:
+        return f"{SESSION_PREFIX}{alias}:"
+
+    def _key(self, alias: str, client_session_id: str) -> str:
+        return self._prefix(alias) + client_session_id
 
     async def create(
         self,
@@ -269,17 +280,14 @@ class SessionStore:
             upstream_last_used_at=self.clock.time(),
         )
         await self.kv.set(
-            SESSION_PREFIX + session.client_session_id,
+            self._key(alias, session.client_session_id),
             session.to_record(),
             ttl=self.settings.client_session_ttl,
-        )
-        await self.kv.incr(
-            SESSION_COUNTER_PREFIX + alias, 1, ttl=self.settings.client_session_ttl
         )
         return session
 
     async def get(self, client_session_id: str, *, user_id: str, alias: str) -> McpSession | None:
-        record = await self.kv.get(SESSION_PREFIX + client_session_id)
+        record = await self.kv.get(self._key(alias, client_session_id))
         if not isinstance(record, dict):
             return None
         if record.get("user_id") != user_id or record.get("alias") != alias:
@@ -298,14 +306,13 @@ class SessionStore:
     async def touch(self, session: McpSession) -> None:
         session.upstream_last_used_at = self.clock.time()
         await self.kv.set(
-            SESSION_PREFIX + session.client_session_id,
+            self._key(session.alias, session.client_session_id),
             session.to_record(),
             ttl=self.settings.client_session_ttl,
         )
 
     async def delete(self, session: McpSession) -> None:
-        await self.kv.delete(SESSION_PREFIX + session.client_session_id)
-        await self.kv.decr(SESSION_COUNTER_PREFIX + session.alias, 1)
+        await self.kv.delete(self._key(session.alias, session.client_session_id))
 
     def is_idle(self, session: McpSession) -> bool:
         return (
@@ -313,11 +320,12 @@ class SessionStore:
         )
 
     async def active_by_alias(self, aliases: list[str]) -> dict[str, float]:
+        """Живые сессии по alias — по фактическим записям ``mcpsess:<alias>:*`` (R-N1)."""
         result: dict[str, float] = {}
         for alias in aliases:
-            value = await self.kv.get(SESSION_COUNTER_PREFIX + alias)
-            if isinstance(value, int | float) and value:
-                result[alias] = float(value)
+            count = await self.kv.count_prefix(self._prefix(alias))
+            if count:
+                result[alias] = float(count)
         return result
 
 
