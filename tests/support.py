@@ -1459,3 +1459,17 @@ def parse_db_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
     return datetime.fromisoformat(str(value)).replace(tzinfo=UTC)
+
+
+B64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def tamper_signature(token: str) -> str:
+    """Изменить последнюю букву подписи JWT так, чтобы изменились сами байты подписи.
+
+    В 43-символьной base64url-подписи HS256 два младших бита последнего символа не значимы,
+    поэтому «соседняя» буква даёт ту же подпись; сдвиг на 4 позиции алфавита меняет байт.
+    """
+    head, _, signature = token.rpartition(".")
+    index = B64URL_ALPHABET.index(signature[-1])
+    return f"{head}.{signature[:-1]}{B64URL_ALPHABET[(index + 4) % 64]}"

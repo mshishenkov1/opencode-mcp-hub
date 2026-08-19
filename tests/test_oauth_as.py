@@ -34,6 +34,7 @@ from tests.support import (
     register_client,
     seed_connection,
     submit_consent,
+    tamper_signature,
     web_login,
 )
 
@@ -861,7 +862,7 @@ async def test_token_signature_expiry_and_audience(make_hub: HubFactory) -> None
     hub = await _hub(make_hub)
     _conn, tokens = await connected_client(hub)
     token = tokens["access_token"]
-    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    tampered = tamper_signature(token)
 
     claims = jwt_decode(token, hub.settings.secret_key.get_secret_value())
     expired = jwt_encode(
