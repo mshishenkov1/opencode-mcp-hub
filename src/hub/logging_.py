@@ -54,15 +54,22 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: int | str = logging.INFO) -> logging.Logger:
-    """Настроить логгер ``hub``: JSON-форматтер, фильтр request_id. Идемпотентно."""
-    logger = logging.getLogger("hub")
-    logger.setLevel(level)
-    if not any(getattr(h, "_hub_json", False) for h in logger.handlers):
+    """Настроить JSON-логи Hub. Идемпотентно (один JSON-хендлер на процесс).
+
+    JSON-хендлер ставится на root-логгер, а не на ``hub``: записи ``hub.*`` проходят цепочку один раз
+    (единственный sink процесса — нет дублей под uvicorn, чья конфигурация root-хендлеров не задаёт,
+    а поздний ``logging.basicConfig`` сторонних библиотек становится no-op); ``propagate`` у ``hub``
+    остаётся включённым — перехват через root (pytest caplog, агрегаторы) продолжает работать.
+    """
+    root = logging.getLogger()
+    if not any(getattr(h, "_hub_json", False) for h in root.handlers):
         handler = logging.StreamHandler()
         handler.setFormatter(JsonFormatter())
         handler.addFilter(RequestIdFilter())
         handler._hub_json = True  # type: ignore[attr-defined]
-        logger.addHandler(handler)
+        root.addHandler(handler)
+    logger = logging.getLogger("hub")
+    logger.setLevel(level)
     if not any(isinstance(f, RequestIdFilter) for f in logger.filters):
         logger.addFilter(RequestIdFilter())
     logger.propagate = True
