@@ -1,0 +1,37 @@
+{
+  "run_id": "i1-hub-login-catalog-20260818",
+  "ts": "2026-08-19T20:03:30",
+  "all_passed": true,
+  "gates": {
+    "G1": {
+      "name": "Тесты",
+      "passed": true,
+      "detail": "все тесты зелёные, skip: 0"
+    },
+    "G2": {
+      "name": "Coverage-diff",
+      "passed": true,
+      "detail": "coverage-diff 95% >= 90%"
+    },
+    "G3": {
+      "name": "Mutation",
+      "passed": true,
+      "detail": "mutation score 89.3% (killed 2595, timeout 0, survived 310, suspicious 0), порог 70%"
+    },
+    "G4": {
+      "name": "Статанализ",
+      "passed": true,
+      "detail": "линтер и типизация чистые"
+    },
+    "G5": {
+      "name": "Ревью",
+      "passed": true,
+      "detail": "review-1.json: verdict=approve"
+    },
+    "G6": {
+      "name": "AC-трассировка",
+      "passed": true,
+      "detail": "g_help_lists_validate_and_path, tests/test_cli.py::test_cli_serve_help_has_host_and_port, tests/test_cli.py::test_cli_serve_passes_host_and_port_to_uvicorn, tests/test_cli.py::test_cli_without_command_or_unknown_command_is_error, tests/test_cli.py::test_installed_entrypoint_mcp_hub_help, tests/test_cli.py::test_cli_serve_defaults_and_flags_passed_to_uvicorn |  | G6 OK: все 69 критериев покрыты тестами"
+    }
+  }
+}
