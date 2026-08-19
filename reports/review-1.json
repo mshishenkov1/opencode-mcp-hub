@@ -1,0 +1,76 @@
+{
+  "verdict": "approve",
+  "findings": [
+    {
+      "severity": "minor",
+      "where": "src/hub/app.py:160-162 (обработчики исключений create_app)",
+      "what": "Нет catch-all обработчика Exception: необработанная ошибка в маршруте (проверено эмпирически: /health при state.catalog=None) отдаёт 500 `text/plain` «Internal Server Error» без `X-Content-Type-Options: nosniff` и без `X-Request-ID` — отклонение от R-A7 («все ответы JSON, каждый ответ содержит nosniff») и R-S4 («X-Request-ID всегда возвращается») на аварийном пути (например, БД отвалилась во время /api/me). AC такой сценарий не покрывают, поэтому не блокирует; рекомендуется добавить обработчик `Exception → 500 {error:\"internal_error\", message}` через существующий HubError/_error_response (заголовки тогда проставит middleware).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_api.py::test_auth_result_cached_for_60s",
+      "what": "Формат ключа кэша аутентификации `keyauth:<sha256>` (spec §6) не проверяется: мутация `cache_key = AUTH_CACHE_PREFIX + token` (сырой ключ LiteLLM в имени ключа KV/Redis) пережила весь сьют (300 passed). Рекомендуется после успешного запроса проверить `await hub.app.state.kv.get(\"keyauth:\" + sha256_hex(\"sk-ok\"))` и отсутствие ключа с сырым значением. Остальные 50 проверенных мутаций (throttle, poll_secret, rate-limit, TTL, 4xx→jwt, «первая команда по умолчанию», утечки в audit/public view, ETag, nosniff, X-Request-ID, негативный кэш и др.) тестами убиты.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/catalog.py:24-26",
+      "what": "Устаревший комментарий к ALIAS_RE («Spec R-C1: ^[a-z][a-z0-9-]{1,31}$. Нижняя граница ослаблена…»): в ревизии 1.1 спека сама задаёт `{0,31}`, код ей соответствует — комментарий вводит в заблуждение, поправить.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/cli.py:cmd_catalog_validate",
+      "what": "Сообщение об ошибке печатается дважды (в stderr и в stdout). R-C5 требует напечатать сообщение и вернуть код 1; дубль не нарушает AC-21, но засоряет вывод — оставить один поток (stderr) либо один print.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/routes/api.py:_FALSE_VALUES",
+      "what": "Значение `off` для `?include_deprecated=` не предусмотрено R-A3 (`false`, `0`, `no`, регистр не важен) — незаспецифицированное, хотя безобидное, поведение. Убрать или зафиксировать в спеке.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/logging_.py:configure_logging",
+      "what": "`logger.propagate = True` при собственном JSON-хендлере на логгере `hub` приведёт к дублированию строк в проде под uvicorn (root-хендлер получит те же записи в не-JSON формате). Рекомендуется `propagate = False` либо не добавлять свой хендлер при наличии root-хендлера.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/kv.py:RedisKeyValueStore.rate_limit_hit / count_prefix",
+      "what": "Redis-реализация не атомарна (ZREMRANGEBYSCORE/ZCARD/ZADD отдельными командами — гонка между репликами допускает небольшое превышение лимита) и не покрыта тестами (kv.py 68 %). Для I-1 приемлемо (спека требует тесты только против локальных моков), но к I-3 стоит перевести на MULTI/Lua и добавить тест на fakeredis.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_cli.py::test_catalog_validate_valid_returns_0",
+      "what": "Проверка `\"1\" in out and \"2\" in out` слишком слабая (любой вывод с цифрами проходит). Рекомендуется проверять `version=1` и `servers=2` (регэксп/подстрока с ключом).",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/login.py:_issue_key (jwt_warned)",
+      "what": "Флаг `jwt_warned` фактически мёртвый: ветка 4xx всегда сразу завершает сессию (persist + drop), второго предупреждения в той же сессии быть не может. Поведение R-L4 («один раз на сессию») выполняется тривиально; упростить или оставить с комментарием.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/db.py (Connection), src/hub/app.py (create_app) — готовность к I-3",
+      "what": "Non-blocking заметки к I-3 (examples/req-i3-hub-oauth-facade-proxy.md): (1) таблица `connections` не содержит полей токенов целевых систем (зашифрованные access/refresh, expires_at, scopes) и OAuth-сущностей (clients DCR, codes, refresh-цепочки, denylist jti); `create_all` не добавит колонки в уже существующую БД — в I-3 потребуются миграции (Alembic), заложить сейчас. (2) DI в `create_app` покрывает только `litellm_client`; для facade-upstream и OAuth-провайдеров нужен инжектируемый httpx-клиент/фабрика (`upstream_client`/`http_client_factory`), иначе тесты I-3 не смогут замокать их через respx тем же способом. (3) `KeyValueStore` Protocol не имеет атомарных примитивов (set-if-absent/lock с TTL, incr) — нужны для Redis-lock при refresh (P-09), denylist и транзакций authorize; добавить в Protocol и обе реализации. (4) `auth.authenticate` жёстко привязан к `api_keys`; для `/mcp/{alias}` нужна вторая схема (JWT Hub по HUB_SECRET_KEY, `aud`, denylist) с `WWW-Authenticate: Bearer resource_metadata=…` — `HubError(headers=…)` это уже поддерживает, стоит вынести стратегии аутентификации отдельно. (5) `RequestContextMiddleware` — чистый ASGI без буферизации, пригоден для SSE-проксирования; `Metrics` понадобится расширить лейблами по alias (P-14). (6) `HUB_ENCRYPTION_KEY` только валидируется, `HUB_SECRET_KEY` не используется — нужен модуль crypto (Fernet/HS256). (7) `api_keys.expires_at` для `jwt`-ключей не проверяется при аутентификации (R-L6 этого не требует) — решить в I-2/I-3. (8) Каталог готов: `AuthOAuth2` с Secret/EnvRef, `credential_headers`/`static_headers`, `catalog_env` в app.state, `ServerEntry.public_mcp_url` уже даёт `<HUB>/mcp/<alias>`.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "dispute_resolutions": []
+}
