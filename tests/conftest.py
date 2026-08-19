@@ -26,6 +26,7 @@ from tests.support import (
     LITELLM_URL,
     POLL_SECRET_HEADER,
     PUBLIC_URL,
+    MockNetwork,
     default_catalog,
     litellm_http_client,
     make_litellm_router,
@@ -55,6 +56,24 @@ def _detach_hub_json_handler_between_runs() -> Iterator[None]:
             root.removeHandler(handler)
 
 
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """R-N4/AC-146: тесты с маркером ``load`` исключаются из обычного прогона.
+
+    Нагрузочный smoke запускается явно: ``pytest -m load``. Тесты не пропускаются (skip),
+    а исключаются из выборки — в отчёте прогона нет ни skip, ни xfail.
+    """
+    if config.getoption("-m"):
+        return
+    selected, deselected = [], []
+    for item in items:
+        (deselected if item.get_closest_marker("load") else selected).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+
+
 @pytest.fixture(autouse=True)
 def clean_hub_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Тесты не должны зависеть от HUB_* окружения машины."""
@@ -78,6 +97,12 @@ def litellm() -> Iterator[respx.MockRouter]:
     router = make_litellm_router()
     yield router
     router.reset()
+
+
+@pytest.fixture
+def net() -> MockNetwork:
+    """Моки внешних систем I-3: upstream MCP, AS целевых систем, OIDC (без сети)."""
+    return MockNetwork()
 
 
 @pytest.fixture
@@ -117,6 +142,23 @@ class Hub:
     clock: ManualClock
     litellm: respx.MockRouter
     catalog_path: Path
+    net: MockNetwork | None = None
+    base_url: str = "http://hub.test"
+
+    @property
+    def upstream(self) -> Any:
+        assert self.net is not None
+        return self.net.upstream
+
+    @property
+    def provider(self) -> Any:
+        assert self.net is not None
+        return self.net.provider
+
+    @property
+    def oidc(self) -> Any:
+        assert self.net is not None
+        return self.net.oidc
 
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:
         return await self.client.get(url, **kwargs)
@@ -144,7 +186,11 @@ HubFactory = Callable[..., Awaitable[Hub]]
 
 @pytest.fixture
 async def make_hub(
-    tmp_path: Path, clock: ManualClock, litellm: respx.MockRouter, catalog_path: Path
+    tmp_path: Path,
+    clock: ManualClock,
+    litellm: respx.MockRouter,
+    catalog_path: Path,
+    net: MockNetwork,
 ) -> AsyncIterator[HubFactory]:
     """Фабрика приложений: ``await make_hub(catalog=..., env=..., **settings_overrides)``.
 
@@ -163,6 +209,8 @@ async def make_hub(
         env: dict[str, str] | None = None,
         kv: Any = None,
         path: Path | None = None,
+        base_url: str = "http://hub.test",
+        network: MockNetwork | None = None,
         **overrides: Any,
     ) -> Hub:
         cat_path = path or catalog_path
@@ -173,12 +221,22 @@ async def make_hub(
         if settings is None:
             settings = Settings(**base_settings_kwargs(cat_path, **overrides))
         http = litellm_http_client(litellm)
-        app = create_app(settings, litellm_client=http, clock=clock, kv=kv, catalog_env=env)
+        network = network if network is not None else net
+        outbound = network.client()
+        app = create_app(
+            settings,
+            litellm_client=http,
+            http_client=outbound,
+            clock=clock,
+            kv=kv,
+            catalog_env=env,
+        )
         await stack.enter_async_context(LifespanManager(app))
         client = await stack.enter_async_context(
-            httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://hub.test")
+            httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
         )
         stack.push_async_callback(http.aclose)
+        stack.push_async_callback(outbound.aclose)
         return Hub(
             app=app,
             client=client,
@@ -186,6 +244,8 @@ async def make_hub(
             clock=clock,
             litellm=litellm,
             catalog_path=cat_path,
+            net=network,
+            base_url=base_url,
         )
 
     yield factory
