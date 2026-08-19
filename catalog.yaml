@@ -31,7 +31,7 @@ servers:
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
-    status: ga
+    status: beta   # ga — после выдачи OAuth-приложения администраторами
     audience: ["all"]
     mode: facade
     upstream_url: "https://mcp-gitlab.ailab-copilot-prod.corp.tander.ru/mcp"
@@ -69,7 +69,7 @@ servers:
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
-    status: ga
+    status: beta   # ga — после выдачи OAuth-приложения администраторами
     audience: ["all"]
     mode: facade
     upstream_url: "https://mcp-gitlab-platform.ailab-copilot-prod.corp.tander.ru/mcp"
@@ -94,7 +94,7 @@ servers:
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/atlassian-mcp-oblachno"
-    status: ga
+    status: beta   # ga — после выдачи OAuth-приложения администраторами
     audience: ["all"]
     mode: facade
     upstream_url: "https://mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp"
@@ -126,7 +126,7 @@ servers:
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/atlassian-mcp-oblachno"
-    status: ga
+    status: beta   # ga — после выдачи OAuth-приложения администраторами
     audience: ["all"]
     mode: facade
     upstream_url: "https://mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp"
