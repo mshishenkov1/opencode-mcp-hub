@@ -28,6 +28,15 @@ class KeyValueStore(Protocol):
         """Скользящее окно: если в окне < ``limit`` меток — добавить ``now`` и вернуть ``(True, 0)``;
         иначе ``(False, секунды до освобождения окна)``. Отклонённые обращения не учитываются."""
 
+    async def set_if_absent(self, key: str, value: Any, ttl: float | None = None) -> bool:
+        """Атомарно записать значение, если ключа нет. ``True`` — записали (блокировка захвачена)."""
+
+    async def incr(self, key: str, delta: int = 1, ttl: float | None = None) -> int:
+        """Атомарно увеличить счётчик и вернуть новое значение (``ttl`` обновляет срок жизни)."""
+
+    async def decr(self, key: str, delta: int = 1) -> int:
+        """Атомарно уменьшить счётчик и вернуть новое значение (не опускается ниже нуля)."""
+
     async def close(self) -> None: ...
 
 
@@ -78,6 +87,34 @@ class InMemoryKeyValueStore:
         self._data[key] = (stamps, self._clock.monotonic() + float(window))
         return True, 0.0
 
+    async def set_if_absent(self, key: str, value: Any, ttl: float | None = None) -> bool:
+        if self._alive(key):
+            return False
+        await self.set(key, value, ttl)
+        return True
+
+    async def incr(self, key: str, delta: int = 1, ttl: float | None = None) -> int:
+        current = 0
+        expires: float | None = None
+        if self._alive(key):
+            raw, expires = self._data[key]
+            current = int(raw) if isinstance(raw, int | float) else 0
+        value = current + int(delta)
+        if ttl is not None:
+            expires = self._clock.monotonic() + float(ttl)
+        self._data[key] = (value, expires)
+        return value
+
+    async def decr(self, key: str, delta: int = 1) -> int:
+        current = 0
+        expires: float | None = None
+        if self._alive(key):
+            raw, expires = self._data[key]
+            current = int(raw) if isinstance(raw, int | float) else 0
+        value = max(0, current - int(delta))
+        self._data[key] = (value, expires)
+        return value
+
     async def close(self) -> None:
         self._data.clear()
 
@@ -96,6 +133,16 @@ end
 redis.call('ZADD', key, now, ARGV[4])
 redis.call('PEXPIRE', key, ARGV[5])
 return {1, '0'}
+"""
+
+# Счётчик не опускается ниже нуля (SSE-потоки): DECRBY и нормализация — одной операцией.
+_DECR_LUA = """
+local value = redis.call('DECRBY', KEYS[1], ARGV[1])
+if value < 0 then
+  redis.call('SET', KEYS[1], 0, 'KEEPTTL')
+  value = 0
+end
+return value
 """
 
 _COUNT_PREFIX_LUA = """
@@ -127,6 +174,7 @@ class RedisKeyValueStore:
         self._redis = aioredis.from_url(url, decode_responses=True)
         self._rate_limit_script = self._redis.register_script(_RATE_LIMIT_LUA)
         self._count_prefix_script = self._redis.register_script(_COUNT_PREFIX_LUA)
+        self._decr_script = self._redis.register_script(_DECR_LUA)
 
     async def get(self, key: str) -> Any | None:
         raw = await self._redis.get(key)
@@ -160,6 +208,22 @@ class RedisKeyValueStore:
         if int(allowed):
             return True, 0.0
         return False, max(0.0, float(oldest) + window - now)
+
+    async def set_if_absent(self, key: str, value: Any, ttl: float | None = None) -> bool:
+        if ttl is not None and ttl <= 0:
+            return False
+        payload = json.dumps(value, ensure_ascii=False)
+        px = None if ttl is None else max(1, int(ttl * 1000))
+        return bool(await self._redis.set(key, payload, nx=True, px=px))
+
+    async def incr(self, key: str, delta: int = 1, ttl: float | None = None) -> int:
+        value = int(await self._redis.incrby(key, int(delta)))
+        if ttl is not None and ttl > 0:
+            await self._redis.pexpire(key, max(1, int(ttl * 1000)))
+        return value
+
+    async def decr(self, key: str, delta: int = 1) -> int:
+        return int(await self._decr_script(keys=[key], args=[int(delta)]))
 
     async def close(self) -> None:
         await self._redis.aclose()

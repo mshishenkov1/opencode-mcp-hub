@@ -8,7 +8,14 @@ import json
 import logging
 from typing import Annotated, Any
 
-from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from hub.errors import ConfigError
@@ -19,14 +26,37 @@ DEFAULT_AUTH_COMMAND = ["opencode", "corp", "login", "--hub", PUBLIC_URL_PLACEHO
 
 _LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
 
+# R-T1: переменные Keycloak читаются без префикса HUB_ (решение 59).
+KEYCLOAK_PREFIX = "keycloak_"
+WEB_AUTH_VALUES = ("keycloak", "litellm")
+CONSENT_VALUES = ("always", "remember")
+DEFAULT_ALLOWED_REDIRECTS = ["http://127.0.0.1:*", "http://localhost:*"]
+
 
 def env_name(field: str) -> str:
-    """Имя переменной окружения для поля настроек: ``public_url`` → ``HUB_PUBLIC_URL``."""
+    """Имя переменной окружения для поля настроек: ``public_url`` → ``HUB_PUBLIC_URL``.
+
+    Поля ``keycloak_*`` читаются без префикса ``HUB_`` (R-T1): ``keycloak_issuer`` → ``KEYCLOAK_ISSUER``.
+    """
+    if field.startswith(KEYCLOAK_PREFIX):
+        return field.upper()
     return ENV_PREFIX + field.upper()
+
+
+def _keycloak(field: str) -> AliasChoices:
+    return AliasChoices(field.upper())
 
 
 def _strip_slash(url: str) -> str:
     return url.strip().rstrip("/")
+
+
+def _check_choice(value: str, field: str, allowed: tuple[str, ...]) -> str:
+    """Значение из перечня; иначе — ошибка с именем переменной и перечнем допустимых (R-T2)."""
+    candidate = value.strip().lower()
+    if candidate not in allowed:
+        raise ValueError(f"{env_name(field)}: допустимые значения — {', '.join(allowed)}")
+    return candidate
 
 
 def _validate_fernet_key(value: str) -> str:
@@ -58,6 +88,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
         env_file=None,
         validate_default=True,
+        populate_by_name=True,
     )
 
     # --- обязательные ---
@@ -90,6 +121,58 @@ class Settings(BaseSettings):
     login_session_ttl: int = Field(default=600, gt=0)
     key_alias_prefix: str = "opencode"
     log_level: str = "INFO"
+
+    # --- I-3: веб-интерфейс и экран прав (R-T1) ---
+    web_auth: str = "litellm"
+    consent: str = "always"
+    web_session_ttl: int = Field(default=28800, gt=0)
+
+    # --- I-3: Hub как authorization server ---
+    oauth_allowed_redirects: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_ALLOWED_REDIRECTS)
+    )
+    access_token_ttl: int = Field(default=3600, gt=0)
+    refresh_token_ttl: int = Field(default=2592000, gt=0)
+    auth_code_ttl: int = Field(default=60, gt=0)
+    oauth_tx_ttl: int = Field(default=600, gt=0)
+    rate_limit_register: int = Field(default=10, gt=0)
+    rate_limit_token: int = Field(default=60, gt=0)
+
+    # --- I-3: MCP-proxy ---
+    rate_limit_mcp: int = Field(default=120, gt=0)
+    max_sse_per_user: int = Field(default=4, gt=0)
+    max_body_bytes: int = Field(default=1048576, gt=0)
+    upstream_timeout: float = Field(default=30.0, gt=0)
+    upstream_sse_idle_timeout: float = Field(default=300.0, gt=0)
+    upstream_idle_ttl: int = Field(default=600, gt=0)
+    client_session_ttl: int = Field(default=86400, gt=0)
+    tools_cache_ttl: int = Field(default=300, gt=0)
+    cb_failures: int = Field(default=5, gt=0)
+    cb_reset: float = Field(default=30.0, gt=0)
+    connection_cache_ttl: float = Field(default=60.0, gt=0)
+
+    # --- I-3: брокер токенов целевых систем ---
+    token_refresh_lead: int = Field(default=300, gt=0)
+    token_refresh_interval: float = Field(default=60.0, gt=0)
+    token_refresh_enabled: bool = True
+
+    # --- I-3: миграции ---
+    db_auto_migrate: bool = True
+
+    # --- I-3: OIDC (Keycloak); имена переменных — без префикса HUB_ ---
+    keycloak_issuer: str = Field(default="", validation_alias=_keycloak("keycloak_issuer"))
+    keycloak_client_id: str = Field(
+        default="opencode-mcp-hub", validation_alias=_keycloak("keycloak_client_id")
+    )
+    keycloak_client_secret: SecretStr | None = Field(
+        default=None, validation_alias=_keycloak("keycloak_client_secret")
+    )
+    keycloak_scopes: str = Field(
+        default="openid profile email", validation_alias=_keycloak("keycloak_scopes")
+    )
+    keycloak_jwks_ttl: float = Field(
+        default=3600.0, gt=0, validation_alias=_keycloak("keycloak_jwks_ttl")
+    )
 
     def __init__(self, **values: Any) -> None:
         try:
@@ -155,6 +238,57 @@ class Settings(BaseSettings):
             )
         return level
 
+    @field_validator("web_auth", mode="after")
+    @classmethod
+    def _check_web_auth(cls, value: str) -> str:
+        return _check_choice(value, "web_auth", WEB_AUTH_VALUES)
+
+    @field_validator("consent", mode="after")
+    @classmethod
+    def _check_consent(cls, value: str) -> str:
+        return _check_choice(value, "consent", CONSENT_VALUES)
+
+    @field_validator("oauth_allowed_redirects", mode="before")
+    @classmethod
+    def _parse_allowed_redirects(cls, value: Any) -> Any:
+        name = env_name("oauth_allowed_redirects")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"{name}: ожидается JSON-массив строк") from exc
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(item, str) and item.strip() for item in value)
+        ):
+            raise ValueError(f"{name}: ожидается непустой JSON-массив непустых строк")
+        return value
+
+    @field_validator("keycloak_client_secret", mode="after")
+    @classmethod
+    def _empty_keycloak_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _check_keycloak_required(self) -> Settings:
+        """R-T2: при ``HUB_WEB_AUTH=keycloak`` обязательны issuer и секрет клиента."""
+        if self.web_auth != "keycloak":
+            return self
+        if not self.keycloak_issuer.strip():
+            raise ValueError(
+                f"{env_name('keycloak_issuer')}: обязательная переменная при "
+                f"{env_name('web_auth')}=keycloak"
+            )
+        if self.keycloak_client_secret is None:
+            raise ValueError(
+                f"{env_name('keycloak_client_secret')}: обязательная переменная при "
+                f"{env_name('web_auth')}=keycloak"
+            )
+        return self
+
     @model_validator(mode="after")
     def _substitute_public_url(self) -> Settings:
         self.wellknown_auth_command = [
@@ -185,11 +319,15 @@ def _format_validation_error(exc: ValidationError) -> str:
     parts: list[str] = []
     for err in exc.errors():
         loc = err.get("loc") or ()
-        field = str(loc[0]) if loc else "?"
-        name = env_name(field)
         msg = str(err.get("msg", ""))
         # Пользовательские ValueError уже начинаются с имени переменной.
         msg = msg.removeprefix("Value error, ")
+        if not loc:
+            # Ошибка model_validator (например, обязательные KEYCLOAK_*) — текст уже содержит имя.
+            parts.append(msg)
+            continue
+        field = str(loc[0])
+        name = env_name(field)
         if err.get("type") == "missing":
             msg = "обязательная переменная не задана"
         if name in msg:
@@ -204,4 +342,12 @@ def load_settings(**overrides: Any) -> Settings:
     return Settings(**overrides)
 
 
-__all__ = ["DEFAULT_AUTH_COMMAND", "Settings", "env_name", "load_settings"]
+__all__ = [
+    "CONSENT_VALUES",
+    "DEFAULT_ALLOWED_REDIRECTS",
+    "DEFAULT_AUTH_COMMAND",
+    "WEB_AUTH_VALUES",
+    "Settings",
+    "env_name",
+    "load_settings",
+]

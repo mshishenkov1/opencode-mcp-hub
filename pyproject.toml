@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "pyyaml>=6",
     "authlib>=1.3",
+    "alembic>=1.13",
     "cryptography>=43",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
@@ -44,12 +45,16 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+hub = ["templates/*.html", "migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "ac(id): привязка теста к критерию приёмки (например AC-01)",
     "flaky_suspect: тест помечен TEST-агентом как нестабильный",
+    "load: нагрузочный smoke (в обычном прогоне не выполняется)",
 ]
 
 [tool.coverage.run]
