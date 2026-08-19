@@ -6,6 +6,9 @@ HTTP-клиент инжектируется (``app.state.oidc_client``) — т�
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
 from collections.abc import Callable
 from typing import Any, cast
@@ -24,11 +27,25 @@ logger = logging.getLogger("hub.oidc")
 
 META_PREFIX = "oidc:meta:"
 JWKS_PREFIX = "oidc:jwks:"
-ALLOWED_ALGORITHMS = ["RS256", "RS512", "ES256", "PS256"]
+# Допустимые алгоритмы подписи id_token — только асимметричные (R-W1). Симметричные (HS*) и
+# `none` запрещены явно: с ними подпись проверялась бы публичным ключом JWKS как секретом
+# (algorithm confusion) или не проверялась вовсе.
+ALLOWED_ALGORITHMS = ["RS256", "ES256"]
 
 
 class OIDCError(Exception):
     """Ошибка провайдера OIDC: метаданные, обмен кода, проверка id_token."""
+
+
+def token_algorithm(token: str) -> str:
+    """``alg`` из заголовка JWT без проверки подписи (``""`` — заголовок нечитаем)."""
+    head = token.split(".", 1)[0]
+    try:
+        raw = base64.urlsafe_b64decode(head + "=" * (-len(head) % 4))
+        header = json.loads(raw)
+    except (ValueError, binascii.Error):
+        return ""
+    return str(header.get("alg", "")) if isinstance(header, dict) else ""
 
 
 class OIDCClient:
@@ -132,7 +149,15 @@ class OIDCClient:
         return data
 
     async def verify_id_token(self, id_token: str, *, nonce: str) -> dict[str, Any]:
-        """Проверить подпись по JWKS издателя и claims ``iss``/``aud``/``exp``/``nonce`` (R-W1)."""
+        """Проверить подпись по JWKS издателя и claims ``iss``/``aud``/``exp``/``nonce`` (R-W1).
+
+        Алгоритм подписи проверяется до обращения к ключам: `none` и HS* отклоняются независимо
+        от содержимого JWKS.
+        """
+        algorithm = token_algorithm(id_token)
+        if algorithm not in ALLOWED_ALGORITHMS:
+            logger.warning("oidc_id_token_alg_rejected", extra={"alg": algorithm or "-"})
+            raise OIDCError("алгоритм подписи id_token не поддерживается")
         jwks = await self.jwks()
         try:
             key_set = KeySet.import_key_set(cast(Any, jwks))
@@ -164,4 +189,12 @@ def user_id_from_claims(claims: dict[str, Any]) -> str | None:
     return None
 
 
-__all__ = ["JWKS_PREFIX", "META_PREFIX", "OIDCClient", "OIDCError", "user_id_from_claims"]
+__all__ = [
+    "ALLOWED_ALGORITHMS",
+    "JWKS_PREFIX",
+    "META_PREFIX",
+    "OIDCClient",
+    "OIDCError",
+    "token_algorithm",
+    "user_id_from_claims",
+]
