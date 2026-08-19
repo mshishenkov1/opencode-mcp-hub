@@ -1,0 +1,34 @@
+{
+  "verdict": "approve",
+  "findings": [
+    {
+      "severity": "minor",
+      "where": "src/hub/proxy.py:213 (CircuitBreaker.record_success)",
+      "what": "На горячем пути каждый успешный ответ upstream делает две операции KV вместо одной: delete('cb:<alias>:probe') + set('cb:<alias>'). В закрытом состоянии ключа пробы не существует никогда, поэтому delete — лишний round-trip к Redis на каждый проксированный запрос (при HUB_RATE_LIMIT_MCP=120 на пользователя это заметная доля бюджета). Достаточно удалять ключ пробы только когда состояние реально было открыто (в check() запись cb:<alias> уже прочитана — признак можно передать) либо объединить обе операции в pipeline. На корректность не влияет, требование R-P10 выполнено.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/proxy.py:200-206 (CircuitBreaker.check), spec.md R-P10",
+      "what": "TTL права на пробу равен HUB_CB_RESET (30 с по умолчанию), а сам пробный запрос может выполняться дольше: HUB_UPSTREAM_TIMEOUT тоже 30.0 (граничный случай), а для SSE — HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300.0. Пока «зависшая» проба ещё в полёте, ключ cb:<alias>:probe истекает, и следующий запрос захватывает право заново — на лежащий upstream уходит ещё одна проба каждые HUB_CB_RESET секунд, что расходится с формулировкой R-P10/AC-152 «ровно один пробный запрос». Ущерб ограничен (1 запрос за окно, поведение остаётся fail-slow, а не fail-open), AC-152 этот сценарий не покрывает: тест отпускает удерживаемый ответ до истечения TTL. Предлагается TTL пробы = max(HUB_CB_RESET, HUB_UPSTREAM_SSE_IDLE_TIMEOUT) + запас (или снятие права по завершении запроса с последующим коротким grace), плюс AC на пробу, длящуюся дольше HUB_CB_RESET.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/routes/oauth.py:39 (_client_ip), spec.md R-T5",
+      "what": "При HUB_TRUST_PROXY=true левый адрес X-Forwarded-For берётся как есть: без проверки, что это IP, и без ограничения длины, после чего попадает в ключи KV rl:register:<ip> и rl:token:<client_id>:<ip>. R-T5 явно оговаривает предусловие («включать только когда X-Forwarded-For проставляет доверенный прокси»), но типовая конфигурация nginx/istio заголовок не перезаписывает, а дополняет (proxy_add_x_forwarded_for): тогда левое значение задаёт клиент — это и обход лимита регистрации, и неограниченная кардинальность/длина ключей KV (память Redis). Дёшево закрывается валидацией ipaddress.ip_address() с откатом на request.client.host при неудаче; при желании — вариант «N-й справа хоп». Дефолт false, поэтому эксплуатационный риск включается осознанно.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/proxy.py:222-234 (CircuitBreaker.record_failure)",
+      "what": "Замечание о прозрачности, не дефект: в ветке повторного открытия окна две страховки избыточны — проверено мутациями. Мутация «failures = 0 вместо max(failures, cb_failures)» (M6) и мутация «if False вместо if open_until > 0.0» (M11) обе прошли весь набор тестов, потому что исправленная ветка else больше не обнуляет счётчик и сама по себе немедленно открывает окно при провале пробы. Это эквивалентные мутанты, а не пробел в тестах: точная дофиксовая логика record_failure (мутация M15: failures += 1; при достижении порога open_until = now + reset и failures = 0) ловится тестом tests/test_proxy.py::test_failed_half_open_probe_reopens_window (AC-151). Оставлять как есть допустимо (защита от рассинхронизации состояния в KV между репликами), но стоит знать, что покрытие держится на ветке else.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "dispute_resolutions": []
+}
