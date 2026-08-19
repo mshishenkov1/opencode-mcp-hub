@@ -1,0 +1,117 @@
+{
+  "iteration": 4,
+  "branch": "corp/i4-sso-connectors",
+  "base": "main (upstream v1.17.9)",
+  "verdict": "request_changes",
+  "checked": {
+    "typecheck": "packages/core|opencode|tui|app — все зелёные (tsgo --noEmit, exit 0)",
+    "tests": "packages/opencode `bun test src/corp` 153 pass; packages/tui 13 pass; packages/app 10 pass; дерево после прогонов чистое",
+    "patches_registry": "git diff main...HEAD --name-only без corp/**, packages/*/src/corp/**, новых корп-файлов и тестов совпадает с таблицей corp/patches.md (19 строк) — расхождений нет",
+    "mutations": "11 мутаций через bash с откатом `git checkout --`: status.ts (правило 3, блокировка при stale), catalog-cache (0600), errors (429), hub (Authorization), status.oauthScope (native), constants (приоритет env), patches.md (удалённая строка), tui i18n (язык по умолчанию), app language.tsx (fallbackLocale), app ru.ts (удалённый ключ) — 10 из 11 пойманы соответствующими тестами; мутация 429→hub_unavailable не ловится hub.test.ts (тело ответа мока содержит поле error, оно имеет приоритет), но ловится errors.test.ts. Тавтологичных тестов не найдено: ожидания вычислены независимо, моки стоят только на границах (fetch, Bun.serve-мок Hub, подменяемые часы, временные XDG-каталоги)."
+  },
+  "findings": [
+    {
+      "severity": "major",
+      "where": "packages/opencode/src/server/routes/instance/httpapi/handlers/corp.ts:314-324 (cardFor), использование на строках 350, 352, 389, 402, 420",
+      "what": "cardFor всегда вызывает CorpStatus.compute с `server: undefined`, хотя карточка каталога в этот момент уже получена (serverFor, строка 334/384). Из-за этого срабатывает правило 1 таблицы S-V6 («alias отсутствует в каталоге, но есть в конфиге») и POST /corp/connectors/:alias/connect после успешного подключения возвращает `status:\"unavailable\"` с действиями [disconnect, open_hub]; то же для PUT /corp/connectors/:alias/permissions. Проверено прямым прогоном модуля: compute({configured:true, local:\"connected\", server:undefined}) → \"unavailable\" (при configured:false → \"connected\", то есть результат ещё и зависит от того, успел ли конфиг перечитаться после updateGlobal — а он перечитывается, updateGlobal вызывает invalidate()). Нарушены контракт S-V1 (`{alias, status, error?}` — статус карточки по S-V6) и сама таблица S-V6. Сейчас симптом не виден пользователю только потому, что оба UI игнорируют поле status и перезапрашивают каталог (TUI act(), app useConnectorAction), то есть ошибка латентная и ждёт первого потребителя SDK. Починка: передавать в compute уже полученный `server` (и корректный `stale`), либо считать карточку тем же кодом, что и в toCards.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "packages/opencode/src/corp/connectors.test.ts, packages/opencode/src/corp/routes.test.ts, corp/smoke.ts",
+      "what": "Оркестрация действий витрины в handlers/corp.ts (connect, disconnect, permissions) не покрыта ни одним автотестом. connectors.test.ts проверяет только чистые функции (connectPatch/disconnectPatch/permissionsPatch/needsReauth/hubServerUrl), routes.test.ts — только схемы и пути, smoke.ts доходит лишь до /corp/status и /corp/catalog. В результате S-Q4 выполнен частично: «disconnect выполняет три локальных шага и переживает отказ Hub» и «Права запускают повторную авторизацию при reauth_required» не проверяются, и именно в этой непокрытой зоне живёт дефект выше (карточка после connect). Нужны тесты уровня роутов: последовательность removeAuth → disconnect → updateGlobal → DELETE {hub}/api/me/connections/:alias с проверкой, что отказ Hub даёт hub_error и не откатывает локальные шаги; connect с моком MCP.authenticate (успех/failed) и проверкой возвращаемого статуса; permissions с reauth_required. Технически это выражается и через corp/smoke.ts (мок Hub уже есть) — достаточно дописать сценарии 8-10.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "packages/app/src/components/corp/dialog-corp-login.tsx:68-83 (start)",
+      "what": "Экран входа Desktop/web не открывает браузер автоматически — только показывает ссылку. S-A6 шаг 2 («ссылка browser_url (открывается в браузере автоматически)») и AC-24 требуют автооткрытия, а S-D3 обязывает диалог packages/app реализовать шаги S-A6; в TUI автооткрытие есть (dialog-corp-login.tsx:96 openBrowser). Для Electron это делается штатным механизмом или серверной частью (S-D8, как F15 для MCP-OAuth); для чистого web автооткрытие ненадёжно (блокировка всплывающих окон). Требуется либо реализация (например, открытие browser_url серверной стороной по образцу MCP-OAuth), либо явная правка S-A6/AC-24 через spec-агента, что в Desktop/web ссылка только отображается. Сейчас AC-24 (manual, М-7) будет провален.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/tui/src/component/corp/dialog-connectors.tsx:225-262 (actions)",
+      "what": "Клавиши витрины TUI (enter/d/p/o) не фильтруются по `card.actions`: «Подключить» доступно на deprecated-карточке без записи в конфиге (S-V6 разрешает только переподключение уже настроенного alias), «Отключить»/«Права» доступны на карточках, где спека их не предусматривает. В packages/app фильтрация по card.actions сделана правильно — поведение двух клиентов расходится. Функция act() проверяет только card.blocked.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/opencode/src/server/routes/instance/httpapi/handlers/corp.ts:29 (memo), 250, 276",
+      "what": "Внутрипроцессный memo каталога (60 с, S-V3) — модульная переменная, ключ только hub_url. Карточки в нём зависят от конфига и локальных статусов MCP конкретного инстанса (localState), а роуты живут за WorkspaceRoutingMiddleware/InstanceContextMiddleware и обслуживают несколько каталогов одним процессом. В течение 60 с второй рабочий каталог получит карточки, посчитанные для первого. Ключ memo стоит расширить directory/instance либо хранить в состоянии инстанса.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/tui/src/component/corp/dialog-corp-login.tsx:43-47; packages/app/src/components/corp/dialog-corp-login.tsx:39-42",
+      "what": "S-A9 требует, чтобы закрытие экрана «освобождало сессию в памяти сервера». Реализация только останавливает опрос на клиенте; сессия (вместе с poll_secret) живёт до expires_in — роута отмены нет. Риск низкий (секрет не покидает процесс, TTL ≤ 600 с), но правило спеки не выполнено: нужен либо роут отмены (DELETE /corp/login/:loginID → store.drop), либо правка S-A9.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/tui/src/app.tsx:717-724 (команда corp.login)",
+      "what": "S-T2 задаёт `suggested: !hasCorpKey()`, реализовано `suggested: !connected()` — подсказка опирается на upstream-признак «есть хоть какой-то подключённый провайдер», а не на отсутствие ключа magnit_prod. При подключённом стороннем провайдере и отсутствии корп-ключа команда входа перестаёт подсвечиваться. Данные о ключе доступны через GET /corp/status (поле authenticated).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/opencode/src/corp/status.ts:80 (фильтр blocked)",
+      "what": "При протухшем каталоге (S-V6 строка 2) блокируются только connect и permissions, а действие reconnect (строка 3, локальный статус failed) остаётся доступным — оно выполняет тот же путь S-V7 (запись конфига + authenticate) на данных из протухшего кэша. В таблице S-V6 для строки 2 в колонке действий указано только «Открыть в Hub». Нужно либо блокировать reconnect, либо уточнить формулировку правила.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "bun.lock (строка ghostty-web), corp/patches.md строка 1",
+      "what": "Единственное изменение bun.lock — сдвиг коммита github-зависимости ghostty-web (20bd361 → 83c0a07), возникший как побочный эффект `bun install`: новых зависимостей ветка не добавляет. По критерию минимальности патчей (S-C8: «нет изменений, которых можно избежать») этот файл стоит вернуть к состоянию upstream (`git checkout main -- bun.lock`) и убрать строку из corp/patches.md — иначе каждый rebase тянет незапланированный апгрейд зависимости и лишний конфликт lock-файла. Тест реестра правок при этом останется зелёным (он сравнивает множества файлов).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": ".github/workflows/corp-ci.yml:80 (job build-cli, matrix win32-x64); corp/build.ts:104-113",
+      "what": "Для цели win32-x64 на ubuntu-раннере `--single` не подставляется (текущая платформа — linux-x64), поэтому upstream-скрипт собирает все четыре цели, а упаковывается одна. Функционально верно, но втрое дольше и расходует раннеры. Достаточно передавать список целей в script/build.ts или собирать win32 в той же джобе, что и linux.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "dispute_resolutions": [],
+  "ac_resolutions": [
+    {
+      "ac": "AC-94",
+      "orchestrator_decision": "следовать S-I2 (тест написан на локаль sw-KE, которой нет в списке поддерживаемых)",
+      "review": "согласен",
+      "reasoning": "S-I2 явно ставит совпадение с navigator.languages выше корп-умолчания, а fr есть в localeMatchers (packages/app/src/context/language.tsx), поэтому исходная формулировка AC-94 противоречит правилу, на которое сама ссылается. Реализация (fallbackLocale() применяется только когда ни один matcher не сработал и явного выбора нет) правилу соответствует; менять поведение ради формулировки AC не нужно.",
+      "proposed_ac_wording": "AC-94 (unit, S-I2): дано — корп-функции включены, сохранённой локали нет, navigator.languages=[\"sw-KE\"] (ни одна поддерживаемая локаль не совпадает); когда вычислена локаль; тогда — выбрана ru, а при выключенных корп-функциях в том же сценарии — en. Дополнительный AC-94a (unit, S-I2): дано — корп-функции включены, сохранённой локали нет, navigator.languages=[\"fr-FR\"]; тогда — выбрана fr: совпадение с поддерживаемой локалью браузера приоритетнее корп-умолчания."
+    },
+    {
+      "ac": "AC-35",
+      "orchestrator_decision": "следовать S-A11 (код выхода 0, если корп-функции включены и ключ есть, даже при недоступном Hub)",
+      "review": "согласен",
+      "reasoning": "S-A11 формулирует код выхода однозначно и через состояние клиента, а не Hub; диагностическая команда не должна падать из-за временной недоступности сервера — иначе её нельзя использовать в скриптах проверки установки. Реализация (packages/opencode/src/cli/cmd/corp.ts:90-112) печатает «Доступность Hub: недоступен» и возвращает 0 при наличии ключа, 1 при его отсутствии — это и есть правило.",
+      "proposed_ac_wording": "AC-35 (integration, S-A11): дано — ключ magnit_prod есть, Hub недоступен (мок отвечает сетевой ошибкой); когда выполнено `opencode corp status`; тогда — напечатано «Доступность Hub: недоступен», строки про ключ и кэш каталога заполнены из локальных данных, код выхода 0. Дополнительный AC-35a (negative): ключа нет и Hub недоступен → «Корпоративный ключ: нет», код выхода 1."
+    },
+    {
+      "ac": "AC-33",
+      "orchestrator_decision": "расхождение формулировок не считать багом (ожидаемые строки входят как подстроки)",
+      "review": "согласен, но формулировку стоит починить",
+      "reasoning": "AC ждёт «Hub: доступен» и «ключ: нет», команда печатает «Доступность Hub: доступен (ok)» и «Корпоративный ключ: нет». Подстроки совпадают, но именно на такой неявной договорённости уже возник BUG-I4-001 (регистр в grep CI).",
+      "proposed_ac_wording": "AC-33: … тогда — вывод содержит подстроки «Hub: », «Доступность Hub: доступен», «Корпоративный ключ: нет», «Каталог: »; проверка выполняется по подстрокам, точные формулировки фиксируются в cli.test.ts и в дымовой проверке corp-ci одним источником."
+    }
+  ],
+  "verified_ok": [
+    "S-C5/S-C6 (ванильный режим): все корп-точки под guard — команды TUI и app регистрируются только при corpEnabled()/corpStatus.enabled, first-run TUI ветвится только при corpEnabled(), корп-слой конфига мержится только при наличии OPENCODE_CORP_CONFIG, корп-роуты отвечают 501 corp_disabled (проверено corp/smoke.ts: ванильный сервер — enabled=false, /corp/catalog 501)",
+    "S-C8/S-B6: правки upstream минимальны (19 файлов, каждая — импорт + ветвление, комментарий `corp:` и строка в реестре); новый код вынесен в новые файлы packages/*/src/corp/**",
+    "Безопасность: poll_secret не выходит за пределы corp/login.ts + hub.ts (заголовок) — проверено grep по всему дереву; ключ magnit_prod не попадает ни в схемы ответов, ни в логи, ни в вывод CLI (routes.test.ts, cli.test.ts, smoke.ts); auth.json 0600, кэш каталога 0600 и не содержит секретов (схема отбрасывает лишние поля, permission_model.header наружу не приходит); действующий адрес Hub берётся только из --hub/env/build-константы, из ответов сервера — никогда; authenticate вызывается только для alias, найденного в каталоге Hub или кэше; браузерный UI ходит только в корп-роуты локального сервера (packages/app/src/context/corp.ts, прямых fetch в Hub нет) — обхода CORS нет",
+    "S-V7/S-V8/S-C7: Config.updateGlobal вызывается только для ключей mcp.<alias>; частичный патч {enabled:false} допустим схемой upstream (ConfigV1.Info.mcp — union с {enabled:boolean}), комментарии .jsonc пользователя сохраняются (config.test.ts AC-12/AC-62)",
+    "S-B5: corp/upstream-sync.sh отказывается работать на грязном дереве до любых изменений, требует remote upstream и существующий тег, ничего не пушит (upstream-sync.test.ts)",
+    "S-B1/S-B7/S-B8: версия -magnit.N из corp/version|CORP_BUILD прокидывается через OPENCODE_VERSION (Script.version читает env), цели и артефакты corp/build.ts согласованы с путями upload-artifact, grep дымовой проверки CI совпадает с фактическим выводом corp status (BUG-I4-001 закрыт)",
+    "S-I1/S-I3/S-I4: 58 ключей corp.* в ru.ts и en.ts, паритет и отсутствие непереведённых значений проверяются dictionary.test.ts; словарь TUI покрыт i18n.test.ts (паритет, язык по умолчанию, OPENCODE_CORP_LANG)"
+  ]
+}
