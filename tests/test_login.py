@@ -1078,8 +1078,30 @@ async def test_cli_responses_do_not_leak_litellm_secret_or_login_id(hub: Hub) ->
     assert bodies[-4] and '"ready"' in bodies[-4]
     for body in bodies:
         assert "ll-secret" not in body
-    # login_id LiteLLM допустим только внутри browser_url ответа /cli/start (R-L1)
+    # ревизия 1.1 (R-L9): login_id LiteLLM допустим только как значение key= внутри browser_url
+    # ответа /cli/start; вне browser_url (в т.ч. в /cli/poll/*, /cli/*/team) не появляется
+    assert start["browser_url"] == f"{LITELLM_URL}/sso/key/generate?source=litellm-cli&key=ll-1"
+    start_without_browser_url = start_resp.text.replace(start["browser_url"], "")
+    assert "ll-1" not in start_without_browser_url
     for body in bodies[1:]:
+        assert "ll-1" not in body
+
+
+@pytest.mark.ac("AC-47")
+async def test_cli_error_and_expired_responses_do_not_leak_litellm_ids(hub: Hub) -> None:
+    """Ответы об ошибках (502 litellm_unavailable, 404 login_expired) также не раскрывают
+    poll_secret и login_id LiteLLM (R-L9)."""
+    mock_start(hub.litellm, start_body(login_id="ll-1", poll_secret="ll-secret"))
+    start_resp = await hub.post("/cli/start", json={"client": CLIENT})
+    start = start_resp.json()
+    mock_poll(hub.litellm, {"error": "boom"}, status=500)
+    unavailable = await hub.poll(start["login_id"], start["poll_secret"])
+    assert unavailable.status_code == 502
+    hub.clock.advance(601)
+    expired = await hub.poll(start["login_id"], start["poll_secret"])
+    assert expired.status_code == 404
+    for body in (unavailable.text, expired.text):
+        assert "ll-secret" not in body
         assert "ll-1" not in body
 
 

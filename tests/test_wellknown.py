@@ -85,10 +85,25 @@ async def test_wellknown_needs_no_auth_and_ignores_bad_bearer(hub: Hub) -> None:
 # --- AC-59 -----------------------------------------------------------------
 
 
+CATALOG_ENV_NAMES = ("GL_SECRET", "GL_TOKEN", "GL_STATIC")
+FORBIDDEN_FRAGMENTS = (
+    "upstream",
+    "client_secret",
+    "credential_headers",
+    "static_headers",
+    *CATALOG_ENV_NAMES,
+)
+
+
 def _catalog_for_ac59() -> dict:  # type: ignore[type-arg]
     return catalog_doc(
         [
-            facade_server("gitlab", audience=["all"]),
+            facade_server(
+                "gitlab",
+                audience=["all"],
+                credential_headers={"Authorization": "env:GL_TOKEN"},
+                static_headers={"X-Static": "env:GL_STATIC"},
+            ),
             native_server("tag", audience=["all"], mcp_url="https://tag.test/mcp"),
             native_server("b", audience=["devs"]),
             native_server("old", status="deprecated", audience=["all"]),
@@ -101,7 +116,13 @@ def _catalog_for_ac59() -> dict:  # type: ignore[type-arg]
 async def test_wellknown_mcp_entries_for_visible_servers_without_secrets(
     make_hub: HubFactory,
 ) -> None:
-    hub = await make_hub(catalog=_catalog_for_ac59(), env={"GL_SECRET": "very-secret"})
+    catalog = _catalog_for_ac59()
+    assert catalog["servers"][0]["auth"]["client_secret"] == "env:GL_SECRET"
+    hub = await make_hub(
+        catalog=catalog,
+        wellknown_env_name="MAGNIT_COPILOT_KEY",
+        env={"GL_SECRET": "very-secret", "GL_TOKEN": "tok-secret", "GL_STATIC": "static-secret"},
+    )
     resp = await hub.get("/.well-known/opencode")
     assert resp.status_code == 200
     mcp = resp.json()["config"]["mcp"]
@@ -121,29 +142,45 @@ async def test_wellknown_mcp_entries_for_visible_servers_without_secrets(
     }
     for entry in mcp.values():
         assert "headers" not in entry
-    assert "upstream" not in resp.text
-    assert "client_secret" not in resp.text
-    assert "very-secret" not in resp.text
-    assert "GL_SECRET" not in resp.text
-    # ссылки env:VAR каталога не сериализуются: единственные вхождения 'env:' — плейсхолдеры
-    # OpenCode '{env:<HUB_WELLKNOWN_ENV_NAME>}' из R-A5 (см. отчёт: противоречие AC-58 ↔ AC-59)
+    for fragment in FORBIDDEN_FRAGMENTS:
+        assert fragment not in resp.text, fragment
+    for secret in ("very-secret", "tok-secret", "static-secret"):
+        assert secret not in resp.text, secret
+    # ревизия 1.1: ссылки каталога env:VAR не сериализуются — в config.mcp подстроки 'env:' нет
     assert "env:" not in json.dumps(mcp)
-    assert re.sub(r"\{env:MAGNIT_COPILOT_KEY\}", "", resp.text).count("env:") == 0
 
 
 @pytest.mark.ac("AC-59")
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Противоречие спецификации: AC-59 требует отсутствия подстроки 'env:' в теле well-known, "
-        "но AC-58/R-A5 требуют apiKey == '{env:MAGNIT_COPILOT_KEY}' и Authorization 'Bearer {env:…}'. "
-        "Тест написан по букве AC-59 и ожидаемо падает; поведение по R-A5/AC-58 считается верным."
-    ),
-)
-async def test_wellknown_body_has_no_env_prefix_literal(make_hub: HubFactory) -> None:
-    hub = await make_hub(catalog=_catalog_for_ac59())
+async def test_wellknown_env_prefix_only_in_opencode_placeholders(make_hub: HubFactory) -> None:
+    """Ревизия 1.1: единственные вхождения 'env:' — плейсхолдеры ``{env:<HUB_WELLKNOWN_ENV_NAME>}``
+    в ``provider.*.options.apiKey`` и ``remote_config.headers.Authorization`` (AC-58)."""
+    hub = await make_hub(catalog=_catalog_for_ac59(), wellknown_env_name="MAGNIT_COPILOT_KEY")
     resp = await hub.get("/.well-known/opencode")
-    assert "env:" not in resp.text
+    assert resp.status_code == 200
+    body = resp.json()
+    # плейсхолдеры присутствуют там, где положено (иначе проверка ниже была бы тривиальной)
+    assert (
+        body["config"]["provider"]["magnit_prod"]["options"]["apiKey"] == "{env:MAGNIT_COPILOT_KEY}"
+    )
+    assert body["remote_config"]["headers"]["Authorization"] == "Bearer {env:MAGNIT_COPILOT_KEY}"
+    assert resp.text.count("{env:MAGNIT_COPILOT_KEY}") == 2
+    stripped = resp.text.replace("{env:MAGNIT_COPILOT_KEY}", "")
+    assert "env:" not in stripped
+    for fragment in FORBIDDEN_FRAGMENTS:
+        assert fragment not in resp.text, fragment
+
+
+@pytest.mark.ac("AC-59")
+async def test_wellknown_env_prefix_check_follows_custom_env_name(make_hub: HubFactory) -> None:
+    """При другом ``HUB_WELLKNOWN_ENV_NAME`` разрешены только плейсхолдеры с этим именем;
+    имена переменных каталога (``env:VAR``) в теле по-прежнему отсутствуют."""
+    hub = await make_hub(catalog=_catalog_for_ac59(), wellknown_env_name="CORP_KEY")
+    resp = await hub.get("/.well-known/opencode")
+    assert resp.status_code == 200
+    assert resp.text.count("{env:CORP_KEY}") == 2
+    assert "env:" not in resp.text.replace("{env:CORP_KEY}", "")
+    for name in CATALOG_ENV_NAMES:
+        assert name not in resp.text, name
 
 
 @pytest.mark.ac("AC-59")

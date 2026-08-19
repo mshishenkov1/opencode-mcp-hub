@@ -1,7 +1,8 @@
 # Отчёт TEST-AGENT — итерация I-1 (Hub: вход по SSO, ключ LiteLLM, каталог, well-known)
 
-Ветка: `pipeline/i1-hub-login-catalog-20260818`. Дата: 2026-08-19.
-Входы: `src/hub/`, `spec.md`, `acceptance-criteria.yaml` (69 AC), `catalog.yaml`, `pyproject.toml`, `pipeline.config.yaml`.
+Ветка: `pipeline/i1-hub-login-catalog-20260818`. Дата: 2026-08-19 (обновлено после ревизии спецификации 1.1,
+коммит `5472fa3`: уточнены R-K3/R-C1/R-C2/R-A5/R-L9 и AC-09/AC-47/AC-59 — тесты приведены к новым формулировкам).
+Входы: `src/hub/`, `spec.md` (ревизия 1.1), `acceptance-criteria.yaml` (69 AC), `catalog.yaml`, `pyproject.toml`, `pipeline.config.yaml`.
 Все проверки — против локальных моков: LiteLLM через `respx.MockRouter` + `httpx.MockTransport`
 (без сети), SQLite `:memory:`/временный файл, in-memory KeyValueStore, `hub.clock.ManualClock`,
 временные YAML-каталоги. Обращений к внешним системам нет.
@@ -11,10 +12,10 @@
 | Показатель | Значение |
 |---|---|
 | Команда | `.venv/bin/python -m pytest -q -rs --tb=short` (`commands.test`) |
-| Собрано тестов | **287** (parametrize развёрнут; 187 функций `test_*` в 7 файлах) |
-| Прошло | **286** |
+| Собрано тестов | **300** (parametrize развёрнут; 190 функций `test_*` в 7 файлах) |
+| Прошло | **300** |
 | Упало | **0** |
-| xfail (strict, ожидаемо) | **1** — `tests/test_wellknown.py::test_wellknown_body_has_no_env_prefix_literal` (противоречие спецификации AC-58 ↔ AC-59, см. §5) |
+| xfail | **0** (xfail-тест `test_wellknown_body_has_no_env_prefix_literal` удалён после ревизии 1.1 — заменён тестами по новой формулировке AC-59, см. §5) |
 | skip | 0 (тест `test_installed_entrypoint_mcp_hub_help` пропускается только при отсутствии console-script `mcp-hub` в venv; сейчас выполняется) |
 | flaky_suspect | 0 (сьют прогнан 3 раза подряд — стабильно зелёный, время везде подменено `ManualClock`) |
 | Баги (`bugs/BUG-*.json`) | **0** — нарушений AC не выявлено |
@@ -66,16 +67,16 @@ TOTAL                         1631     90    94%
 | `tests/conftest.py` | — | фикстуры: `make_hub`/`hub` (create_app + `asgi-lifespan` + httpx `ASGITransport`), `litellm` (respx-роутер), `clock` (`ManualClock`), `catalog_path`, автоочистка `HUB_*` из окружения, захват логов `hub` |
 | `tests/support.py` | — | конструкторы каталогов (`native_server`, `facade_server`, `catalog_doc`, `write_catalog`), моки LiteLLM (`mock_start`, `mock_poll`, `mock_key_generate`, `teams_body`, `ready_body`), `make_jwt`, прямой доступ к БД по схеме §6 (`insert_user/insert_key/insert_connection`, `fetch_rows`, `audit_rows`, `dump_all_tables`) |
 | `tests/test_settings.py` | 17 | AC-01..AC-06 (R-K1..R-K4) |
-| `tests/test_catalog.py` | 53 | AC-07..AC-20, AC-22, AC-23 (R-C1..R-C4, R-C6) |
-| `tests/test_login.py` | 54 | AC-24..AC-47 (R-L1..R-L10) |
+| `tests/test_catalog.py` | 54 | AC-07..AC-20, AC-22, AC-23 (R-C1..R-C4, R-C6) |
+| `tests/test_login.py` | 55 | AC-24..AC-47 (R-L1..R-L10) |
 | `tests/test_api.py` | 29 | AC-48..AC-57, AC-61..AC-64 (R-L6, R-A1..R-A4, R-A6, R-A7, R-S4) |
-| `tests/test_wellknown.py` | 10 | AC-58..AC-60 (R-A5, R-A8) |
+| `tests/test_wellknown.py` | 11 | AC-58..AC-60 (R-A5, R-A8) |
 | `tests/test_storage.py` | 11 | AC-65..AC-68 (R-S1..R-S4) |
 | `tests/test_cli.py` | 13 | AC-21, AC-69 (R-C5, R-S5) |
 
 Каждый тест привязан маркером `@pytest.mark.ac("AC-NN")`; негативные и граничные сценарии из AC покрыты
 (неверные/отсутствующие секреты, истечение TTL, границы окна rate-limit 59/61 с, дросселирование 1.99/2.0 с,
-кэш аутентификации 59/61 с, alias 32/33 символа, `client` 128/129 символов, `X-Request-ID` 128/129 символов,
+кэш аутентификации 59/61 с, alias 1/32/33 символа, `client` 128/129 символов, `X-Request-ID` 128/129 символов,
 5xx/сеть/4xx/невалидные тела LiteLLM по всем трём маршрутам, невалидный/удалённый файл при reload и т.д.).
 
 ## 4. Таблица AC → тесты
@@ -90,7 +91,7 @@ TOTAL                         1631     90    94%
 | AC-06 | 3 | `test_settings.py::test_create_app_with_settings_object_without_env`<br>`test_settings.py::test_settings_object_missing_required_field_fails`<br>`test_settings.py::test_litellm_client_injectable_via_app_state` |
 | AC-07 | 2 | `test_catalog.py::test_repo_catalog_loads_at_start`<br>`test_catalog.py::test_repo_catalog_without_vars_hides_beta_servers` |
 | AC-08 | 8 | `test_catalog.py::test_missing_required_field_reports_path`<br>`test_catalog.py::test_missing_other_required_fields`<br>`test_catalog.py::test_empty_required_string_rejected`<br>`test_catalog.py::test_unknown_field_rejected_strict_schema`<br>`test_catalog.py::test_nested_auth_field_missing_reports_nested_path`<br>`test_catalog.py::test_top_level_schema_errors`<br>`test_catalog.py::test_more_top_level_schema_errors`<br>`test_catalog.py::test_unreadable_catalog_path_is_error` |
-| AC-09 | 3 | `test_catalog.py::test_invalid_alias_reports_path`<br>`test_catalog.py::test_duplicate_alias_reports_alias`<br>`test_catalog.py::test_valid_aliases_accepted` |
+| AC-09 | 4 | `test_catalog.py::test_invalid_alias_reports_path` (`Bad_Alias`, `-x`, `1abc`, `ABC`, `with space`, 33 символа, `-abc`, пустой, `a_b`, `a-B`)<br>`test_catalog.py::test_duplicate_alias_reports_alias`<br>`test_catalog.py::test_valid_aliases_accepted` (`a`, 32 символа, `ab`, `gitlab-platform2`, `a-`, `a0`, `z`+31×`-`)<br>`test_catalog.py::test_single_char_alias_visible_in_catalog_and_wellknown` |
 | AC-10 | 4 | `test_catalog.py::test_native_without_mcp_url_invalid`<br>`test_catalog.py::test_facade_without_required_field_invalid`<br>`test_catalog.py::test_facade_with_empty_credential_headers_invalid`<br>`test_catalog.py::test_facade_auth_field_type_errors` |
 | AC-11 | 5 | `test_catalog.py::test_invalid_enum_values_rejected`<br>`test_catalog.py::test_invalid_permission_group_preset_rejected`<br>`test_catalog.py::test_duplicate_group_ids_rejected`<br>`test_catalog.py::test_permission_kinds_consent_and_tool_filter_accepted`<br>`test_catalog.py::test_permission_model_without_kind_reports_kind_path` |
 | AC-12 | 5 | `test_catalog.py::test_var_substituted_from_environment`<br>`test_catalog.py::test_missing_var_for_ga_server_fails_with_name_and_path`<br>`test_catalog.py::test_missing_var_for_deprecated_server_fails`<br>`test_catalog.py::test_multiple_vars_in_one_string_and_nested`<br>`test_catalog.py::test_missing_var_in_defaults_fails` |
@@ -128,7 +129,7 @@ TOTAL                         1631     90    94%
 | AC-44 | 1 | `test_login.py::test_key_and_user_persisted_hashed_with_audit` |
 | AC-45 | 1 | `test_login.py::test_repeated_login_adds_key_and_keeps_old_valid` |
 | AC-46 | 3 | `test_login.py::test_poll_5xx_or_network_is_502_and_session_survives`<br>`test_login.py::test_poll_4xx_removes_session`<br>`test_login.py::test_poll_errors_two_sessions_side_by_side` |
-| AC-47 | 1 | `test_login.py::test_cli_responses_do_not_leak_litellm_secret_or_login_id` |
+| AC-47 | 2 | `test_login.py::test_cli_responses_do_not_leak_litellm_secret_or_login_id` (`ll-secret` нигде; `browser_url == <LITELLM>/sso/key/generate?source=litellm-cli&key=ll-1`; после удаления `browser_url` из ответа `/cli/start` `ll-1` нет ни в одном теле `/cli/*`)<br>`test_login.py::test_cli_error_and_expired_responses_do_not_leak_litellm_ids` (502/404 тоже без `ll-1`/`ll-secret`) |
 | AC-48 | 4 | `test_api.py::test_bearer_auth_valid_key_passes`<br>`test_api.py::test_bearer_auth_rejects_missing_or_bad`<br>`test_api.py::test_all_bearer_endpoints_require_auth`<br>`test_api.py::test_bearer_scheme_case_insensitive` |
 | AC-49 | 2 | `test_api.py::test_x_litellm_api_key_header_accepted`<br>`test_api.py::test_authorization_takes_precedence_over_x_litellm_api_key` |
 | AC-50 | 2 | `test_api.py::test_auth_result_cached_for_60s`<br>`test_api.py::test_negative_auth_result_not_cached` |
@@ -140,7 +141,7 @@ TOTAL                         1631     90    94%
 | AC-56 | 1 | `test_api.py::test_me_connections` |
 | AC-57 | 2 | `test_api.py::test_catalog_connection_block_reflects_rows`<br>`test_api.py::test_catalog_connection_block_is_per_user` |
 | AC-58 | 3 | `test_wellknown.py::test_wellknown_auth_provider_and_remote_config`<br>`test_wellknown.py::test_wellknown_reflects_custom_provider_settings`<br>`test_wellknown.py::test_wellknown_needs_no_auth_and_ignores_bad_bearer` |
-| AC-59 | 3 | `test_wellknown.py::test_wellknown_mcp_entries_for_visible_servers_without_secrets`<br>`test_wellknown.py::test_wellknown_body_has_no_env_prefix_literal`<br>`test_wellknown.py::test_wellknown_mcp_uses_public_url_and_deprecated_included` |
+| AC-59 | 4 | `test_wellknown.py::test_wellknown_mcp_entries_for_visible_servers_without_secrets` (каталог по AC-59 1.1: `client_secret env:GL_SECRET`, `credential_headers` `env:GL_TOKEN`, `static_headers` `env:GL_STATIC`; в теле нет `upstream`/`client_secret`/`credential_headers`/`static_headers`/`GL_SECRET`/`GL_TOKEN`/`GL_STATIC`/значений; в `config.mcp` нет `env:`)<br>`test_wellknown.py::test_wellknown_env_prefix_only_in_opencode_placeholders` (ровно 2 плейсхолдера `{env:MAGNIT_COPILOT_KEY}`; после их удаления `env:` в теле нет)<br>`test_wellknown.py::test_wellknown_env_prefix_check_follows_custom_env_name` (то же при `HUB_WELLKNOWN_ENV_NAME=CORP_KEY`)<br>`test_wellknown.py::test_wellknown_mcp_uses_public_url_and_deprecated_included` |
 | AC-60 | 4 | `test_wellknown.py::test_wellknown_etag_304_and_changes_after_reload`<br>`test_wellknown.py::test_wellknown_etag_stable_and_mismatch_returns_200`<br>`test_wellknown.py::test_wellknown_etag_differs_between_settings`<br>`test_wellknown.py::test_wellknown_if_none_match_star_and_weak` |
 | AC-61 | 1 | `test_api.py::test_remote_config_requires_bearer_and_is_empty_by_default` |
 | AC-62 | 1 | `test_api.py::test_remote_config_includes_connected_servers_only` |
@@ -152,40 +153,45 @@ TOTAL                         1631     90    94%
 | AC-68 | 2 | `test_storage.py::test_audit_log_has_no_secrets`<br>`test_storage.py::test_audit_details_are_json_objects` |
 | AC-69 | 6 | `test_cli.py::test_cli_help_lists_serve_and_catalog`<br>`test_cli.py::test_cli_catalog_help_lists_validate_and_path`<br>`test_cli.py::test_cli_serve_help_has_host_and_port`<br>`test_cli.py::test_cli_serve_passes_host_and_port_to_uvicorn`<br>`test_cli.py::test_cli_without_command_or_unknown_command_is_error`<br>`test_cli.py::test_installed_entrypoint_mcp_hub_help` |
 
-## 5. Противоречия и неоднозначности спецификации (не баги кода)
+## 5. Противоречия спецификации — разрешены ревизией 1.1
 
-1. **AC-59 ↔ AC-58 / R-A5 (подстрока `env:`).** AC-59 требует, чтобы тело `/.well-known/opencode`
-   «не содержало `env:`», но AC-58 и R-A5 требуют `provider.*.options.apiKey == "{env:MAGNIT_COPILOT_KEY}"` и
-   `remote_config.headers.Authorization == "Bearer {env:MAGNIT_COPILOT_KEY}"` — эти плейсхолдеры OpenCode содержат
-   подстроку `env:`. Одновременно выполнить оба критерия невозможно. Решение TEST-агента: поведение по более
-   конкретному правилу (R-A5/AC-58) считается верным; смысл AC-59 (не сериализовать ссылки `env:VAR` каталога) проверен
-   тестом `test_wellknown_mcp_entries_for_visible_servers_without_secrets` (в `config.mcp` нет `env:`, во всём теле
-   после удаления плейсхолдеров `{env:MAGNIT_COPILOT_KEY}` нет `env:`, нет `upstream`/`client_secret`/значений
-   секретов). Буквальная проверка «нет `env:` в теле» оформлена как
-   `test_wellknown_body_has_no_env_prefix_literal` с `@pytest.mark.xfail(strict=True)` и причиной.
-   Рекомендация SPEC: переформулировать AC-59 как «тело не содержит `env:<имя переменной каталога>` / значений
-   секретов; допустимы только плейсхолдеры `{env:<HUB_WELLKNOWN_ENV_NAME>}`».
-2. **R-C1 регэксп alias `^[a-z][a-z0-9-]{1,31}$` ↔ AC-54/AC-55 (alias `a`, `b`, `c`).** По букве R-C1 alias
-   минимум из 2 символов, тогда каталоги из AC-54/AC-55 невалидны и критерии невыполнимы. Тесты написаны по AC
-   (односимвольные alias принимаются, `test_include_deprecated_filter`, `test_audience_filter`); отклонение
-   зафиксировано здесь. Остальные ограничения регэкспа проверены по R-C1: `Bad_Alias`, `1abc`, `-abc`,
-   `with space`, `ABC`, 33 символа — ошибка `servers[0].alias`; 32 символа — допустимо. Рекомендация SPEC:
-   привести R-C1 к `{0,31}` (1–32 символа) либо заменить alias в AC-54/55.
-3. **R-L9 ↔ R-L1 (`login_id` LiteLLM).** R-L9: «ответы `/cli/*` никогда не содержат … `login_id` LiteLLM», но R-L1
-   требует `browser_url = <LITELLM>/sso/key/generate?...&key=<login_id LiteLLM>` в ответе `/cli/start`.
-   Тесты следуют AC-47 (`ll-secret` нигде; поле `login_id` ≠ `ll-1`; `ll-1` отсутствует во всех ответах, кроме
-   `browser_url` ответа `/cli/start`).
+Противоречия 1–3, зафиксированные в первой версии отчёта, устранены ревизией спецификации 1.1
+(`spec.md`, блок «Ревизия 1.1», коммит `5472fa3`); тесты приведены к новым формулировкам, временных
+обходов (`xfail`) в сьюте не осталось.
+
+1. **AC-59 ↔ AC-58 / R-A5 (подстрока `env:`) — разрешено.** Ревизия 1.1: плейсхолдеры OpenCode
+   `{env:<HUB_WELLKNOWN_ENV_NAME>}` в `provider.*.options.apiKey` и `remote_config.headers.Authorization` разрешены;
+   запрет касается ссылок каталога `env:VAR`, имён таких переменных и значений секретов (R-K3, R-C2, R-A5, AC-59).
+   Xfail-тест `test_wellknown_body_has_no_env_prefix_literal` удалён; вместо него —
+   `test_wellknown_env_prefix_only_in_opencode_placeholders` (после удаления всех `{env:MAGNIT_COPILOT_KEY}` подстроки
+   `env:` нет; нет `upstream`, `client_secret`, `credential_headers`, `static_headers`, `GL_SECRET`, `GL_TOKEN`,
+   `GL_STATIC`) и `test_wellknown_env_prefix_check_follows_custom_env_name` (то же при другом `HUB_WELLKNOWN_ENV_NAME`);
+   каталог основного теста дополнен `env:`-ссылками в `credential_headers` и `static_headers` по новому given AC-59.
+   Реализация удовлетворяет новой формулировке без изменений — все тесты зелёные.
+2. **R-C1 регэксп alias ↔ AC-54/AC-55 — разрешено.** Ревизия 1.1: `^[a-z][a-z0-9-]{0,31}$` (1–32 символа).
+   AC-09 покрыт по новому перечню: невалидные `Bad_Alias`, `-x`, `1abc`, `ABC`, `with space`, 33 символа
+   (плюс `-abc`, пустой, `a_b`, `a-B`) → ошибка с путём `servers[0].alias`; контрольные валидные `a` и 32 символа
+   (плюс `ab`, `gitlab-platform2`, `a-`, `a0`, `z`+31×`-`) → приложение создаётся; alias `a` дополнительно проходит
+   путь до `/api/catalog` и well-known (`test_single_char_alias_visible_in_catalog_and_wellknown`).
+3. **R-L9 ↔ R-L1 (`login_id` LiteLLM) — разрешено.** Ревизия 1.1: `login_id` LiteLLM допустим только как значение
+   `key=` внутри `browser_url` ответа `/cli/start`; `poll_secret` LiteLLM — нигде. AC-47 проверяется буквально:
+   `browser_url == '<LITELLM>/sso/key/generate?source=litellm-cli&key=ll-1'`, после удаления значения `browser_url`
+   из ответа `/cli/start` подстроки `ll-1` нет ни в одном теле `/cli/*` (pending, team_selection_required, 400/403/404
+   при выборе команды, ready, 404 после ready, 404/403 неверные id/секрет); дополнительно — ответы 502
+   `litellm_unavailable` и 404 `login_expired` (`test_cli_error_and_expired_responses_do_not_leak_litellm_ids`).
 4. **`catalog.yaml` репозитория изменился в ходе итерации** (все серверы теперь `status: beta`, коммит
    `5bc1139`): AC-07 («переменные `${…}` заданы») проверяется на копии файла с заданными переменными
    (`test_repo_catalog_loads_at_start`, 5 серверов видны); дополнительно проверено, что без переменных
    приложение стартует и beta-серверы скрыты (`test_repo_catalog_without_vars_hides_beta_servers`, AC-07/AC-13).
-   Сценарий «ga-сервер без `${VAR}` → ошибка старта» покрыт синтетическими каталогами (AC-12).
-5. Неоднозначность (без последствий для тестов): `{"client": null}` в `POST /cli/start` — спека допускает
-   `client?: string`; поведение для `null` не задано, в тестах не фиксируется.
+   Сценарий «ga-сервер без `${VAR}` → ошибка старта» покрыт синтетическими каталогами (AC-12). Не противоречие
+   спецификации — замечание о входных данных.
+5. Неоднозначность (без последствий для тестов, ревизией 1.1 не затронута): `{"client": null}` в `POST /cli/start` —
+   спека допускает `client?: string`; поведение для `null` не задано, в тестах не фиксируется.
 
 ## 6. Баги
 
-Не обнаружено. Каталог `bugs/` пуст. Все 69 AC имеют минимум один проходящий тест.
+Не обнаружено (в том числе после приведения тестов к ревизии 1.1). Каталог `bugs/` пуст. Все 69 AC имеют минимум
+один проходящий тест; xfail/skip — 0.
 
 ## 7. Флаки
 

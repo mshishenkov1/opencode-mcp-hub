@@ -155,7 +155,9 @@ def test_top_level_schema_errors(tmp_path: Path, document: Any, fragment: str) -
 
 
 @pytest.mark.ac("AC-09")
-@pytest.mark.parametrize("alias", ["Bad_Alias", "1abc", "-abc", "with space", "a" * 33, "ABC"])
+@pytest.mark.parametrize(
+    "alias", ["Bad_Alias", "-x", "1abc", "ABC", "with space", "a" * 33, "-abc", "", "a_b", "a-B"]
+)
 def test_invalid_alias_reports_path(tmp_path: Path, alias: str) -> None:
     _expect_catalog_error(tmp_path, catalog_doc([native_server(alias)]), "servers[0].alias")
 
@@ -168,11 +170,24 @@ def test_duplicate_alias_reports_alias(tmp_path: Path) -> None:
 
 
 @pytest.mark.ac("AC-09")
-def test_valid_aliases_accepted(tmp_path: Path) -> None:
-    doc = catalog_doc(
-        [native_server("ab"), native_server("gitlab-platform2"), native_server("a" * 32)]
-    )
+@pytest.mark.parametrize(
+    "alias", ["a", "a" * 32, "ab", "gitlab-platform2", "a-", "a0", "z" + "-" * 31]
+)
+def test_valid_aliases_accepted(tmp_path: Path, alias: str) -> None:
+    """Ревизия 1.1: alias 1–32 символа (^[a-z][a-z0-9-]{0,31}$) — контрольные 'a' и 32 символа."""
+    doc = catalog_doc([native_server(alias)])
     assert _create_app_with_catalog(tmp_path / "c.yaml", doc) is not None
+
+
+@pytest.mark.ac("AC-09")
+async def test_single_char_alias_visible_in_catalog_and_wellknown(make_hub: HubFactory) -> None:
+    """Контрольный валидный alias 'a' проходит весь путь: загрузка → /api/catalog → well-known."""
+    hub = await make_hub(catalog=catalog_doc([native_server("a"), native_server("a" * 32)]))
+    await seed_user_with_key(hub.app, "sk-ok")
+    listed = (await hub.get("/api/catalog", headers=bearer("sk-ok"))).json()
+    assert [s["alias"] for s in listed["servers"]] == ["a", "a" * 32]
+    mcp = (await hub.get("/.well-known/opencode")).json()["config"]["mcp"]
+    assert set(mcp) == {"a", "a" * 32}
 
 
 # --- AC-10 ---------------------------------------------------------------------
