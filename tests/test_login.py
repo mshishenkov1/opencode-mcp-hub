@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -16,8 +17,11 @@ from tests.support import (
     LITELLM_URL,
     audit_rows,
     bearer,
+    capture_json_logs,
     dump_all_tables,
     fetch_rows,
+    insert_user,
+    kv_session,
     make_jwt,
     mock_key_generate,
     mock_poll,
@@ -156,9 +160,31 @@ async def test_session_expires_after_min_ttl(hub: Hub) -> None:
         httpx.ReadTimeout("slow"),
         httpx.Response(200, json={"poll_secret": "ll-secret"}),
         httpx.Response(200, json={"login_id": "ll-1"}),
+        httpx.Response(200, json={"login_id": "", "poll_secret": "ll-secret"}),
+        httpx.Response(200, json={"login_id": "ll-1", "poll_secret": ""}),
+        httpx.Response(200, json={"login_id": 123, "poll_secret": "ll-secret"}),
+        httpx.Response(200, json={"login_id": "ll-1", "poll_secret": 123}),
+        httpx.Response(200, json=["ll-1", "ll-secret"]),
         httpx.Response(200, content=b"not json"),
+        httpx.Response(302, headers={"Location": "https://sso.test"}),
+        httpx.Response(404, json={"detail": "nope"}),
     ],
-    ids=["500", "503", "connect-error", "timeout", "no-login-id", "no-poll-secret", "not-json"],
+    ids=[
+        "500",
+        "503",
+        "connect-error",
+        "timeout",
+        "no-login-id",
+        "no-poll-secret",
+        "empty-login-id",
+        "empty-poll-secret",
+        "login-id-not-string",
+        "poll-secret-not-string",
+        "array-body",
+        "not-json",
+        "302",
+        "404",
+    ],
 )
 async def test_cli_start_litellm_unavailable(hub: Hub, outcome: Any) -> None:
     hub.litellm.post("/sso/cli/start").mock(side_effect=[outcome])
@@ -600,6 +626,9 @@ async def test_empty_team_list_is_invalid_response_but_session_survives(hub: Hub
         {"status": "weird"},
         {"status": "ready"},
         {"status": "ready", "requires_team_selection": True},
+        {"status": "ready", "key": 12345, "user_id": "u1"},
+        {"status": "ready", "key": "opaque-token", "user_id": 12345},
+        {"status": "ready", "key": "opaque-token", "user_id": ""},
         "not json at all",
         [1, 2, 3],
     ],
@@ -608,6 +637,9 @@ async def test_empty_team_list_is_invalid_response_but_session_survives(hub: Hub
         "unknown-status",
         "ready-no-key-no-teams",
         "requires-selection-no-lists",
+        "ready-key-not-string",
+        "ready-user-id-not-string",
+        "ready-user-id-empty",
         "not-json",
         "array",
     ],
@@ -714,8 +746,18 @@ async def test_key_alias_prefix_configurable_and_no_client(make_hub: HubFactory)
         ({"sub": "u8@corp.test"}, None, "u8@corp.test", "u8@corp.test"),
         ({"sub": "ignored"}, "u9", "u9", None),
         ({"sub": "u10", "email": "e@corp.test"}, "u10@corp.test", "u10@corp.test", "e@corp.test"),
+        ({"sub": "u11@corp.test", "email": 123}, None, "u11@corp.test", "u11@corp.test"),
+        ({"sub": "u12", "email": ""}, None, "u12", None),
     ],
-    ids=["sub+email", "user_id-claim", "sub-with-at", "upstream-user_id-wins", "email-claim-wins"],
+    ids=[
+        "sub+email",
+        "user_id-claim",
+        "sub-with-at",
+        "upstream-user_id-wins",
+        "email-claim-wins",
+        "email-claim-not-string",
+        "email-claim-empty",
+    ],
 )
 async def test_user_id_and_email_derivation(
     hub: Hub,
@@ -810,8 +852,11 @@ async def test_jwt_key_authenticates_api(hub: Hub) -> None:
         httpx.Response(502, json={}),
         httpx.ConnectError("boom"),
         httpx.Response(200, json={"nokey": 1}),
+        httpx.Response(200, json={"key": ""}),
+        httpx.Response(200, json={"key": 12345}),
+        httpx.Response(201, content=b"not json"),
     ],
-    ids=["500", "502", "network", "200-without-key"],
+    ids=["500", "502", "network", "200-without-key", "200-empty-key", "200-key-not-string", "201-not-json"],
 )
 async def test_key_generate_5xx_returns_502_and_retries_only_key_generate(
     hub: Hub, first_outcome: Any
@@ -1003,7 +1048,7 @@ async def test_poll_5xx_or_network_is_502_and_session_survives(hub: Hub, outcome
 
 
 @pytest.mark.ac("AC-46")
-@pytest.mark.parametrize("status", [404, 401, 403, 410])
+@pytest.mark.parametrize("status", [404, 401, 403, 410, 400, 499])
 async def test_poll_4xx_removes_session(hub: Hub, status: int) -> None:
     start = await _start(hub)
     poll_route = mock_poll(hub.litellm, {"detail": "expired"}, status=status)
@@ -1184,3 +1229,336 @@ async def test_session_ttl_not_extended_by_client_activity(hub: Hub) -> None:
     assert resp.status_code == 404
     assert resp.json()["error"] == "login_expired"
     assert poll_route.call_count == 5
+
+
+# --- усиление после review-1 / mutation: состояние сессии (spec §6), TTL, аудит, команды -----
+
+
+def _naive(dt: Any) -> Any:
+    return dt.replace(tzinfo=None)
+
+
+@pytest.mark.ac("AC-24")
+async def test_cli_start_session_record_matches_spec_layout(hub: Hub) -> None:
+    """Запись ``login:<login_id>`` в KeyValueStore (spec §6): исходное состояние pending, пустые
+    команды/ключ, TTL = expires_in; аудит ``login_started`` с меткой времени приложения."""
+    mock_start(hub.litellm, start_body(expires_in=120))
+    resp = await hub.post("/cli/start", json={"client": CLIENT})
+    assert resp.status_code == 200
+    body = resp.json()
+    session = await kv_session(hub.app, body["login_id"])
+    assert session is not None
+    expected_keys = {
+        "poll_secret",
+        "litellm_login_id",
+        "litellm_poll_secret",
+        "client",
+        "state",
+        "teams",
+        "team_id",
+        "jwt",
+        "user_id",
+        "email",
+        "last_call_at",
+        "last_response",
+        "created_at",
+        "expires_at",
+    }
+    assert expected_keys <= set(session), sorted(set(session) ^ expected_keys)
+    assert session["poll_secret"] == body["poll_secret"]
+    assert session["litellm_login_id"] == "ll-1"
+    assert session["litellm_poll_secret"] == "ll-secret"
+    assert session["client"] == CLIENT
+    assert session["state"] == "pending"
+    assert session["teams"] == []
+    assert session["team_id"] is None
+    assert session["jwt"] is None
+    assert session["user_id"] is None
+    assert session["email"] is None
+    assert session["last_call_at"] is None
+    assert session["last_response"] is None
+    assert session["created_at"] == hub.clock.time()
+    assert session["expires_at"] == hub.clock.time() + 120
+    assert body["expires_in"] == 120
+
+    audits = await audit_rows(hub.app, "login_started")
+    assert len(audits) == 1
+    assert audits[0]["ts"] == _naive(hub.clock.now()) or str(audits[0]["ts"]).startswith(
+        _naive(hub.clock.now()).isoformat(sep=" ")
+    )
+    assert audits[0]["details"]["client"] == CLIENT
+    assert audits[0]["user_id"] is None
+
+
+@pytest.mark.ac("AC-25")
+async def test_expires_in_one_second_session_usable_until_then(hub: Hub) -> None:
+    """Граница: expires_in=1 от LiteLLM → TTL сессии ровно 1 с (не игнорируется и не округляется)."""
+    mock_start(hub.litellm, start_body(expires_in=1))
+    start = (await hub.post("/cli/start", json={"client": CLIENT})).json()
+    assert start["expires_in"] == 1
+    poll_route = mock_poll(hub.litellm, {"status": "pending"})
+    hub.clock.advance(0.5)
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).status_code == 200
+    hub.clock.advance(0.5)  # ровно 1 с — истекла
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "login_expired"
+    assert poll_route.call_count == 1
+    assert await kv_session(hub.app, start["login_id"]) is None
+
+
+@pytest.mark.ac("AC-25")
+@pytest.mark.parametrize("value", [0, -5, "600", True, None, 1.5])
+async def test_expires_in_non_positive_or_non_numeric_uses_hub_ttl(hub: Hub, value: Any) -> None:
+    """Непригодное expires_in LiteLLM (0, отрицательное, строка, bool, null) → TTL Hub (600);
+    дробное положительное усекается до целого."""
+    body = start_body(expires_in=None)
+    body["expires_in"] = value
+    mock_start(hub.litellm, body)
+    resp = await hub.post("/cli/start", json={"client": CLIENT})
+    assert resp.status_code == 200, resp.text
+    expected = 1 if value == 1.5 else 600
+    assert resp.json()["expires_in"] == expected
+    session = await kv_session(hub.app, resp.json()["login_id"])
+    assert session is not None
+    assert session["expires_at"] - session["created_at"] == expected
+
+
+@pytest.mark.ac("AC-33")
+async def test_requires_team_selection_with_key_present_still_requires_choice(hub: Hub) -> None:
+    """Флаг requires_team_selection:true главнее наличия key: выбор команды обязателен,
+    сессия переходит в состояние team_selection с сохранённым списком (spec §6)."""
+    start = await _start(hub)
+    body = teams_body(("t1", "A"), ("t2", "B"))
+    body["key"] = _jwt(hub)
+    poll_route = mock_poll(hub.litellm, body)
+    key_route = mock_key_generate(hub.litellm, "sk-never")
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "team_selection_required",
+        "teams": [{"team_id": "t1", "team_alias": "A"}, {"team_id": "t2", "team_alias": "B"}],
+    }
+    assert not key_route.called
+    session = await kv_session(hub.app, start["login_id"])
+    assert session is not None
+    assert session["state"] == "team_selection"
+    assert session["teams"] == [{"team_id": "t1", "team_alias": "A"}, {"team_id": "t2", "team_alias": "B"}]
+    assert session["team_id"] is None
+    hub.clock.advance(5)
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).json()["status"] == (
+        "team_selection_required"
+    )
+    assert poll_route.call_count == 1
+
+
+@pytest.mark.ac("AC-33")
+@pytest.mark.parametrize(
+    "team_details",
+    ["oops", 42, None, [], {"team_id": "t1"}],
+    ids=["string", "int", "null", "empty-list", "object"],
+)
+async def test_missing_team_details_fall_back_to_teams_list(hub: Hub, team_details: Any) -> None:
+    """R-L3: при отсутствии пригодного списка `team_details` (нет ключа, пустой список, не список)
+    команды берутся из `teams`, где `team_alias = team_id`."""
+    start = await _start(hub)
+    body = teams_body(("t1", "A"), ("t2", "B"), with_details=False)
+    body["team_details"] = team_details
+    mock_poll(hub.litellm, body)
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "status": "team_selection_required",
+        "teams": [{"team_id": "t1", "team_alias": "t1"}, {"team_id": "t2", "team_alias": "t2"}],
+    }
+    session = await kv_session(hub.app, start["login_id"])
+    assert session is not None and session["state"] == "team_selection"
+
+
+@pytest.mark.ac("AC-38")
+@pytest.mark.parametrize(
+    "team_details",
+    [["t1", "t2"], [{"alias": "A"}, {"team_alias": "B"}], [{"team_id": ""}], [None]],
+    ids=["strings", "objects-without-team_id", "empty-team_id", "nulls"],
+)
+async def test_team_details_list_without_usable_entries_is_invalid_response(
+    hub: Hub, team_details: Any
+) -> None:
+    """`team_details` — непустой список, но ни одного элемента с `team_id`: пригодных команд ноль →
+    502 litellm_invalid_response (R-L2, как для пустого списка), сессия жива."""
+    start = await _start(hub)
+    body = teams_body(("t1", "A"), ("t2", "B"), with_details=False)
+    body["team_details"] = team_details
+    mock_poll(hub.litellm, body)
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["error"] == "litellm_invalid_response"
+    assert await kv_session(hub.app, start["login_id"]) is not None
+
+
+@pytest.mark.ac("AC-34")
+async def test_choose_team_resets_poll_cache_and_stores_choice(hub: Hub) -> None:
+    """После выбора команды: state=pending, team_id сохранён, кэш poll сброшен (spec §6, R-L3) —
+    следующий poll сразу идёт в LiteLLM с ?team_id=, без ожидания дросселя."""
+    jwt = _jwt(hub)
+    team_route = mock_poll(hub.litellm, {"status": "pending"}, team_id="t2")
+    start = await _session_in_team_selection(hub)
+    before = await kv_session(hub.app, start["login_id"])
+    assert before is not None and before["state"] == "team_selection"
+    assert before["last_response"] is not None  # ответ team_selection_required закэширован
+
+    chosen = await hub.choose_team(start["login_id"], start["poll_secret"], {"team_id": "t2"})
+    assert chosen.status_code == 200
+    after = await kv_session(hub.app, start["login_id"])
+    assert after is not None
+    assert after["state"] == "pending"
+    assert after["team_id"] == "t2"
+    assert after["teams"] == before["teams"]
+    assert after["last_call_at"] is None
+    assert after["last_response"] is None
+    assert after["expires_at"] == before["expires_at"]  # выбор команды не продлевает сессию
+
+    # без сдвига часов — poll идёт в LiteLLM с team_id=t2 (кэш сброшен)
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.json() == {"status": "pending"}
+    assert team_route.call_count == 1
+    assert dict(team_route.calls.last.request.url.params)["team_id"] == "t2"
+    # далее ready без team_id в теле → используется выбранная команда
+    hub.clock.advance(2)
+    team_route.mock(return_value=httpx.Response(200, json=ready_body(jwt, team_id=None, teams=["t1", "t2"])))
+    key_route = mock_key_generate(hub.litellm, "sk-test-1")
+    ready = await hub.poll(start["login_id"], start["poll_secret"])
+    assert ready.status_code == 200, ready.text
+    assert ready.json()["status"] == "ready"
+    assert ready.json()["team_id"] == "t2"
+    assert json.loads(key_route.calls.last.request.content)["team_id"] == "t2"
+    completed = await audit_rows(hub.app, "login_completed")
+    assert completed[0]["details"]["team_id"] == "t2"
+
+
+@pytest.mark.ac("AC-37")
+async def test_auto_selected_single_team_is_kept_for_following_polls(hub: Hub) -> None:
+    """Единственная команда выбрана автоматически; если LiteLLM с ?team_id= отвечает pending,
+    выбор сохраняется в сессии и следующие poll идут уже с team_id (без повторного списка)."""
+    start = await _start(hub)
+    team_route = mock_poll(hub.litellm, {"status": "pending"}, team_id="t1")
+    plain_route = mock_poll(hub.litellm, teams_body(("t1", "A")))
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.json() == {"status": "pending"}
+    assert plain_route.call_count == 1 and team_route.call_count == 1
+    session = await kv_session(hub.app, start["login_id"])
+    assert session is not None
+    assert session["team_id"] == "t1"
+    assert session["teams"] == [{"team_id": "t1", "team_alias": "A"}]
+    assert session["state"] == "pending"
+    hub.clock.advance(2)
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).json() == {"status": "pending"}
+    assert plain_route.call_count == 1  # список команд больше не запрашивается
+    assert team_route.call_count == 2
+
+
+@pytest.mark.ac("AC-40")
+async def test_key_generate_request_is_json_with_bearer_jwt(hub: Hub) -> None:
+    start = await _start(hub)
+    jwt = _jwt(hub)
+    mock_poll(hub.litellm, ready_body(jwt))
+    key_route = mock_key_generate(hub.litellm, "sk-test-3")
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).status_code == 200
+    request = key_route.calls.last.request
+    assert request.method == "POST"
+    assert request.headers["Content-Type"] == "application/json"
+    assert request.headers["Authorization"] == f"Bearer {jwt}"
+    assert json.loads(request.content)["metadata"]["source"] == "opencode-mcp-hub"
+
+
+@pytest.mark.ac("AC-41")
+async def test_jwt_fallback_stores_expires_at_from_exp_claim_in_utc(hub: Hub) -> None:
+    start = await _start(hub)
+    exp = int(hub.clock.time()) + 3600
+    jwt = make_jwt({"sub": "u1", "email": "u1@corp.test", "exp": exp})
+    mock_poll(hub.litellm, ready_body(jwt))
+    mock_key_generate(hub.litellm, None, status=403)
+    resp = await hub.poll(start["login_id"], start["poll_secret"])
+    assert resp.json()["expires_in"] == 3600
+    rows = await fetch_rows(hub.app, "SELECT expires_at, created_at FROM api_keys")
+    assert len(rows) == 1
+    expected = datetime.fromtimestamp(exp, tz=UTC).replace(tzinfo=None)
+    assert _as_datetime(rows[0]["expires_at"]) == expected
+    assert _as_datetime(rows[0]["created_at"]) == _naive(hub.clock.now())
+
+
+def _as_datetime(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+@pytest.mark.ac("AC-44")
+async def test_persisted_timestamps_come_from_application_clock(hub: Hub) -> None:
+    """created_at/updated_at пользователя и ключа и ts аудита — время приложения (часы Hub),
+    а не системное; details аудита login_completed — ровно {key_kind, key_alias, team_id, client}."""
+    start = await _start(hub, "c1")
+    hub.clock.advance(90)
+    jwt = _jwt(hub)
+    mock_poll(hub.litellm, ready_body(jwt, user_id="u1", team_id="t1"))
+    mock_key_generate(hub.litellm, "sk-test-3")
+    assert (await hub.poll(start["login_id"], start["poll_secret"])).json()["key"] == "sk-test-3"
+    now = _naive(hub.clock.now())
+
+    users = await fetch_rows(hub.app, "SELECT created_at, updated_at FROM users")
+    assert _as_datetime(users[0]["created_at"]) == now
+    assert _as_datetime(users[0]["updated_at"]) == now
+    keys = await fetch_rows(hub.app, "SELECT created_at, key_alias FROM api_keys")
+    assert _as_datetime(keys[0]["created_at"]) == now
+    assert keys[0]["key_alias"] == f"opencode-u1-{hub.clock.now():%Y%m%d-%H%M}"
+    completed = await audit_rows(hub.app, "login_completed")
+    assert len(completed) == 1
+    assert _as_datetime(completed[0]["ts"]) == now
+    assert completed[0]["details"] == {
+        "key_kind": "persistent",
+        "key_alias": keys[0]["key_alias"],
+        "team_id": "t1",
+        "client": "c1",
+    }
+    started = await audit_rows(hub.app, "login_started")
+    assert _as_datetime(started[0]["ts"]) == now - timedelta(seconds=90)
+
+
+@pytest.mark.ac("AC-45")
+async def test_repeated_login_keeps_existing_groups_and_updates_timestamp(hub: Hub) -> None:
+    """Повторный вход не сбрасывает назначенные группы пользователя; updated_at обновляется,
+    created_at сохраняется; пустые группы приводятся к ['all']."""
+    created = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
+    await insert_user(hub.app, "u1", "old@corp.test", groups=["devs", "ops"], now=created)
+    await insert_user(hub.app, "u2", "u2@corp.test", groups=[], now=created)
+    await _complete_login(hub, "sk-u1", ll_id="ll-1", user_id="u1", email="new@corp.test")
+    await _complete_login(hub, "sk-u2", ll_id="ll-2", user_id="u2", email="u2@corp.test")
+    rows = await fetch_rows(
+        hub.app, "SELECT user_id, email, groups, created_at, updated_at FROM users ORDER BY user_id"
+    )
+    by_id = {r["user_id"]: r for r in rows}
+    assert json.loads(by_id["u1"]["groups"]) == ["devs", "ops"]
+    assert by_id["u1"]["email"] == "new@corp.test"
+    assert _as_datetime(by_id["u1"]["created_at"]) == _naive(created)
+    assert _as_datetime(by_id["u1"]["updated_at"]) == _naive(hub.clock.now())
+    assert json.loads(by_id["u2"]["groups"]) == ["all"]
+    # группы действуют при аутентификации: u1 видит серверы audience devs
+    assert (await hub.get("/api/me", headers=bearer("sk-u1"))).json()["user_id"] == "u1"
+
+
+@pytest.mark.ac("AC-26")
+async def test_litellm_unavailable_on_start_is_logged_as_json_warning_with_reason(hub: Hub) -> None:
+    hub.litellm.post("/sso/cli/start").mock(side_effect=httpx.ConnectError("boom"))
+    with capture_json_logs() as logs:
+        resp = await hub.post("/cli/start", json={"client": CLIENT}, headers={"X-Request-ID": "req-w"})
+    assert resp.status_code == 502
+    warnings = [r for r in logs.records() if r["level"] == "WARNING"]
+    assert len(warnings) == 1, logs.raw()
+    warning = warnings[0]
+    assert warning["message"] == "litellm_cli_start_failed"
+    assert warning["request_id"] == "req-w"
+    assert "ConnectError" in warning["reason"]
+    # русский текст причины пишется как есть (UTF-8), а не \\u-последовательностями
+    raw = "\n".join(logs.raw())
+    assert re.search(r"[а-яА-Я]", raw), raw
+    assert "\\u04" not in raw
