@@ -375,13 +375,14 @@ class UpstreamClient:
 async def iter_upstream_body(response: httpx.Response) -> AsyncIterator[bytes]:
     """Куски тела upstream по мере поступления.
 
-    Настоящий поток читается через ``aiter_raw``; ответ, тело которого уже целиком получено
+    Поток читается через ``aiter_bytes`` (content-encoding upstream снимается, поэтому наружу
+    заголовок кодирования не пересылается); ответ, тело которого уже целиком получено
     (так работает ``httpx.MockTransport`` в тестах), отдаётся одним куском.
     """
     if getattr(response, "is_stream_consumed", False):
         yield response.content
         return
-    async for chunk in response.aiter_raw():
+    async for chunk in response.aiter_bytes():
         yield chunk
 
 
