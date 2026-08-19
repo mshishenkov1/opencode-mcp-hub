@@ -15,17 +15,34 @@ from hub.catalog import (
 PRESETS = ("readonly", "readwrite")
 
 
+def _matches(tool: str, masks: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(tool, mask) for mask in masks)
+
+
 @dataclass(frozen=True)
 class ToolFilter:
-    """Итоговые наборы масок для пользователя (R-P8)."""
+    """Итоговые наборы масок для пользователя (R-P8).
+
+    ``allow``/``deny`` — общий фильтр (``tool_filter`` каталога плюс маски включённых групп),
+    ``group_allow``/``group_deny`` — маски ``tools`` включённых и выключенных групп. Решение
+    принимается по **имени инструмента**, а не вычитанием масок-строк: инструмент, который
+    приносит только выключенная группа, недоступен, но инструмент, выданный включённой группой
+    или общим ``allow``, остаётся доступен даже при пересечении с маской выключенной группы
+    (например включённая ``issues: ['create_issue']`` против выключенной ``repo_write: ['create_*']``).
+    """
 
     allow: tuple[str, ...]
     deny: tuple[str, ...]
+    group_allow: tuple[str, ...] = ()
+    group_deny: tuple[str, ...] = ()
 
     def allows(self, tool: str) -> bool:
-        if any(fnmatch.fnmatchcase(tool, mask) for mask in self.deny):
+        if _matches(tool, self.deny):
             return False
-        return any(fnmatch.fnmatchcase(tool, mask) for mask in self.allow)
+        if not _matches(tool, self.allow):
+            return False
+        # Инструмент только выключенной группы недоступен; выданный включённой — доступен.
+        return not (_matches(tool, self.group_deny) and not _matches(tool, self.group_allow))
 
     def filter_tools(self, tools: list[Any]) -> list[Any]:
         result = []
@@ -102,20 +119,21 @@ def tool_filter(entry: ServerEntry, preset: str, groups: list[str]) -> ToolFilte
     """Итоговый фильтр инструментов пользователя (R-P8, AC-122).
 
     ``allow`` — общие маски сервера и маски включённых групп. Маски групп, которые пользователю
-    не включены, действуют как запрет: инструмент, который «приносит» только выключенная группа,
-    не показывается, даже если общий ``allow`` — ``*`` (AC-122).
+    не включены, действуют как запрет по имени инструмента: инструмент, который «приносит» только
+    выключенная группа, не показывается, даже если общий ``allow`` — ``*`` (AC-122); инструмент,
+    выданный включённой группой или общим ``allow`` по своей маске, остаётся доступен.
     """
     model = entry.model.permission_model
     allow: list[str] = []
     deny: list[str] = []
+    group_allow: list[str] = []
+    group_deny: list[str] = []
     if isinstance(model, PermissionHeaderGroups):
         extra = model.tool_filter
         if extra is not None:
             allow.extend(extra.allow)
             deny.extend(extra.deny)
         enabled = set(enabled_groups(entry, preset, groups))
-        group_allow: list[str] = []
-        group_deny: list[str] = []
         for group in model.groups:
             if not group.tools:
                 continue
@@ -124,14 +142,18 @@ def tool_filter(entry: ServerEntry, preset: str, groups: list[str]) -> ToolFilte
             else:
                 group_deny.extend(group.tools)
         allow.extend(group_allow)
-        deny.extend(mask for mask in group_deny if mask not in set(group_allow))
     elif isinstance(model, PermissionToolFilter):
         chosen = model.presets.get(preset)
         if chosen is not None:
             allow.extend(chosen.tools)
     if not allow:
         allow = ["*"]
-    return ToolFilter(allow=tuple(dict.fromkeys(allow)), deny=tuple(dict.fromkeys(deny)))
+    return ToolFilter(
+        allow=tuple(dict.fromkeys(allow)),
+        deny=tuple(dict.fromkeys(deny)),
+        group_allow=tuple(dict.fromkeys(group_allow)),
+        group_deny=tuple(dict.fromkeys(group_deny)),
+    )
 
 
 def preset_requires_reauth(current: str | None, requested: str) -> bool:
