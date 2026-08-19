@@ -476,7 +476,9 @@ async def consent(request: Request) -> Response:
     tx["groups"] = groups
     if preset == "readwrite" and granted_preset != "readwrite":
         # Нужны более широкие права целевой системы — повторный OAuth системы (R-B7).
-        tx["step"] = "scope_upgrade"
+        # После возврата флоу продолжается с шага «подключение есть» (_continue_authorize):
+        # при HUB_CONSENT=always экран прав показывается ещё раз (R-O6.3), при remember с тем
+        # же scope код выдаётся сразу.
         return await _start_provider_oauth(request, entry, tx_id, tx)
 
     await state.broker.upsert_connection(
@@ -609,9 +611,6 @@ async def provider_callback(alias: str, request: Request) -> Response:
     if tx.get("mode") == MODE_CONNECT:
         await state.kv.delete(TX_PREFIX + tx_id)
         return RedirectResponse(f"/ui/servers/{alias}", status_code=302)
-    if tx.get("step") == "scope_upgrade":
-        await _remember_consent(request, tx, tx["preset"], list(tx.get("groups") or []))
-        return await _issue_code_and_redirect(request, entry, tx_id, tx)
     return await _continue_authorize(request, entry, tx_id, tx)
 
 
