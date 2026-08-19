@@ -198,3 +198,106 @@ def test_installed_entrypoint_mcp_hub_help() -> None:
     )
     assert result.returncode == 0
     assert "validate" in result.stdout and "--path" in result.stdout
+
+
+# --- Усиление после mutation-прогона -----------------------------------------
+
+
+@pytest.mark.ac("AC-21")
+def test_catalog_validate_prints_exact_summary_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Вывод успешной проверки — ровно `OK: version=<N>, servers=<M>` без хвостов (R-C5)."""
+    path = write_catalog(
+        tmp_path / "ok.yaml",
+        catalog_doc([facade_server("gitlab"), native_server("tag")], version=7),
+    )
+    code, out = _run(["catalog", "validate", "--path", str(path)], capsys)
+    assert code == 0
+    assert out.strip() == "OK: version=7, servers=2"
+
+
+@pytest.mark.ac("AC-21")
+def test_catalog_validate_lists_all_unconfigured_aliases(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Несколько unconfigured-серверов перечисляются через запятую с пробелом."""
+    monkeypatch.delenv("BETA_A", raising=False)
+    monkeypatch.delenv("BETA_B", raising=False)
+    path = write_catalog(
+        tmp_path / "beta.yaml",
+        catalog_doc(
+            [
+                native_server("tag", status="beta", mcp_url="${BETA_A}"),
+                native_server("wiki", status="beta", mcp_url="${BETA_B}"),
+                facade_server("gitlab"),
+            ]
+        ),
+    )
+    code, out = _run(["catalog", "validate", "--path", str(path)], capsys)
+    assert code == 0
+    assert out.strip() == "OK: version=1, servers=3 (unconfigured: tag, wiki)"
+
+
+@pytest.mark.ac("AC-21")
+def test_catalog_validate_writes_error_to_stderr_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Диагностика ошибки идёт в stderr, stdout остаётся пустым (пригодно для пайпов)."""
+    broken = native_server("tag")
+    del broken["title"]
+    path = write_catalog(tmp_path / "bad.yaml", catalog_doc([broken]))
+    assert main(["catalog", "validate", "--path", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("Ошибка: ")
+    assert "servers[0].title" in captured.err
+
+
+@pytest.mark.ac("AC-21")
+def test_catalog_validate_env_default_points_to_given_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без --path берётся именно HUB_CATALOG_PATH, а не ./catalog.yaml рабочего каталога."""
+    monkeypatch.chdir(tmp_path)
+    write_catalog(tmp_path / "catalog.yaml", catalog_doc([native_server("tag")], version=1))
+    env_path = write_catalog(
+        tmp_path / "from-env.yaml",
+        catalog_doc([facade_server("gitlab"), native_server("tag")], version=9),
+    )
+    monkeypatch.setenv("HUB_CATALOG_PATH", str(env_path))
+    code, out = _run(["catalog", "validate"], capsys)
+    assert code == 0
+    assert out.strip() == "OK: version=9, servers=2"
+
+
+@pytest.mark.ac("AC-69")
+def test_cli_serve_defaults_and_flags_passed_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`serve` запускает фабрику приложения с документированными значениями по умолчанию."""
+    import uvicorn
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(app: Any, **kwargs: Any) -> None:
+        calls.append({"app": app, **kwargs})
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.delenv("HUB_LOG_LEVEL", raising=False)
+    assert main(["serve"]) == 0
+    assert calls[0] == {
+        "app": "hub.app:create_app",
+        "factory": True,
+        "host": "0.0.0.0",  # значение по умолчанию из CLI
+        "port": 8000,
+        "reload": False,
+        "workers": None,
+        "log_level": "info",
+    }
+
+    calls.clear()
+    monkeypatch.setenv("HUB_LOG_LEVEL", "DEBUG")
+    assert main(["serve", "--reload", "--workers", "3", "--port", "9001"]) == 0
+    assert calls[0]["reload"] is True
+    assert calls[0]["workers"] == 3
+    assert calls[0]["port"] == 9001
+    assert calls[0]["log_level"] == "debug"  # uvicorn ожидает нижний регистр

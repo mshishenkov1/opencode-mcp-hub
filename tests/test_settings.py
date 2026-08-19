@@ -10,6 +10,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 
 from hub.app import create_app
+from hub.errors import ConfigError
 from hub.settings import Settings
 from tests.conftest import Hub, HubFactory
 from tests.support import (
@@ -315,3 +316,62 @@ async def test_litellm_client_injectable_via_app_state(catalog_path: Path) -> No
         resp = await client.post("/cli/start", json={"client": "c"})
     assert resp.status_code == 200
     assert start_route.call_count == 1
+
+
+# --- Усиление после mutation-прогона -----------------------------------------
+
+FERNET_ERROR = (
+    "HUB_ENCRYPTION_KEY: ожидается ключ Fernet — 44 символа urlsafe-base64, "
+    "декодирующиеся в 32 байта"
+)
+
+
+@pytest.mark.ac("AC-01")
+def test_missing_required_var_message_is_exact(
+    monkeypatch: pytest.MonkeyPatch, catalog_path: Path
+) -> None:
+    """Сообщение об отсутствующей переменной называет её и причину дословно (R-K1)."""
+    _set_required_env(monkeypatch, catalog_path)
+    monkeypatch.delenv("HUB_PUBLIC_URL")
+    with pytest.raises(ConfigError) as excinfo:
+        create_app()
+    assert str(excinfo.value) == (
+        "Ошибка конфигурации Hub: HUB_PUBLIC_URL: обязательная переменная не задана"
+    )
+
+
+@pytest.mark.ac("AC-01")
+def test_two_missing_required_vars_are_listed_through_semicolon(
+    monkeypatch: pytest.MonkeyPatch, catalog_path: Path
+) -> None:
+    """Несколько ошибок конфигурации перечисляются через `; ` в одном сообщении."""
+    _set_required_env(monkeypatch, catalog_path)
+    monkeypatch.delenv("HUB_PUBLIC_URL")
+    monkeypatch.delenv("HUB_SECRET_KEY")
+    with pytest.raises(ConfigError) as excinfo:
+        create_app()
+    assert str(excinfo.value) == (
+        "Ошибка конфигурации Hub: "
+        "HUB_PUBLIC_URL: обязательная переменная не задана; "
+        "HUB_SECRET_KEY: обязательная переменная не задана"
+    )
+
+
+@pytest.mark.ac("AC-02")
+@pytest.mark.parametrize(
+    "bad_key",
+    ["not-a-key", "", "x" * 44, "QUJD" * 11, "!" * 44],
+    ids=["short", "empty", "not-base64", "wrong-length-decoded", "non-ascii-alphabet"],
+)
+def test_fernet_key_error_message_is_exact(
+    monkeypatch: pytest.MonkeyPatch, catalog_path: Path, bad_key: str
+) -> None:
+    """Ошибка ключа шифрования формулируется одинаково для всех причин (R-K2).
+
+    Сообщение пользовательского валидатора уже содержит имя переменной, поэтому имя
+    не дублируется префиксом.
+    """
+    _set_required_env(monkeypatch, catalog_path, HUB_ENCRYPTION_KEY=bad_key)
+    with pytest.raises(ConfigError) as excinfo:
+        create_app()
+    assert str(excinfo.value) == f"Ошибка конфигурации Hub: {FERNET_ERROR}"
