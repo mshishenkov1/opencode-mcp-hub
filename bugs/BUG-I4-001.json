@@ -1,0 +1,20 @@
+{
+  "id": "BUG-I4-001",
+  "related_ac": "AC-120",
+  "severity": "medium",
+  "title": "CI-шаг «Smoke — opencode corp status без ключа» ищет «Ключ: нет», а команда печатает «Корпоративный ключ: нет» — шаг падает всегда, когда задан vars.CORP_HUB_URL",
+  "repro_steps": [
+    "Задать в репозитории переменную окружения GitHub Actions vars.CORP_HUB_URL (иначе шаг пропускается по условию if)",
+    "Запустить workflow .github/workflows/corp-ci.yml (PR в main), job build-cli, matrix.target=linux-x64",
+    "Дождаться шага «Smoke — opencode corp status без ключа»: он выполняет `\"$BIN\" corp status | tee status.txt`, затем `grep -q \"Ключ: нет\" status.txt`",
+    "Локальный эквивалент: printf 'Корпоративный ключ: нет\\n' > status.txt && grep -q 'Ключ: нет' status.txt; echo $?"
+  ],
+  "expected": "AC-120 (S-Q8, S-B7): собранный бинарник при пустом auth-store печатает «ключ: нет» и завершается с кодом 1, дымовая проверка CI это подтверждает и шаг проходит; ошибка любого шага валит PR только при реальном расхождении.",
+  "actual": "Команда печатает строку «Корпоративный ключ: нет» (packages/opencode/src/cli/cmd/corp.ts:91). Шаблон grep в workflow написан с заглавной «К» — «Ключ: нет» — и не совпадает ни с одной строкой вывода (grep регистрозависим). Шаг завершается кодом 1 до проверки `test \"$CODE\" = \"1\"`, job build-cli падает, PR не может быть смержен. Дымовая проверка corp/smoke.ts на этом же выводе проходит, потому что ищет подстроку в нижнем регистре («ключ: нет»), — расхождение только в workflow.",
+  "failing_test": "packages/opencode/src/corp/cli.test.ts::opencode corp status (AC-33, AC-34, AC-35, AC-120) > AC-120: вывод `corp status` без ключа удовлетворяет дымовой проверке corp-ci",
+  "stacktrace": "src/corp/cli.test.ts:244\n    for (const pattern of patterns) expect(result.out, pattern).toContain(pattern)\nerror: Ключ: нет\n\nExpected to contain: \"Ключ: нет\"\nReceived: \"Hub: http://127.0.0.1:55993\\nДоступность Hub: доступен (ok)\\nКорпоративный ключ: нет\\nКаталог: кэша нет\\nError: Ключ не найден: выполните opencode corp login\\n\"\n      at <anonymous> (packages/opencode/src/corp/cli.test.ts:244:65)",
+  "suspected_area": ".github/workflows/corp-ci.yml:100 (шаблон grep) либо packages/opencode/src/cli/cmd/corp.ts:91 (строка вывода) — гипотеза: расходятся два места, где зафиксирован один и тот же текст; согласовать надо одно из них (проще — шаблон в workflow, например `grep -qi \"ключ: нет\"`).",
+  "impact": "Пользовательского поведения не затрагивает: сама команда соответствует AC-120 и S-A11 (печатает «ключ: нет», код выхода 1, ключ не печатается). Ломается только дымовая проверка CI, и ломается тихо — пока vars.CORP_HUB_URL не задан, шаг пропускается, а после настройки переменной начнут падать все PR. Отсюда severity=medium.",
+  "iteration": 4,
+  "status": "open"
+}
