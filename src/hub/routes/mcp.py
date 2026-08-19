@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -472,10 +473,22 @@ async def _stream_to_client(
         )
     sse_filter = SseFilter(ctx.tools)
     user_id = ctx.user_id
+    alias = ctx.alias
+
+    idle_timeout = state.settings.upstream_sse_idle_timeout
 
     async def iterator() -> Any:
+        chunks = iter_upstream_body(response).__aiter__()
         try:
-            async for chunk in iter_upstream_body(response):
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(chunks.__anext__(), timeout=idle_timeout)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    # R-P3: бездействие внутри установленного потока — поток закрывается.
+                    logger.info("upstream_timeout", extra={"alias": alias, "phase": "sse_idle"})
+                    break
                 out = sse_filter.feed(chunk)
                 if out:
                     yield out

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -184,7 +185,12 @@ class CircuitBreaker:
         return None
 
     async def record_success(self, alias: str) -> None:
-        await self.kv.delete(self._key(alias))
+        """Успешный ответ обнуляет счётчик ошибок и закрывает выключатель (R-P10)."""
+        await self.kv.set(
+            self._key(alias),
+            {"failures": 0, "open_until": 0.0},
+            ttl=self.settings.cb_reset * 2,
+        )
 
     async def record_failure(self, alias: str) -> None:
         record = await self.state(alias)
@@ -333,9 +339,12 @@ class UpstreamClient:
         self.settings = settings
 
     def timeout(self) -> httpx.Timeout:
+        """Соединение и первый байт — ``HUB_UPSTREAM_TIMEOUT``; чтение тела уже установленного
+        потока — ``HUB_UPSTREAM_SSE_IDLE_TIMEOUT`` (R-P3)."""
+        read = max(self.settings.upstream_timeout, self.settings.upstream_sse_idle_timeout)
         return httpx.Timeout(
             connect=self.settings.upstream_timeout,
-            read=self.settings.upstream_timeout,
+            read=read,
             write=self.settings.upstream_timeout,
             pool=self.settings.upstream_timeout,
         )
@@ -347,7 +356,12 @@ class UpstreamClient:
         request = client.build_request(
             method, url, headers=headers, content=content, timeout=self.timeout()
         )
-        return await client.send(request, stream=True)
+        try:
+            return await asyncio.wait_for(
+                client.send(request, stream=True), timeout=self.settings.upstream_timeout
+            )
+        except TimeoutError as exc:
+            raise httpx.ReadTimeout("upstream не ответил за отведённое время", request=request) from exc
 
     async def request(
         self, method: str, url: str, *, headers: dict[str, str], content: bytes | None
