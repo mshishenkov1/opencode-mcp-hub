@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Мои подключения{% endblock %}
+{% block heading %}Мои подключения{% endblock %}
+{% block content %}
+<p class="muted">Пользователь: {{ user_id }}</p>
+{% for item in items %}
+<div class="card" id="conn-{{ item.alias }}">
+  <h2><a href="/ui/servers/{{ item.alias }}">{{ item.title }}</a></h2>
+  <p class="muted">{{ item.description }}</p>
+  <p>Статус: <span class="status">{{ item.status_title }}</span></p>
+  {% if item.preset_title %}<p>Уровень доступа: {{ item.preset_title }}</p>{% endif %}
+  {% if item.group_titles %}<p>Группы: {{ item.group_titles|join(', ') }}</p>{% endif %}
+  <div class="actions">
+    {% if item.status == 'connected' or item.status == 'needs_reauth' %}
+    <button hx-delete="/api/me/connections/{{ item.alias }}" hx-target="#conn-{{ item.alias }}"
+            hx-swap="outerHTML">Отключить</button>
+    {% endif %}
+    {% if item.status != 'connected' %}
+    <a class="btn" href="/ui/servers/{{ item.alias }}">Переподключить</a>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<p>Доступных серверов нет.</p>
+{% endfor %}
+<form method="post" action="/auth/logout" class="actions">
+  <button type="submit" hx-post="/auth/logout">Выйти</button>
+</form>
+{% endblock %}

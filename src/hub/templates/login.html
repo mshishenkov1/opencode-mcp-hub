@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Вход в Hub{% endblock %}
+{% block heading %}Вход в Hub{% endblock %}
+{% block content %}
+<div class="card">
+  <p>Для продолжения войдите с корпоративной учётной записью.</p>
+  {% if browser_url %}
+  <p>
+    Откройте страницу входа и подтвердите вход:
+    <a class="btn" href="{{ browser_url }}" target="_blank" rel="noopener">Войти через корпоративный SSO</a>
+  </p>
+  {% if user_code %}
+  <p>Код подтверждения: <code>{{ user_code }}</code></p>
+  {% endif %}
+  <div id="login-status"
+       hx-get="{{ poll_url }}"
+       hx-trigger="load delay:2s, every 2s"
+       hx-swap="outerHTML">
+    <p class="muted">Ожидаем подтверждения входа…</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

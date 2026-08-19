@@ -1,0 +1,17 @@
+{# Фрагмент HTMX: состояние ожидания входа (R-W2). #}
+<div id="login-status"
+     {% if poll %}hx-get="{{ poll_url }}" hx-trigger="load delay:2s" hx-swap="outerHTML"{% endif %}>
+  {% if teams %}
+  <p>Выберите команду для ключа LiteLLM:</p>
+  <div class="actions">
+    {% for team in teams %}
+    <button type="button" hx-post="{{ team_url }}" hx-vals='{"team_id": "{{ team.team_id }}"}'
+            hx-target="#login-status" hx-swap="outerHTML">{{ team.team_alias }}</button>
+    {% endfor %}
+  </div>
+  {% elif error %}
+  <p class="status">{{ error }}</p>
+  {% else %}
+  <p class="muted">Ожидаем подтверждения входа…</p>
+  {% endif %}
+</div>

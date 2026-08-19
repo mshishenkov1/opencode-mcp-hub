@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Hub — корпоративные MCP-серверы{% endblock %}</title>
+  {% block head %}{% endblock %}
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;
+           padding: 2rem 1rem; line-height: 1.5; }
+    main { max-width: 46rem; margin: 0 auto; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.15rem; }
+    .card { border: 1px solid rgba(128,128,128,.35); border-radius: .6rem; padding: 1rem;
+            margin-bottom: 1rem; }
+    .muted { opacity: .75; font-size: .9rem; }
+    .status { font-weight: 600; }
+    .actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .75rem; }
+    button, .btn { padding: .45rem .9rem; border-radius: .4rem; border: 1px solid rgba(128,128,128,.5);
+                   background: transparent; cursor: pointer; font: inherit; text-decoration: none; }
+    button.primary { border-color: #2f6f3e; }
+    label { display: block; margin: .25rem 0; }
+    code { background: rgba(128,128,128,.15); padding: .1rem .3rem; border-radius: .25rem; }
+  </style>
+  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+  <script>
+    // Double-submit CSRF: значение берётся из cookie, в HTML страницы токен не попадает (R-W6).
+    document.addEventListener('htmx:configRequest', function (event) {
+      var match = document.cookie.match(/(?:^|;\s*)hub_csrf=([^;]+)/);
+      if (match) { event.detail.headers['X-CSRF-Token'] = decodeURIComponent(match[1]); }
+    });
+  </script>
+</head>
+<body>
+<main>
+  <h1>{% block heading %}Hub{% endblock %}</h1>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Ошибка{% endblock %}
+{% block head %}<meta name="hub-error" content="{{ error }}">{% endblock %}
+{% block heading %}Не удалось продолжить{% endblock %}
+{% block content %}
+<div class="card">
+  <p class="status">{{ message }}</p>
+  {% if hint %}<p class="muted">{{ hint }}</p>{% endif %}
+  {% if retry_url %}<p><a class="btn" href="{{ retry_url }}">Повторить</a></p>{% endif %}
+  <p class="muted">Код ошибки: <code>{{ error }}</code></p>
+</div>
+{% endblock %}

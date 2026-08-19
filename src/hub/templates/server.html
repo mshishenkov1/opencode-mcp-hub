@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ server.title }}{% endblock %}
+{% block heading %}{{ server.title }}{% endblock %}
+{% block content %}
+<div class="card">
+  <p>{{ server.description }}</p>
+  <p class="muted">Владелец: {{ server.owner }}{% if server.contact %} · <a href="{{ server.contact }}">контакт</a>{% endif %}</p>
+  {% if server.docs_url %}<p><a href="{{ server.docs_url }}">Документация</a></p>{% endif %}
+  <p>Режим: {{ server.mode }}; статус сервера: {{ server.status }}</p>
+  <p>Адрес для MCP-клиента: <code>{{ server.mcp_url }}</code></p>
+  <p>Статус подключения: <span class="status">{{ status_title }}</span></p>
+  {% if needs_reauth_reason %}<p class="muted">{{ needs_reauth_reason }}</p>{% endif %}
+</div>
+<div class="card">
+  <h2>Права доступа</h2>
+  <form id="permissions" hx-put="/api/me/connections/{{ server.alias }}/permissions"
+        hx-ext="json-enc" hx-target="#permissions-result" hx-swap="innerHTML">
+    <label>
+      <input type="radio" name="preset" value="readonly" {% if preset != 'readwrite' %}checked{% endif %}>
+      Только чтение
+    </label>
+    <label>
+      <input type="radio" name="preset" value="readwrite" {% if preset == 'readwrite' %}checked{% endif %}>
+      Чтение и запись
+    </label>
+    {% for group in always_groups %}
+    <label><input type="checkbox" checked disabled> {{ group.title }} (включена всегда)</label>
+    {% endfor %}
+    {% for group in groups %}
+    <label>
+      <input type="checkbox" name="groups" value="{{ group.id }}" {% if group.id in selected %}checked{% endif %}>
+      {{ group.title }}
+    </label>
+    {% endfor %}
+    <div class="actions">
+      <button class="primary" type="submit">Сохранить права</button>
+      <a class="btn" href="/oauth/connect/{{ server.alias }}">Переподключить</a>
+    </div>
+  </form>
+  <div id="permissions-result" class="muted"></div>
+</div>
+<p><a href="/ui/connections">← Мои подключения</a></p>
+{% endblock %}

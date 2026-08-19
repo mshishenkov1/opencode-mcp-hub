@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from hub import __version__
 from hub.catalog import Catalog, load_catalog
 from hub.clock import Clock, SystemClock
+from hub.crypto import TokenCipher
 from hub.db import Database, build_engine
 from hub.errors import HubError
 from hub.kv import KeyValueStore, create_kv_store
@@ -23,8 +24,11 @@ from hub.logging_ import configure_logging
 from hub.login import LoginService
 from hub.metrics import Metrics
 from hub.middleware import RequestContextMiddleware
-from hub.routes import admin_router, api_router, cli_router, system_router
+from hub.oidc import OIDCClient
+from hub.routes import admin_router, api_router, cli_router, system_router, web_router
 from hub.settings import Settings
+from hub.templating import Templates
+from hub.websession import WebSessionService
 
 logger = logging.getLogger("hub.app")
 
@@ -106,6 +110,10 @@ def create_app(
     settings: Settings | None = None,
     *,
     litellm_client: httpx.AsyncClient | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    upstream_client: httpx.AsyncClient | None = None,
+    oauth_client: httpx.AsyncClient | None = None,
+    oidc_client: httpx.AsyncClient | None = None,
     kv: KeyValueStore | None = None,
     clock: Clock | None = None,
     catalog_env: Mapping[str, str] | None = None,
@@ -115,6 +123,9 @@ def create_app(
     * ``settings=None`` — настройки читаются из окружения (``HUB_*``);
     * ``litellm_client`` — ``httpx.AsyncClient`` для LiteLLM (по умолчанию создаётся свой; тесты подменяют
       его здесь либо через ``app.state.litellm_client``);
+    * ``http_client`` — общий клиент для остальных внешних вызовов (upstream MCP, AS целевых систем,
+      OIDC); ``upstream_client`` / ``oauth_client`` / ``oidc_client`` подменяют его точечно. Все они
+      доступны как ``app.state.upstream_client`` / ``oauth_client`` / ``oidc_client``;
     * ``kv`` — KeyValueStore (по умолчанию по ``HUB_REDIS_URL``: Redis или in-memory);
     * ``clock`` — источник времени (по умолчанию системные часы);
     * ``catalog_env`` — окружение для ``${VAR}``/``env:VAR`` каталога (по умолчанию ``os.environ``).
@@ -133,7 +144,10 @@ def create_app(
     metrics = Metrics()
 
     owns_http_client = litellm_client is None
-    http_client = litellm_client or httpx.AsyncClient(timeout=settings.litellm_timeout)
+    litellm_http = litellm_client or httpx.AsyncClient(timeout=settings.litellm_timeout)
+
+    owns_outbound_client = http_client is None
+    outbound = http_client or httpx.AsyncClient(timeout=settings.upstream_timeout)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -149,6 +163,8 @@ def create_app(
             await app.state.db.dispose()
             if app.state.owns_http_client:
                 await app.state.litellm_client.aclose()
+            if app.state.owns_outbound_client:
+                await app.state.outbound_client.aclose()
 
     app = FastAPI(
         title="OpenCode MCP Hub",
@@ -187,10 +203,34 @@ def create_app(
     app.state.db = db
     app.state.kv = kv_store
     app.state.metrics = metrics
-    app.state.litellm_client = http_client
+    app.state.litellm_client = litellm_http
     app.state.owns_http_client = owns_http_client
     app.state.litellm = litellm
     app.state.login = login
+
+    # --- I-3: внешние HTTP-клиенты (подменяются тестами) ---
+    app.state.outbound_client = outbound
+    app.state.owns_outbound_client = owns_outbound_client
+    app.state.upstream_client = upstream_client or outbound
+    app.state.oauth_client = oauth_client or outbound
+    app.state.oidc_client = oidc_client or outbound
+
+    # --- I-3: сервисы ---
+    app.state.templates = Templates()
+    app.state.cipher = TokenCipher(settings.encryption_key.get_secret_value())
+    app.state.web_sessions = WebSessionService(
+        db=db,
+        clock=app_clock,
+        ttl=settings.web_session_ttl,
+        secret_key=settings.secret_key.get_secret_value(),
+        secure=settings.public_url.lower().startswith("https"),
+    )
+    app.state.oidc = OIDCClient(
+        settings=settings,
+        http=lambda: app.state.oidc_client,
+        kv=kv_store,
+        clock=app_clock,
+    )
 
     app.add_exception_handler(HubError, _hub_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
@@ -201,6 +241,7 @@ def create_app(
     app.include_router(cli_router)
     app.include_router(api_router)
     app.include_router(admin_router)
+    app.include_router(web_router)
 
     app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app

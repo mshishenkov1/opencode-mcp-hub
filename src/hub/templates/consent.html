@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Разрешение доступа{% endblock %}
+{% block heading %}Разрешить доступ к «{{ server.title }}»?{% endblock %}
+{% block content %}
+<div class="card">
+  <p class="muted">{{ server.description }}</p>
+  <p>Приложение <strong>{{ client_name }}</strong> запрашивает доступ: <code>{{ scope }}</code></p>
+  <form method="post" action="/oauth/consent">
+    <input type="hidden" name="tx" value="{{ tx }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <h2>Уровень доступа</h2>
+    <label>
+      <input type="radio" name="preset" value="readonly" {% if preset != 'readwrite' %}checked{% endif %}>
+      Только чтение
+    </label>
+    <label>
+      <input type="radio" name="preset" value="readwrite" {% if preset == 'readwrite' %}checked{% endif %}>
+      Чтение и запись
+    </label>
+    {% if always_groups or groups %}
+    <h2>Группы прав</h2>
+    {% for group in always_groups %}
+    <label><input type="checkbox" checked disabled> {{ group.title }} (включена всегда)</label>
+    {% endfor %}
+    {% for group in groups %}
+    <label>
+      <input type="checkbox" name="groups" value="{{ group.id }}" {% if group.id in selected %}checked{% endif %}>
+      {{ group.title }}
+    </label>
+    {% endfor %}
+    {% endif %}
+    <div class="actions">
+      <button class="primary" type="submit" name="action" value="allow">Разрешить</button>
+      <button type="submit" name="action" value="deny">Отмена</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
