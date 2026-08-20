@@ -1091,22 +1091,83 @@ function Expand-UserPathTemplate {
     return $result
 }
 
-function Test-PurgePathSafe {
-    param([string]$Raw, [string]$Expanded)
-    if ($Raw.Contains('..') -or $Expanded.Contains('..')) { return $false }
-    if ([string]::IsNullOrEmpty($Expanded)) { return $false }
-    $home2 = (Get-UserProfileDir).TrimEnd('\')
-    $candidate = $Expanded.TrimEnd('\')
-    if ($candidate.ToLowerInvariant() -eq $home2.ToLowerInvariant()) { return $false }
-    if (-not $candidate.ToLowerInvariant().StartsWith(($home2 + '\').ToLowerInvariant())) { return $false }
+# Единая нормализация пути перед любой файловой операцией — паритет с path_normalize из
+# install-posix.sh (N5-P3, N5-R2). Строковое сравнение с профилем пользователя обходится любой
+# формой, которую файловая система схлопывает сама: '%USERPROFILE%\', '%USERPROFILE%\\',
+# '%USERPROFILE%\.', '%USERPROFILE%\.\', '%USERPROFILE%\sub\..' — всё это тот же каталог.
+# GetFullPath приводит их к одному значению по правилам самой ФС; сегменты '..' отвергаются
+# отдельно (лексический «подъём» маскирует намерение), относительный путь тоже отвергается —
+# достраивать его от текущего каталога процесса здесь недопустимо.
+function ConvertTo-NormalPath {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    foreach ($segment in $Value.Split([char[]]@('\', '/'))) {
+        if ($segment -eq '..') { return $null }
+    }
+    if (-not [System.IO.Path]::IsPathRooted($Value)) { return $null }
+    $full = $null
+    try {
+        $full = [System.IO.Path]::GetFullPath($Value)
+    } catch {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($full)) { return $null }
+    # Оба разделителя: на Windows GetFullPath приводит '/' к '\', но Pester-набор гоняется и на
+    # pwsh под macOS/Linux (N5-T2), где приведения не происходит.
+    $trimmed = $full.TrimEnd([char[]]@('\', '/'))
+    # Корень тома ('C:\', '/') после TrimEnd пуст — возвращаем как есть, вложенным он не станет.
+    if ([string]::IsNullOrEmpty($trimmed)) { return $full }
+    return $trimmed
+}
+
+# Строгая вложенность нормализованных путей: Child обязан лежать НИЖЕ Parent — не совпадать с ним
+# и не быть его родителем. Паритет с path_is_inside.
+function Test-PathInside {
+    param([string]$Parent, [string]$Child)
+    if ([string]::IsNullOrEmpty($Parent) -or [string]::IsNullOrEmpty($Child)) { return $false }
+    $p = $Parent.ToLowerInvariant()
+    $c = $Child.ToLowerInvariant()
+    if ($c -eq $p) { return $false }
+    $trimmed = $p.TrimEnd([char[]]@('\', '/'))
+    if ([string]::IsNullOrEmpty($trimmed)) {
+        # Parent — корень тома: ниже него лежит любой более длинный путь с тем же началом.
+        return ($c.Length -gt $p.Length -and $c.StartsWith($p))
+    }
+    if ($c -eq $trimmed) { return $false }
+    if (-not $c.StartsWith($trimmed)) { return $false }
+    if ($c.Length -le ($trimmed.Length + 1)) { return $false }
+    $next = $c.Substring($trimmed.Length, 1)
+    if ($next -ne '\' -and $next -ne '/') { return $false }
     return $true
 }
 
+# N5-R2: удалению подлежат только объекты СТРОГО внутри профиля пользователя. Решение
+# принимается по НОРМАЛИЗОВАННОМУ значению, поэтому '%USERPROFILE%' во всех эквивалентных
+# формах (завершающие слэши, '.', '.\', 'sub\..') отвергается наравне с путями вне профиля.
+function Test-PurgePathSafe {
+    param([string]$Raw, [string]$Expanded)
+    if ([string]::IsNullOrEmpty($Raw)) { return $false }
+    if ($Raw.Contains('..')) { return $false }
+    if ([string]::IsNullOrEmpty($Expanded)) { return $false }
+    if ($Expanded.Contains('..')) { return $false }
+    $candidate = ConvertTo-NormalPath $Expanded
+    if ($null -eq $candidate) { return $false }
+    $profileDir = ConvertTo-NormalPath (Get-UserProfileDir)
+    if ($null -eq $profileDir) { return $false }
+    return (Test-PathInside -Parent $profileDir -Child $candidate)
+}
+
+# Список для показа (план удаления): печатается ровно то значение, которое пошло бы в
+# Remove-Item, то есть нормализованное. Непригодный путь показывается как есть — до удаления
+# дело не дойдёт, его отвергнет Confirm-PurgePathList.
 function Get-PurgePathList {
     param($Manifest)
     $result = New-Object System.Collections.ArrayList
     foreach ($raw in @(Get-Prop $Manifest 'purge_paths')) {
-        [void]$result.Add((Expand-UserPathTemplate -Value ([string]$raw)))
+        $expanded = Expand-UserPathTemplate -Value ([string]$raw)
+        $normalized = ConvertTo-NormalPath $expanded
+        if ($null -eq $normalized) { $normalized = $expanded }
+        [void]$result.Add($normalized)
     }
     return $result.ToArray()
 }
@@ -1220,7 +1281,16 @@ function Invoke-Uninstall {
 
     if ($WithPurge) {
         Write-Say $script:MsgPurgeHead
-        foreach ($path in (Get-PurgePathList -Manifest $Manifest)) {
+        # Вторая, независимая от Confirm-PurgePathList линия защиты (defense in depth): ни один
+        # путь не попадает в Remove-Item без повторной проверки прямо на месте удаления.
+        foreach ($rawPath in @(Get-Prop $Manifest 'purge_paths')) {
+            $rawText = [string]$rawPath
+            $expanded = Expand-UserPathTemplate -Value $rawText
+            if (-not (Test-PurgePathSafe -Raw $rawText -Expanded $expanded)) {
+                Write-ErrorLine ($script:MsgErrPurgeUnsafe -f $rawText)
+                Invoke-Failure -Code $script:ExitArgs -Message $script:MsgErrPurgeRejected
+            }
+            $path = ConvertTo-NormalPath $expanded
             Write-Line ($script:MsgPurgeItem -f $path)
             if (Test-Path -LiteralPath $path) {
                 Remove-Item -LiteralPath $path -Recurse -Force
