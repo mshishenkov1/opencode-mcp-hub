@@ -1,0 +1,152 @@
+{
+  "iteration": "I-5",
+  "cycle": 4,
+  "final_review": true,
+  "branch": "pipeline/i1-hub-login-catalog-20260818",
+  "head_at_review": "b4e5021",
+  "head_clean_run": "107b584",
+  "worktree_dirty": "installers/release.sh (не закоммичено)",
+  "verdict": "request_changes",
+
+  "previous_findings_recheck": {
+    "blocker_1_app_name_traversal": "ЗАКРЫТ. Собственный PoC (не тесты репозитория): 17 значений app_name × 6 режимов (установка, --check, --dry-run, --uninstall, --dry-run --uninstall, --uninstall --purge). Значения '..', '.', '/', '/Applications', '../../tmp', '../../../../../../../..<abs>/canary', 'OpenCode.app/', 'sub/OpenCode.app', 'OpenCode.app/..', '   ', '\\t\\n ' → код 2 во всех 6 режимах. Ловушки на sudo/ditto/hdiutil пусты для всех отвергнутых значений; канарейка цела. Контроль 'OpenCode.app' доходит до hdiutil attach.",
+    "blocker_2_empty_app_name": "ЗАКРЫТ. Поле отсутствует / null / \"\" / \"   \" / \"\\t\\n \" → код 2 во всех 6 режимах, сообщение 'поле artifacts.1.app_name — обязательное поле отсутствует или пусто', ни одного вызова ditto/hdiutil/sudo.",
+    "blocker_3_purge_home": "ЗАКРЫТ. 19 форм purge_paths в изолированном HOME с канарейками: '~', '~/', '~//', '~///', '${HOME}', '${HOME}/', '${HOME}//', '${HOME}///', '${HOME}/.', '${HOME}/./', '${HOME}/./.', '~/.', '~/./', '${HOME}/sub/..', '/etc', '/', '//', '${XDG_CONFIG_HOME}/../..' → код 2, HOME на месте (12 записей до и после), Documents/very-important/data.txt и .ssh/id_rsa целы. Контроль '${HOME}/ok' → код 0. Причина закрытия: решение принимается по результату path_normalize (install-posix.sh:513-553) + строгая вложенность path_is_inside (556-570), вторая линия защиты в purge_each (1585-1613).",
+    "bug_i5_001_escaping": "ЗАКРЫТ. Round-trip 10 значений --hub-url через собранный манифест и строгий парсер python3 json.load: перевод строки, табуляция, CR, 0x01, 0x1f, кавычка, обратный слэш, кириллица, 0x08+0x0c, контрольное значение — все 10 OK-ROUNDTRIP (значение после разбора побайтово равно исходному). Самопроверка release.sh:404-421 разбирает манифест строгим парсером, при отсутствии python3 печатает предупреждение и применяет побайтовый фильтр управляющих символов.",
+    "minor_4_is_safe_app_name_whitespace": "ЗАКРЫТ (install-posix.sh:617 — проверка непустоты после отбрасывания пробельных символов внесена внутрь is_safe_app_name; паритет с Test-AppName/IsNullOrWhiteSpace стал истинным).",
+    "minor_5_spec_n5_b1_wording": "ЗАКРЫТ (spec.md:33 — фраза «самопроверка такую поломку не ловит» снята, состав шагов зафиксирован).",
+    "minor_6_python3_silent_skip": "ЗАКРЫТ (release.sh:412-421 — MSG_WARN_NO_PYTHON плюс побайтовый фильтр вместо молчаливого пропуска).",
+    "minor_7_broken_archive_left": "ЗАКРЫТ В КОММИТЕ, НО ОТКАЧЕН В РАБОЧЕМ ДЕРЕВЕ — см. finding 3."
+  },
+
+  "findings": [
+    {
+      "severity": "blocker",
+      "where": "installers/common/install-posix.sh:921-939 (write_block_file, строки 926, 931, 936); достижимое значение — installers/common/install-posix.sh:595-608 (is_safe_pkg_path) через ca.install_name",
+      "what": "НОВАЯ УЯЗВИМОСТЬ, того же класса, что три закрытых, но в другой точке: значения манифеста подставляются в ГЕНЕРИРУЕМЫЙ КОД shell без экранирования. write_block_file печатает 'export %s=\"%s\"' с $ca_target, а $ca_target = <config_dir>/<ca.install_name>, где ca.install_name проверяется только is_safe_pkg_path. Та запрещает ведущий '/', обратный слэш, '..', '.', './x', 'x/.', завершающий '/' и букву диска, но НЕ запрещает '$', '`', '\"', ';', пробел. Полученная строка пишется в ~/.zshrc / ~/.bash_profile / ~/.profile и исполняется shell пользователя при каждом входе. PoC 1 (подстановка команды): ca.install_name = 'pwn$(touch PWNED_REVIEW_I5).pem' → установка завершается КОДОМ 0 и отчётом «Дальше: 1. Откройте новый терминал», в ~/.bash_profile попадает export NODE_EXTRA_CA_CERTS=\".../opencode/pwn$(touch PWNED_REVIEW_I5).pem\"; при source профиля файл PWNED_REVIEW_I5 создан (проверено в пустом каталоге), а сама переменная получает значение '.../pwn.pem' — путь к несуществующему файлу, то есть доверие к корпоративному CA молча ломается. PoC 2 (выход из кавычек): ca.install_name = 'a.pem\"; touch BREAKOUT_REVIEW_I5; x=\"' → в профиле появляется отдельная команда 'touch BREAKOUT_REVIEW_I5', при входе она исполняется; установка снова код 0. Затронуты обе ветки write_block_file: 'export NAME=\"...\"' (bash/zsh/sh) и 'set -gx NAME \"...\"' / 'fish_add_path \"...\"' (fish). Строка PATH (installers/common/install-posix.sh:936) тем же способом уязвима к $HOME/--prefix с метасимволами: каталог с именем 'pre$fix' или 'pre`fix' даёт неверный или исполняемый PATH. Windows не затронут: install.ps1 пишет в реестр, Start-Process получает -ArgumentList массивом, Invoke-Expression отсутствует. Спека требования не содержит: N5-I5 об экранировании молчит, N5-P3 (spec.md:237) ограничивает install_name только как «путь внутри пакета». Предлагаемое действие: (а) запретить в is_safe_pkg_path/is_safe_app_name символы, опасные в генерируемом shell-коде, либо (б) экранировать значения при печати блока профиля (одинарные кавычки для sh/bash/zsh с обработкой ', для fish — свои правила), либо (в) и то и другое; отдельным правилом внести требование в N5-I5 и в N5-P3.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "blocker",
+      "where": "installers/tests/bats/35-manifest-paths.bats:288 (таблица принимаемых install_name), installers/tests/bats/50-profile.bats (блок профиля)",
+      "what": "Тестовый пробел, из-за которого finding 1 не был пойман. Таблица допустимых install_name проверяется только на 'opencode', 'bin/opencode', 'certs/tander-ca-bundle.pem', 'a/b/c.pem', 'OpenCode.app' — ни одного значения с shell-метасимволом ('$', '`', '\"', ';'). Тесты профиля (50-profile.bats) проверяют содержимое блока, но ни один не проверяет, что записанный блок БЕЗОПАСЕН при исполнении. Нужен тест уровня наблюдаемого поведения: манифест с ca.install_name, содержащим '$(...)', '`...`' и '\"', установка, затем source сгенерированного профиля в изолированном каталоге с канарейкой — команда не должна исполниться, а значение NODE_EXTRA_CA_CERTS обязано побайтово совпасть с фактическим путём установленного CA-файла. Аналогично для --prefix и $HOME с метасимволами и для ветки fish.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "installers/release.sh:373-378 (selfcheck_fail) — незакоммиченное изменение рабочего дерева",
+      "what": "В рабочем дереве ветки откачена строка 'rm -f \"$archive\"', внесённая коммитом 4e4c236 по finding 7 предыдущего ревью. Сообщение MSG_SELFCHECK_DROPPED (release.sh:38) при этом осталось: 'Архив не прошёл самопроверку и удалён из каталога сборки: %s' — то есть скрипт печатает, что битый архив удалён, и оставляет его в --out. Комментарий release.sh:371-372 утверждает обратное. Наблюдаемо: bats installers/tests/bats даёт 'not ok 211 AC-144: самопроверка ловит невалидный манифест — код 1, битый архив не остаётся в --out'; на чистом дереве (107b584) тот же набор даёт 227/227. Мутационная проверка подтверждает, что тест ловит именно эту правку (мутант M6 «снять rm -f $archive» убит ровно AC-144). Требуется откатить незакоммиченное изменение (git checkout -- installers/release.sh) либо, если откат архива признан ненужным, менять его вместе с сообщением, комментарием и спекой N5-B2 (spec.md:934). Пока изменение висит незакоммиченным, гейт G1 на рабочей копии красный.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/95-sources.bats:166 (AC-128) против installers/ci/installers.yml (задания pester-pwsh:68, pester-ps51:129)",
+      "what": "Код CI разошёлся с тестом и с критерием. Коммитом b4e5021 задание 'pester:' с матрицей оболочек разведено на два задания 'pester-pwsh' и 'pester-ps51', а тест AC-128 по-прежнему требует буквальную подстроку '  pester:'. На HEAD ветки: 'not ok 222 AC-128 ... нет подстроки:   pester:'. Проверено также, что installers/ci/installers.yml и .github/workflows/installers.yml на HEAD побайтово совпадают (расхождения эталона и установленного workflow нет — расходятся именно тест и AC). Требуется привести AC-128 и тест к фактическому составу заданий (bats, pester-pwsh, pester-ps51, lint, release-dry-run, installers-required) — правка теста за test-agent, правка формулировки AC за spec.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "installers/common/install-posix.sh:1119-1136 (install_ca), 989-1010 (apply_profile_block), 858-882 (compute_layout); installers/docs/spec.md:555-567 (N5-I7)",
+      "what": "Режим --system не определён в части владельца создаваемых файлов, и код это никак не компенсирует. Через run_priv (sudo) идут только операции с bin_dir: mkdir, cp, chmod, mv, rm (install-posix.sh:1070-1076, 1095, 1149-1162, 1246). CA-файл, каталог конфигурации и блок профиля пишутся БЕЗ run_priv — обычными mkdir/cp/chmod и перезаписью $profile_file, то есть от имени текущего процесса. При штатном для --system запуске 'sudo ./install.sh --system' процесс — root, и путь этих файлов определяется значением $HOME внутри sudo: если HOME сброшен в /var/root, CA, конфиг и профиль уезжают в домашний каталог root, и вызвавший пользователь не получает ни NODE_EXTRA_CA_CERTS, ни CA (установка формально успешна, код 0); если HOME сохранён (env_keep), в домашнем каталоге пользователя появляются файлы, принадлежащие root, которые он не сможет обновить без sudo. Ни chown, ни SUDO_USER, ни logname в installers/ не встречаются ни разу (проверено grep по всему каталогу). В acceptance-criteria.yaml --system упоминается четырежды (строки 262, 465, 534, 822) и ни один критерий не описывает владельца и расположение CA/конфига/профиля при --system. Требуется решение в спеке (N5-I7) и его реализация: либо --system трогает только bin_dir и явно печатает, что пользовательская часть ставится отдельным запуском без --system, либо пользовательская часть выполняется от имени SUDO_USER с корректным владельцем.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/windows/install.ps1:247-258 (Test-PackagePath) против installers/common/install-posix.sh:595-608 (is_safe_pkg_path)",
+      "what": "Расхождение паритета в сторону избыточной строгости Windows-ветки при заявленном равенстве (комментарий install.ps1:246 «паритет с is_safe_pkg_path»). POSIX отвергает '..' только как ЦЕЛЫЙ сегмент (шаблоны '..', '../*', '*/../*', '*/..'), а PowerShell — любое вхождение подстроки: $Value.Contains('..'). Значение вида 'opencode..pem' или 'v1..2/opencode' принимается на macOS/Linux и отвергается на Windows, то есть один и тот же пакет валиден на одной платформе и невалиден на другой. Безопасность от этого не страдает; привести к общему правилу (посегментная проверка) и поправить комментарий.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:1156 (install_binary, mktemp) — поведение при непригодном TMPDIR",
+      "what": "При TMPDIR, указывающем на несуществующий каталог, установка обрывается посередине: CA уже установлен и бинарник уже скопирован, а на шаге временного файла профиля печатается системная английская диагностика 'mktemp: mkstemp failed on <путь>: No such file or directory' и скрипт завершается кодом 1 без русского сообщения и без указания, что установка частична. N5-I1 требует, чтобы весь пользовательский вывод был на русском (spec.md:439). Проверяемость: воспроизводится запуском с TMPDIR=<несуществующий каталог>. Предлагается проверять пригодность TMPDIR в начале (наравне с прочими предусловиями) и давать русское сообщение с кодом 1.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+
+  "gates": [
+    {"gate": "G1", "what": "тесты", "result": "красный", "detail": "pytest .venv/bin/python -m pytest -q -rs --tb=short — 408 passed, код 0. bats installers/tests/bats на HEAD b4e5021 с текущим рабочим деревом — 225/227, код 1: not ok 211 (AC-144, см. finding 3) и not ok 222 (AC-128, см. finding 4). На чистом дереве коммита 107b584 тот же набор — 227/227, код 0."},
+    {"gate": "G2", "what": "coverage-diff", "result": "зелёный", "detail": ".venv/bin/python -m pytest --cov=src → TOTAL 1636 строк, 80 непокрытых, 95%. .venv/bin/diff-cover reports/coverage.xml --compare-branch=origin/main --fail-under=90 → Coverage 95%, код 0. Порог 90."},
+    {"gate": "G3", "what": "mutation", "result": "зелёный", "detail": "no_proxy='*' .venv/bin/mutmut run → убито 2595, выжило 310, таймаутов 0, подозрительных 0; счёт 2595/2905 = 89,3% при пороге 70. Дополнительно — ручные мутации по установщикам (см. mutation_log)."},
+    {"gate": "G4", "what": "линт/типы", "result": "зелёный", "detail": ".venv/bin/ruff check src tests → All checks passed. .venv/bin/mypy src → Success: no issues found in 21 source files. shellcheck -s bash по всем installers/**/*.sh → 0 замечаний."},
+    {"gate": "G5", "what": "ревью", "result": "красный", "detail": "Настоящий отчёт: 2 blocker, 3 major, 2 minor; must_fix = 5."},
+    {"gate": "G6", "what": "покрытие AC", "result": "зелёный", "detail": "installers/tests/trace-ac.sh — код 0. Всего критериев AC-*: 144; с тестами: 128; все критерии типа unit/integration покрыты (непокрытые — типа ci, они закрываются заданиями workflow)."}
+  ],
+
+  "not_verified_on_this_machine": [
+    {
+      "what": "Pester-набор installers/tests/pester (Install, Uninstall, Encoding, DesktopEntry, PathSafety — 5 файлов)",
+      "why": "pwsh на машине ревью отсутствует (which pwsh → not found); Windows PowerShell 5.1 недоступен в принципе (darwin).",
+      "covered_by": "installers/ci/installers.yml: задания pester-pwsh (ubuntu-latest, pwsh 7) и pester-ps51 (windows-latest, встроенный Windows PowerShell 5.1, forbid_skips=true). До 107b584 набор установщиков в GitHub не запускался ни разу; триггер push в pipeline/** добавлен коммитом 107b584. Пока в CI не прошёл ни один зелёный прогон pester, AC-136, AC-137, AC-139, AC-140 и Windows-часть AC-135/AC-143 остаются подтверждёнными только чтением кода.",
+      "read_only_conclusion": "По чтению install.ps1 логика соответствует критериям: ConvertTo-NormalPath (1101-1122) отвергает сегмент '..' и относительный путь и схлопывает формы через [IO.Path]::GetFullPath; Test-PathInside (1125-1145) требует строгой вложенности с регистронезависимым сравнением; Test-PurgePathSafe (1147-1158) решает по нормализованному значению; Test-AppName (264-273) отвергает пустое, пробельное и подстановочные символы '*', '?', '[', ']'; Start-Process вызывается с -ArgumentList массивом, Invoke-Expression в файле отсутствует."
+    }
+  ],
+
+  "mutation_log": [
+    {"id": "M1", "where": "release.sh json_escape — снято экранирование перевода строки", "result": "УБИТА (2 not ok: AC-142/AC-144 на переводе строки и на кавычке/слэше/кириллице). Пробел, зафиксированный в review-i5-3 finding 3, ЗАКРЫТ: тест теперь сверяет значение, а не только валидность JSON."},
+    {"id": "M2", "where": "release.sh json_escape — снято экранирование табуляции", "result": "выжила, но ЭКВИВАЛЕНТНА: проверено round-trip — табуляция уходит в awk-ветку и попадает в манифест как \\u0009, значение после разбора совпадает с исходным. Не тестовый пробел."},
+    {"id": "M3", "where": "release.sh json_escape — экранирование обратного слэша", "result": "мутация не применилась (регулярное выражение не совпало); покрытие подтверждено косвенно тестом на кавычку и обратный слэш."},
+    {"id": "M4", "where": "release.sh json_escape — отключена awk-ветка управляющих символов", "result": "УБИТА (2 not ok: AC-142/AC-144 на CR и 0x01)."},
+    {"id": "M5", "where": "release.sh selfcheck_package — снят строгий разбор манифеста python3", "result": "УБИТА (1 not ok: AC-144)."},
+    {"id": "M6", "where": "release.sh selfcheck_fail — снято rm -f \"$archive\"", "result": "УБИТА (1 not ok: AC-144). Ровно эта мутация присутствует в рабочем дереве как незакоммиченное изменение — см. finding 3."},
+    {"id": "N1", "where": "install-posix.sh path_normalize — не схлопывать пустые сегменты", "result": "УБИТА (6 not ok: AC-135/AC-143 и AC-91 на '${HOME}///')."},
+    {"id": "N2", "where": "install-posix.sh path_normalize — разрешить сегмент '..'", "result": "УБИТА (4 not ok: AC-135/AC-143, path_require_child, --prefix с '..')."},
+    {"id": "N3", "where": "install-posix.sh path_is_inside — снята проверка child != parent", "result": "выжила, но ЭКВИВАЛЕНТНА: шаблон \"$parent\"/?* сам по себе не совпадает при child = parent, ветка '/' тоже. Не тестовый пробел."},
+    {"id": "N4", "where": "install-posix.sh path_is_inside — шаблон \"$parent\"/?* ослаблен до \"$parent\"/*", "result": "УБИТА (109 not ok)."},
+    {"id": "N5", "where": "install-posix.sh purge_path_is_safe — снята привязка к $HOME", "result": "УБИТА (13 not ok: AC-91/AC-143 на '${HOME}//', '~//', '${HOME}///' и др.)."},
+    {"id": "N6", "where": "install-posix.sh purge_each — снята вторая линия защиты", "result": "УБИТА (2 not ok: AC-143 на обойдённой валидации и на схлопывающихся формах)."}
+  ],
+
+  "offline_and_names": {
+    "n5_p6_offline": "ПОДТВЕРЖДЕНО. Полная установка выполнена с ловушками на curl, wget, nc, ssh, scp, ftp, openssl, nscurl, python3, perl, ruby, node, npm, git, brew, softwareupdate: ни одного вызова (лог ловушек пуст) при 10 успешных установках.",
+    "names": "Установка, повторная установка и --check на --prefix и $HOME с пробелами, кириллицей/юникодом (Ω) и метасимволами '*', '?', '[', ']', '$', '`', ';', апострофом и обратным слэшем: install=0 и reinstall=0 во всех 10 случаях, бинарник и CA на месте, блок профиля единственный. ВНИМАНИЕ: успешная установка на именах с '$' и '`' не означает корректности — сгенерированный блок профиля при этом содержит неэкранированные метасимволы, см. finding 1.",
+    "idempotency": "Повторный запуск установки поверх установленного состояния даёт код 0 и не задваивает блок профиля."
+  },
+
+  "upcoming_rename_impact": {
+    "change": "Корпоративный бандл переименовывается в «OpenCode Magnit.app», appId → ai.opencode.desktop.magnit, автообновление на внутренний сервер. САМ НЕ ПРАВИЛ.",
+    "code": [
+      "installers/release.sh:511 — desktop_app=\"OpenCode.app\" зашито константой в ветке *.dmg; именно отсюда app_name попадает в манифест. Единственная точка, где имя задаётся при сборке.",
+      "installers/common/manifest.example.json:29 — \"app_name\": \"OpenCode.app\" в примере манифеста.",
+      "Проверено: пробел в имени сам по себе безопасен — is_safe_app_name (install-posix.sh:612-624) отвергает только полностью пробельное значение, а Test-AppName (install.ps1:264-273) — IsNullOrWhiteSpace; имя вида «OpenCode Magnit.app» обеими проверками принимается, все подстановки в кавычках."
+    ],
+    "acceptance_criteria": [
+      "AC-135 — acceptance-criteria.yaml:1178, 1189 (перечень отвергаемых форм задан от строки «OpenCode.app»: \"./OpenCode.app\", \"OpenCode.app/\"; и контроль «app_name \"OpenCode.app\" проходит все шесть режимов»)",
+      "AC-136 — acceptance-criteria.yaml:1200 (набор значений для Read-Manifest, штатное «OpenCode.app»)",
+      "AC-139 — acceptance-criteria.yaml:1204, 1206 (отбрасывание суффикса .app при поиске записи Uninstall: «на \"OpenCode.app\" возвращается запись \"OpenCode\"». Для «OpenCode Magnit.app» ожидаемая запись становится «OpenCode Magnit» — критерий надо переформулировать, иначе он зафиксирует старое имя)",
+      "AC-42 (N5-I9) — acceptance-criteria.yaml:528, 541 («приложение скопировано в /Applications/OpenCode.app», «/Applications/OpenCode.app уже той же версии»)"
+    ],
+    "tests_bats": [
+      "installers/tests/helpers.bash:197 — фикстурный манифест с \"app_name\": \"OpenCode.app\" (базовое значение для всех наборов)",
+      "installers/tests/bats/35-manifest-paths.bats:23-25 (set_app_name через sed по литералу \"OpenCode.app\"), :172-177 (AC-135 штатное имя, ожидание \"/Applications/OpenCode.app\"), :288 (таблица install_name), :299-300 (таблица is_safe_app_name)",
+      "installers/tests/bats/36-desktop-safety.bats:26 и :31 (set_app_name и удаление поля через sed по литералу), :147-171 (отвергаемые формы \"./OpenCode.app\", \"OpenCode.app/\", \"sub/OpenCode.app\"), :181-184 (штатное имя), :242 (mkdir \"$mp/OpenCode.app\" в заглушке образа), :307-331 (drive_install_desktop и проверка цели <dest>/OpenCode.app), :349, :375-376, :398-403, :408-413 (таблица desktop_target_path и проверка ditto/rm)",
+      "Механика: и 35-manifest-paths.bats, и 36-desktop-safety.bats подменяют app_name выражением sed по ЛИТЕРАЛУ \"app_name\": \"OpenCode.app\" — после смены значения в helpers.bash эти подмены перестанут срабатывать молча (sed не изменит файл и не вернёт ошибку), и тесты начнут проверять не то, что заявлено. Менять helpers.bash:197 и оба set_app_name согласованно."
+    ],
+    "tests_pester": [
+      "installers/tests/pester/DesktopEntry.Tests.ps1:92 ([string]$AppName = 'OpenCode.app' — значение по умолчанию фабрики манифеста)",
+      "installers/tests/pester/DesktopEntry.Tests.ps1:212-214 (AC-139: «суффикс .app отбрасывается — app_name=\"OpenCode.app\" находит ту же запись»)",
+      "installers/tests/pester/DesktopEntry.Tests.ps1:403 (New-ManifestPackage -AppName 'OpenCode.app')",
+      "installers/tests/pester/DesktopEntry.Tests.ps1:420 (набор @('OpenCode', 'OpenCode.app', 'OpenCodeSetup.exe', 'Open Code.app') — при переходе на имя с пробелом смысл кейса 'Open Code.app' меняется с «постороннее имя» на «форма целевого», кейс надо пересобрать)"
+    ],
+    "docs": [
+      "installers/docs/spec.md:234 (пример app_name)",
+      "installers/docs/install-admin.md:52 и :104 (имя внутри образа и правило удаления по нему)"
+    ],
+    "not_covered_anywhere": "appId ai.opencode.desktop.magnit и адрес сервера автообновления в installers/ не встречаются ни разу — установщики их не читают и не пишут; менять в installers/ по этому поводу нечего, кроме имени бандла."
+  },
+
+  "dispute_resolutions": [],
+
+  "notes": [
+    "Во время ревью рабочая копия репозитория дважды переключалась другим процессом: с pipeline/i1-hub-login-catalog-20260818 на pipeline/ci-probe (4 пробных коммита) и обратно, а HEAD ветки за время ревью сместился 107b584 → b4e5021. Чтобы это не искажало результат, основной прогон выполнен в отдельном git worktree, отцеплённом на 107b584; worktree после прогона удалён (git worktree remove), рабочее дерево репозитория не изменялось. Незакоммиченная правка installers/release.sh существовала до начала ревью и осталась нетронутой — см. finding 3.",
+    "PoC по трём закрытым блокерам выполнены на собственных фикстурных пакетах, собираемых независимым скриптом, а не helpers.bash тестового набора: отчётам предыдущих ревью и тестам репозитория при перепроверке не доверялось.",
+    "Ни один PoC не выполнялся с правами root и не писал за пределы временного каталога сессии; sudo подменялся ловушкой."
+  ]
+}
