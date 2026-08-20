@@ -346,21 +346,143 @@ require_python3() {
   assert_output_contains "Hub: $hub"
 }
 
-@test "AC-142: --hub-url с переводом строки → манифест остаётся валидным JSON" {
-  require_python3
-  make_artifacts "$ART" "$VER" linux-x64
-  local hub
-  hub=$(printf 'https://hub.test/a\nb')
+# Строгая проверка ОБОИХ требований AC-142 по одному значению --hub-url: манифест валиден по
+# RFC 8259 и значение hub_url после json.load совпадает с исходным без искажения. Сравнение
+# выполняется внутри python3, а исходная строка передаётся файлом, а не подстановкой команд:
+# $( ) срезает завершающие переводы строк и скрыл бы ровно ту потерю, которую тест ищет
+# (мутация «json_escape без обработки \n»: манифест остаётся валидным за счёт awk-ветки, но
+# перевод строки из значения исчезает — см. reports/review-i5-3.json, находка 3).
+write_hub_checker() {
+  cat >"$SANDBOX/check-hub.py" <<'PY'
+import io, json, sys
+
+# newline='' обязателен: в текстовом режиме python3 переводит '\r' в '\n' при чтении и
+# сравнение перестало бы различать возврат каретки и перевод строки.
+manifest = json.load(io.open(sys.argv[1], encoding='utf-8', newline=''))
+got = manifest['hub_url']
+want = io.open(sys.argv[2], encoding='utf-8', newline='').read()
+if got != want:
+    sys.stderr.write('hub_url после разбора: %r\n' % (got,))
+    sys.stderr.write('исходное значение:    %r\n' % (want,))
+    sys.exit(1)
+PY
+}
+
+# Сборка с заданным --hub-url и строгая проверка результата. AC-142 допускает ровно два исхода:
+# либо запуск отвергнут кодом 2 до сборки (каталог --out не создан), либо манифест валиден и
+# значение не искажено. Исход «код 0 и искажённое/невалидное значение» валит тест.
+assert_hub_roundtrip() {
+  local hub=$1 label=$2 mf want="$SANDBOX/want-hub.bin"
+  write_hub_checker
+  rm -rf "$OUT" "$SANDBOX/unpack"
   release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
     --hub-url "$hub" --out "$OUT" --targets linux-x64
-  assert_status 0
-  local mf
+  if [ "$status" -eq 2 ]; then
+    [ ! -d "$OUT" ] || { printf 'Значение %s отвергнуто, но каталог --out создан\n' "$label" >&2; return 1; }
+    return 0
+  fi
+  if [ "$status" -ne 0 ]; then
+    printf 'Сборка на значении %s завершилась кодом %s (допустимы 0 и 2):\n%s\n' "$label" "$status" "$output" >&2
+    return 1
+  fi
   mf=$(unpack_manifest)
   run python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mf"
   if [ "$status" -ne 0 ]; then
-    printf 'manifest.json не является валидным JSON:\n%s\n' "$output" >&2
+    printf 'manifest.json на значении %s не является валидным JSON:\n%s\n' "$label" "$output" >&2
     return 1
   fi
+  printf '%s' "$hub" >"$want"
+  run python3 "$SANDBOX/check-hub.py" "$mf" "$want"
+  if [ "$status" -ne 0 ]; then
+    printf 'Значение %s искажено при сборке манифеста:\n%s\n' "$label" "$output" >&2
+    return 1
+  fi
+  return 0
+}
+
+@test "AC-142, AC-144: --hub-url с переводом строки → манифест валиден И значение не искажено" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_hub_roundtrip "$(printf 'https://hub.test/a\nb')" 'перевод строки'
+}
+
+@test "AC-142, AC-144: --hub-url с табуляцией → манифест валиден И значение не искажено" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_hub_roundtrip "$(printf 'https://hub.test/a\tb')" 'табуляция'
+}
+
+@test "AC-142, AC-144: --hub-url с возвратом каретки и 0x01 → манифест валиден И значение не искажено" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_hub_roundtrip "$(printf 'https://hub.test/a\rb')" 'возврат каретки'
+  assert_hub_roundtrip "$(printf 'https://hub.test/a\001b')" '0x01'
+  assert_hub_roundtrip "$(printf 'https://hub.test/a\bb\fc')" 'backspace и formfeed'
+}
+
+@test "AC-142, AC-144: --hub-url с кавычкой, слэшем и кириллицей → значение не искажено" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_hub_roundtrip 'https://hub.test/a"b\c/d' 'кавычка и обратный слэш'
+  assert_hub_roundtrip 'https://hub.test/каталог/приёмка' 'кириллица'
+  assert_hub_roundtrip "$(printf 'https://hub.test/\"a\\b\nв\tг\001д/е')" 'все классы разом'
+}
+
+# ------------------------------------------------------------------ провал самопроверки (N5-B2)
+#
+# Единственный способ наблюдать поведение при провале самопроверки, не трогая продуктовый код, —
+# собрать пакет заведомо сломанной КОПИЕЙ release.sh. Копия отличается ровно одной функцией
+# (json_escape сделан тождественным), лежит в собственном корне, где каталоги с исходниками
+# установщиков подставлены симлинками; остальной скрипт — тот же файл.
+
+write_identity_release() {
+  local root="$SANDBOX/fake-installers" sub
+  mkdir -p "$root"
+  for sub in common linux macos windows; do
+    rm -f "$root/$sub"
+    ln -s "$INSTALLERS_ROOT/$sub" "$root/$sub"
+  done
+  awk '
+    /^json_escape\(\) \{$/ { print "json_escape() {"; print "  printf %s \"$1\""; skip = 1; next }
+    skip == 1 && /^\}$/ { print "}"; skip = 0; next }
+    skip == 1 { next }
+    { print }
+  ' "$INSTALLERS_ROOT/release.sh" >"$root/release.sh"
+  chmod 0755 "$root/release.sh"
+  printf '%s' "$root/release.sh"
+}
+
+@test "AC-144: самопроверка ловит невалидный манифест — код 1, битый архив не остаётся в --out" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  local broken
+  broken=$(write_identity_release)
+  run bash "$broken" --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url "$(printf 'https://hub.test/a\nb')" --out "$OUT" --targets linux-x64
+  assert_status 1
+  assert_output_contains "common/manifest.json в архиве не является валидным JSON"
+  assert_output_contains "Архив не прошёл самопроверку и удалён из каталога сборки:"
+  # Битый архив удалён: перепутать его с годным нельзя.
+  [ ! -f "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" ]
+  [ ! -f "$OUT/SHA256SUMS" ]
+}
+
+@test "AC-144: контроль — та же копия release.sh с исправным json_escape собирает пакет" {
+  # Копия отличается от оригинала ровно одной функцией: если бы код 1 выше давала сама копия
+  # (симлинки, корень, аргументы), а не поломка экранирования, этот прогон тоже упал бы.
+  make_artifacts "$ART" "$VER" linux-x64
+  local root="$SANDBOX/fake-installers" sub
+  mkdir -p "$root"
+  for sub in common linux macos windows; do
+    rm -f "$root/$sub"
+    ln -s "$INSTALLERS_ROOT/$sub" "$root/$sub"
+  done
+  cp "$INSTALLERS_ROOT/release.sh" "$root/release.sh"
+  run bash "$root/release.sh" --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url "$(printf 'https://hub.test/a\nb')" --out "$OUT" --targets linux-x64
+  assert_status 0
+  [ -f "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" ]
+  [ -f "$OUT/SHA256SUMS" ]
 }
 
 @test "AC-142: собранный манифест по умолчанию — валидный JSON (контроль на тождественный json_escape)" {
