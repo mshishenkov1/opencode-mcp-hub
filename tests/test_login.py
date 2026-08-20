@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from tests.conftest import Hub, HubFactory
 from tests.support import (
@@ -20,6 +21,7 @@ from tests.support import (
     capture_json_logs,
     dump_all_tables,
     fetch_rows,
+    insert_key,
     insert_user,
     kv_session,
     make_jwt,
@@ -1738,6 +1740,90 @@ async def test_new_user_row_gets_default_group_all(hub: Hub) -> None:
     rows = await fetch_rows(hub.app, "SELECT user_id, groups FROM users")
     assert len(rows) == 1
     assert json.loads(rows[0]["groups"]) == ["all"]
+
+
+@pytest.mark.ac("AC-44")
+async def test_first_login_of_new_user_saves_user_key_and_audit_without_fk_violation(
+    hub: Hub,
+) -> None:
+    """Первый вход ранее не существовавшего пользователя сохраняет users, api_keys и audit_log,
+    не нарушая внешний ключ ``api_keys.user_id → users.user_id`` (регрессия BUG-I1-001).
+
+    Сначала проверяется, что окружение действительно проверяет внешние ключи: иначе тест был бы
+    зелёным независимо от порядка вставок. Email отсутствует — корпоративный SSO его не отдаёт.
+    """
+    # 1. Внешние ключи проверяются: ключ без пользователя вставить нельзя.
+    with pytest.raises(IntegrityError):
+        await insert_key(hub.app, "sk-orphan", "no-such-user")
+    assert await fetch_rows(hub.app, "SELECT user_id FROM api_keys") == []
+
+    # 2. Первый вход пользователя, которого в users ещё нет.
+    assert await fetch_rows(hub.app, "SELECT user_id FROM users") == []
+    team = "Департамент сопровождения ИТ"
+    client = "opencode/1.17.9-magnit.1 darwin-arm64"
+    start = await _start(hub, client)
+    jwt = _jwt(hub, sub="shishenkov_ma", email=None)
+    mock_poll(hub.litellm, ready_body(jwt, user_id="shishenkov_ma", team_id=team))
+    mock_key_generate(hub.litellm, "sk-first-login")
+
+    ready = await hub.poll(start["login_id"], start["poll_secret"])
+    assert ready.status_code == 200, ready.text
+    body = ready.json()
+    assert body["status"] == "ready"
+    assert body["key"] == "sk-first-login"
+    assert body["key_kind"] == "persistent"
+    assert body["user"] == {"user_id": "shishenkov_ma", "email": None}
+    assert body["team_id"] == team
+
+    # 3. Все три записи созданы, ссылка ключа на пользователя разрешима.
+    users = await fetch_rows(hub.app, "SELECT user_id, email FROM users")
+    assert users == [{"user_id": "shishenkov_ma", "email": None}]
+    keys = await fetch_rows(
+        hub.app, "SELECT key_sha256, user_id, key_kind, client, expires_at FROM api_keys"
+    )
+    assert len(keys) == 1
+    assert keys[0]["key_sha256"] == sha256_hex("sk-first-login")
+    assert keys[0]["user_id"] == "shishenkov_ma"
+    assert keys[0]["key_kind"] == "persistent"
+    assert keys[0]["client"] == client
+    assert keys[0]["expires_at"] is None
+    orphans = await fetch_rows(
+        hub.app,
+        "SELECT k.key_sha256 FROM api_keys k "
+        "LEFT JOIN users u ON u.user_id = k.user_id WHERE u.user_id IS NULL",
+    )
+    assert orphans == []
+    completed = await audit_rows(hub.app, "login_completed")
+    assert len(completed) == 1
+    assert completed[0]["user_id"] == "shishenkov_ma"
+    assert completed[0]["details"]["key_kind"] == "persistent"
+    assert completed[0]["details"]["team_id"] == team
+
+    # 4. Выданный ключ работает: аутентификация находит пользователя.
+    me = await hub.get("/api/me", headers=bearer("sk-first-login"))
+    assert me.status_code == 200, me.text
+    assert me.json()["user_id"] == "shishenkov_ma"
+
+
+@pytest.mark.ac("AC-44")
+async def test_failed_key_insert_rolls_back_new_user_and_audit(hub: Hub) -> None:
+    """users, api_keys и audit_log сохраняются одной транзакцией (R-L8): если вставка ключа
+    не проходит (LiteLLM вернул уже занятый ключ — api_keys.key_sha256 уникален), то и строка
+    нового пользователя, и запись аудита откатываются.
+    """
+    await insert_user(hub.app, "u1", "u1@corp.test")
+    await insert_key(hub.app, "sk-taken", "u1")
+
+    start = await _start(hub, CLIENT)
+    mock_poll(hub.litellm, ready_body(_jwt(hub, sub="u2", email=None), user_id="u2"))
+    mock_key_generate(hub.litellm, "sk-taken")
+    with pytest.raises(IntegrityError):
+        await hub.poll(start["login_id"], start["poll_secret"])
+
+    assert [r["user_id"] for r in await fetch_rows(hub.app, "SELECT user_id FROM users")] == ["u1"]
+    keys = await fetch_rows(hub.app, "SELECT key_sha256, user_id FROM api_keys")
+    assert keys == [{"key_sha256": sha256_hex("sk-taken"), "user_id": "u1"}]
+    assert await audit_rows(hub.app, "login_completed") == []
 
 
 @pytest.mark.ac("AC-33")
