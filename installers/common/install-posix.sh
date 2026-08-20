@@ -841,12 +841,19 @@ apply_profile_block() {
 
   if [ -f "$profile_file" ]; then
     if profile_has_block "$profile_file"; then
-      awk -v b="$OM_BLOCK_BEGIN" -v e="$OM_BLOCK_END" -v blk="$tmp_block" '
-        $0 == b { inblk = 1; while ((getline line < blk) > 0) { print line } ; close(blk); next }
+      # Вырезаем ВСЕ маркированные блоки и дописываем ровно один в конец: так гарантия N5-U1
+      # «в профиле ровно один блок» держится даже если ранее оказалось два блока (например,
+      # после ручного копирования) — они схлопываются в один.
+      local tmp_stripped
+      tmp_stripped=$(mktemp "${TMPDIR:-/tmp}/opencode-strip.XXXXXX")
+      awk -v b="$OM_BLOCK_BEGIN" -v e="$OM_BLOCK_END" '
+        $0 == b { inblk = 1; next }
         inblk == 1 && $0 == e { inblk = 0; next }
         inblk == 1 { next }
         { print }
-      ' "$profile_file" >"$tmp_new"
+      ' "$profile_file" >"$tmp_stripped"
+      cat "$tmp_stripped" "$tmp_block" >"$tmp_new"
+      rm -f "$tmp_stripped"
     else
       cat "$profile_file" "$tmp_block" >"$tmp_new"
     fi
