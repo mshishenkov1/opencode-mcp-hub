@@ -353,6 +353,40 @@ assert_no_ops() {
   [ -f "$HOME/Applications/Other.marker" ]
 }
 
+@test "AC-138: is_safe_app_name отвергает пробельное имя — обе линии защиты совпали" {
+  # Пробельное значение отбивала только первая линия (manifest_load), а is_safe_app_name его
+  # пропускал, и "<dest>/   " доходил до ditto/rm -rf. Паритет с Test-AppName (IsNullOrWhiteSpace)
+  # проверяется здесь, а не читается из комментария (reports/review-i5-3.json, находка 4).
+  source_installer
+  local value
+  for value in "   " "$(printf '\t')" "$(printf '\t \t')" " "; do
+    run is_safe_app_name "$value"
+    if [ "$status" -eq 0 ]; then
+      printf 'is_safe_app_name принял пробельное значение [%s]\n' "$value" >&2
+      return 1
+    fi
+    run desktop_target_path "/Applications" "$value"
+    if [ "$status" -eq 0 ]; then
+      printf 'desktop_target_path принял пробельное значение [%s] → %s\n' "$value" "$output" >&2
+      return 1
+    fi
+  done
+  # Контроль: штатное имя по-прежнему принимается.
+  is_safe_app_name "OpenCode.app"
+  [ "$(desktop_target_path "/Applications" "OpenCode.app")" = "/Applications/OpenCode.app" ]
+}
+
+@test "AC-138: install_desktop с пробельным app_name при обойдённом manifest_load — код 2, ни одной операции" {
+  drive_install_desktop stub "   "
+  assert_status 2
+  assert_output_contains "поле artifacts[].app_name"
+  assert_no_ops
+  drive_install_desktop stub "$(printf '\t')"
+  assert_status 2
+  assert_no_ops
+  assert_no_forbidden_calls
+}
+
 @test "AC-138: desktop_target_path отвергает значения, схлопывающие путь в сам каталог" {
   source_installer
   run desktop_target_path "/Applications" ""
