@@ -8,7 +8,7 @@
 #   manual      — требует Windows-стенда (D-9), macOS с Desktop-артефактом или реального GUI-сеанса
 #   ci          — проверяется заданием конвейера (lint, наличие файлов, прогон release.sh)
 #
-# Критерии AC-01…AC-151 относятся к установщикам (правила N5-*).
+# Критерии AC-01…AC-153 относятся к установщикам (правила N5-*).
 # Критерии HAC-01…HAC-12 — отдельный раздел hub_backlog_criteria: бэклог Hub (правила H5-*),
 # реализуется в репозитории Hub, ветка pipeline/i3-hub-oauth-facade-proxy (I-3+), НЕ в installers/.
 #
@@ -48,10 +48,11 @@
 #
 # Ревизия 1.5 (2026-08-21), по reports/review-i5-4.json (блокер «значения манифеста подставляются
 # в генерируемый код оболочки без экранирования», major «--system пишет пользовательскую часть без
-# смены владельца»): добавлены AC-145…AC-151, переформулирован AC-41 (одинарные кавычки в блоке
-# профиля). Новые правила спецификации — N5-I13 «Экранирование значений в генерируемом коде
-# оболочки» и N5-I14 «Пользовательская часть при --system»; изменённые — N5-P3, N5-P4, N5-I5,
-# N5-I7; см. spec.md §0.
+# смены владельца», major «AC-128 разошёлся с эталонным workflow»): добавлены AC-145…AC-153;
+# переформулированы AC-41 (одинарные кавычки в блоке профиля) и AC-128 (фактический состав заданий
+# CI). Новые правила спецификации — N5-I13 «Экранирование значений в генерируемом коде оболочки»
+# и N5-I14 «Пользовательская часть при --system»; изменённые — N5-P3, N5-P4, N5-I5, N5-I7, N5-T2,
+# N5-T4; см. spec.md §0.
 
 version: 1.5
 spec: installers/docs/spec.md
@@ -1077,12 +1078,19 @@ criteria:
   - id: AC-128
     rule: [N5-T4]
     type: ci
-    given: файл installers/ci/installers.yml
-    when: прочитан список заданий
+    given: файл installers/ci/installers.yml (ревизия 1.5 — после коммита b4e5021)
+    when: прочитан список заданий и оболочек
     then: >
-      есть задания bats (ubuntu-latest и macos-latest), pester (ubuntu-latest, pwsh), lint
-      (shellcheck и Invoke-ScriptAnalyzer) и release-dry-run; каждое из них помечено как
-      обязательное для PR
+      есть ровно шесть заданий: bats (матрица ubuntu-latest и macos-latest), pester-pwsh (матрица
+      ubuntu-latest и windows-latest, оболочка pwsh), pester-ps51 (windows-latest, оболочка
+      powershell — встроенный Windows PowerShell 5.1), lint (shellcheck и Invoke-ScriptAnalyzer),
+      release-dry-run и агрегирующее installers-required с
+      needs: [bats, pester-pwsh, pester-ps51, lint, release-dry-run]; таким образом выполняются все
+      три комбинации Pester — ubuntu/pwsh, windows/pwsh, windows/PowerShell 5.1. Оболочка в каждом
+      задании задана ЛИТЕРАЛОМ: подстроки «shell: ${{» в файле нет ни разу (выражение
+      shell: ${{ matrix.shell }} GitHub отвергает вместе со всем workflow — прогон падает на старте
+      и не создаёт ни одного задания). Оба Windows-задания содержат проверку SkippedCount > 0 с
+      выходом 1. Задание installers-required назначается единственным required-check PR
 
   - id: AC-129
     rule: [N5-T4]
@@ -1460,6 +1468,34 @@ criteria:
       chown не вызывались ни разу; код выхода --dry-run 0, код выхода --check — 7 на неустановленной
       системе и 0 на установленной
 
+  - id: AC-152
+    rule: [N5-T4]
+    type: ci
+    given: >
+      workflow installers/ci/installers.yml и Pester-набор, в который для проверки добавлен один
+      тест с Set-ItResult -Skipped
+    when: выполнены задания pester-pwsh (обе площадки матрицы) и pester-ps51
+    then: >
+      оба Windows-прогона (windows-latest/pwsh и windows-latest/powershell 5.1) завершаются кодом 1
+      и печатают полный путь (ExpandedPath) каждого пропущенного теста и строку о том, что на
+      Windows пропусков быть не должно; прогон на ubuntu-latest/pwsh остаётся зелёным (там пропуски
+      ожидаемы); прогон, в котором не выполнено ни одного теста (PassedCount < 1), красный на всех
+      трёх комбинациях; агрегирующее задание installers-required краснеет вслед за любым из них
+
+  - id: AC-153
+    rule: [N5-T4]
+    type: ci
+    given: файл .gitlab-ci.yml в корне репозитория и раздел N5-T4 спецификации
+    when: прочитаны состав заданий пайплайна GitLab и текст спецификации
+    then: >
+      в .gitlab-ci.yml есть задания gates, bats, pester, lint-shell, lint-powershell,
+      release-dry-run; заданий на площадках Windows и macOS нет ни одного, а задание pester
+      выполняется только под pwsh в Linux-образе и пропуски в нём допустимы; спецификация в N5-T4
+      прямо называет источник подтверждения: Windows-ветки (AC-136, AC-139, AC-140, Windows-часть
+      AC-135/AC-143) и macOS-ветка bats подтверждаются ТОЛЬКО заданиями GitHub Actions
+      (pester-pwsh на windows-latest, pester-ps51, bats на macos-latest), а зелёный прогон GitLab
+      их не проверяет
+
 
 # ------------------------------------------------------------------------------------------------
 # Покрытие правил критериями (каждое правило N5-* — минимум один AC)
@@ -1511,7 +1547,7 @@ coverage:
   N5-T1: [AC-124]
   N5-T2: [AC-125, AC-126]
   N5-T3: [AC-127]
-  N5-T4: [AC-128, AC-129]
+  N5-T4: [AC-128, AC-129, AC-152, AC-153]
   N5-T5: [AC-130, AC-131, AC-132]
   N5-T6: [AC-32, AC-133, AC-134]
 
@@ -1643,7 +1679,7 @@ hub_backlog_criteria:
     when: применено изменение H5-4 и прогнаны тесты
     then: >
       все тесты проходят без правок ожиданий — наблюдаемое поведение R-P10 не изменилось;
-      мутация «failures = 0 в ветке повторного открытия» валит тест AC-151
+      мутация «failures = 0 в ветке повторного открытия» валит тест AC-151 спецификации I-3
 
 hub_backlog_coverage:
   H5-1: [HAC-01, HAC-02, HAC-03]
