@@ -16,6 +16,7 @@
   "stacktrace": "(fail) corp — действующий адрес модели (AC-132, AC-133) > AC-132: OPENCODE_CORP_MODEL_BASE_URL подменяет адрес внутри корп-слоя\nerror: expect(received).toBe(expected)\nExpected: \"https://llm.test/v1\"\nReceived: \"https://llmlite.ailab-copilot-prod.corp.tander.ru/v1\"\n\n(fail) opencode corp status … > S-A11a: строка «Модель: <model> на <baseURL>» печатается всегда (AC-132)\nerror: expect(received).toContain(expected)\nExpected to contain: \"Модель: magnit_prod/MagnitCopilot на https://llm.test/v1\"\nReceived: \"Hub: http://127.0.0.1:50195\\nДоступность Hub: доступен (ok)\\nКорпоративный ключ: есть\\nПользователь: u@m.ru u1\\nТип ключа: persistent\\nКаталог: кэша нет\\n\"",
   "suspected_area": "packages/opencode/src/corp/config.ts (configText() отдаёт текст корп-слоя без подстановки адреса — по S-C4a подмена должна происходить внутри корп-слоя до слияния, чтобы любой слой выше её перебивал) и packages/opencode/src/cli/cmd/corp.ts (обработчик CorpStatusCommand не читает Config и не печатает строку «Модель: …»). Гипотеза, не приговор: три теста из шести в группе AC-132/AC-133 уже зелёные — умолчание из корп-конфига и приоритет пользовательского слоя работают сами собой, добавить нужно только чтение переменной и её валидацию.",
   "iteration": 1,
-  "status": "open",
-  "found_by": "TEST-AGENT, тесты ревизии 1.5 спеки (S-C4a, D-20)"
+  "status": "fixed",
+  "found_by": "TEST-AGENT, тесты ревизии 1.5 спеки (S-C4a, D-20)",
+  "fix": "OPENCODE_CORP_MODEL_BASE_URL читается в Config.loadInstanceState до слияния слоёв; приоритет: слой выше корп-слоя > переменная > значение корп-конфига. Пустая строка и не-URL дают умолчание, не-URL пишет предупреждение в лог. Строка «Модель: <model> на <baseURL>» добавлена в corp status. Коммит 6be9198."
 }

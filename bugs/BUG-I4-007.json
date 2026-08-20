@@ -17,7 +17,8 @@
   "suspected_area": "packages/opencode/src/provider/provider.ts (строка ~1669: `if (options[\"apiKey\"] === undefined && provider.key) options[\"apiKey\"] = provider.key` — при отсутствии записи auth-store apiKey остаётся undefined и провайдер идёт в сеть без ключа) и корп-слой: по S-C4b проверка наличия записи magnit_prod должна выполняться до обращения к модели. Гипотеза, не приговор.",
   "impact": "Целевой сценарий заказчика деградирует до непонятной ошибки: пользователь, не прошедший вход, получает не «войдите через SSO», а ответ сервиса ключей (401) или, как в тесте с моком, обычный ответ модели. На стороне LiteLLM это неучтённые запросы без ключа.",
   "iteration": 1,
-  "status": "open",
+  "status": "fixed",
   "found_by": "TEST-AGENT, тесты ревизии 1.5 спеки (S-C4b, D-21)",
-  "notes": "Перенумерован из BUG-I4-005: этот номер уже занят на ветке pipeline/i3-hub-oauth-facade-proxy (непригодный как HTTP-заголовок токен коннектора)."
+  "notes": "Перенумерован из BUG-I4-005: этот номер уже занят на ветке pipeline/i3-hub-oauth-facade-proxy (непригодный как HTTP-заголовок токен коннектора).",
+  "fix": "CorpModel.guard в Provider.getModel: без ключа в auth-store запрос к LiteLLM не отправляется. Чат отдаёт 400 с причиной «Вход через корпоративный SSO не выполнен» и действием, opencode run — код 1. MAGNIT_COPILOT_KEY не читается нигде. Коммит 0472a03."
 }
