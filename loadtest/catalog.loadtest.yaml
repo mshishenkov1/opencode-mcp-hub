@@ -1,0 +1,78 @@
+# Каталог для нагрузочных прогонов (D6-08, D6-10).
+#
+# Все upstream и все OAuth-эндпоинты указывают на мок (loadtest/mock_upstream):
+# нагрузочный контур не может обратиться ни в одну боевую систему. Список
+# допустимых хостов проверяет loadtest/tools/check_no_prod.sh.
+version: 1
+
+defaults:
+  permission_presets:
+    readonly: { label: "Только чтение", default: true }
+    readwrite: { label: "Чтение и запись" }
+
+servers:
+  # Профиль «GitLab MCP AI Lab»: header_groups, много инструментов, ротация токенов.
+  - alias: gitlab
+    title: "GitLab (мок нагрузочного стенда)"
+    description: "Мок upstream вместо GitLab MCP AI Lab."
+    owner: "loadtest"
+    contact: "http://localhost:8080/health"
+    docs_url: "http://localhost:8080/health"
+    status: beta
+    audience: ["all"]
+    mode: facade
+    upstream_url: "${LOADTEST_UPSTREAM_URL}"
+    auth:
+      type: oauth2
+      authorize_url: "${LOADTEST_UPSTREAM_AUTHORIZE_URL}"
+      token_url: "${LOADTEST_UPSTREAM_TOKEN_URL}"
+      revoke_url: "${LOADTEST_UPSTREAM_REVOKE_URL}"
+      client_id: "${LOADTEST_CLIENT_ID}"
+      client_secret: "env:LOADTEST_CLIENT_SECRET"
+      pkce: true
+      scopes:
+        readonly: ["read_api", "read_user", "read_repository"]
+        readwrite: ["api", "read_user"]
+    credential_headers:
+      Authorization: "Bearer {{access_token}}"
+    permission_model:
+      kind: header_groups
+      header: Enabled-Groups
+      always: ["core"]
+      groups:
+        - { id: code_review, title: "Code review", preset: readonly }
+        - { id: devops, title: "DevOps", preset: readonly }
+        - { id: users, title: "Пользователи", preset: readonly }
+        - { id: repo_write, title: "Запись в репозиторий", preset: readwrite }
+        - { id: issue_management, title: "Issues", preset: readwrite }
+
+  # Профиль «Atlassian MCP»: другой набор credential-заголовков и групп.
+  - alias: jira
+    title: "Jira (мок нагрузочного стенда)"
+    description: "Мок upstream вместо Atlassian MCP."
+    owner: "loadtest"
+    contact: "http://localhost:8080/health"
+    docs_url: "http://localhost:8080/health"
+    status: beta
+    audience: ["all"]
+    mode: facade
+    upstream_url: "${LOADTEST_UPSTREAM_URL}"
+    auth:
+      type: oauth2
+      authorize_url: "${LOADTEST_UPSTREAM_AUTHORIZE_URL}"
+      token_url: "${LOADTEST_UPSTREAM_TOKEN_URL}"
+      client_id: "${LOADTEST_CLIENT_ID}"
+      client_secret: "env:LOADTEST_CLIENT_SECRET"
+      pkce: true
+      scopes:
+        readonly: ["READ"]
+        readwrite: ["WRITE"]
+    credential_headers:
+      X-Atlassian-Jira-Personal-Token: "{{access_token}}"
+      X-Atlassian-Jira-Url: "http://localhost:8080"
+    permission_model:
+      kind: header_groups
+      header: Enabled-Groups
+      groups:
+        - { id: jira_read, title: "Чтение задач", preset: readonly }
+        - { id: jira_write, title: "Изменение задач", preset: readwrite }

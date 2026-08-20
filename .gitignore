@@ -13,3 +13,4 @@ htmlcov/
 deploy/.env
 deploy/caddy/certs/
 *.egg-info/
+loadtest/.seed/

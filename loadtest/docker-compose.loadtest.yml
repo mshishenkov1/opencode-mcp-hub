@@ -1,0 +1,114 @@
+# Нагрузочный контур (D6-08…D6-10): Hub, Postgres, Redis и мок upstream.
+#
+#   docker compose -f loadtest/docker-compose.loadtest.yml -p hubload up -d --build
+#   docker compose -f loadtest/docker-compose.loadtest.yml -p hubload down -v
+#
+# Контур изолирован от боевых систем: единственный внешний адрес каталога —
+# mock-upstream, LiteLLM тоже указывает на мок. Проверка — loadtest/tools/check_no_prod.sh.
+# Ключи ниже — заведомо публичные, годятся только для нагрузочного прогона.
+#
+# k6 запускается с хоста (brew install k6) и ходит на http://localhost:8000,
+# поэтому HUB_PUBLIC_URL — тоже localhost:8000: aud access-токенов Hub обязан
+# совпадать с адресом, по которому к нему обращается клиент.
+services:
+  hub:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.hub
+    image: opencode-mcp-hub/hub:dev
+    ports:
+      - "${LOADTEST_HUB_PORT:-8000}:8000"
+    environment:
+      HUB_PUBLIC_URL: http://localhost:${LOADTEST_HUB_PORT:-8000}
+      HUB_DATABASE_URL: postgresql+asyncpg://hub:hub@postgres:5432/hub
+      HUB_REDIS_URL: redis://redis:6379/0
+      HUB_CATALOG_PATH: /app/catalog.loadtest.yaml
+      HUB_SECRET_KEY: zJcrbCiBSUaTSkQkK30tDMYDxeST8846fu9373dWE2I=
+      HUB_ENCRYPTION_KEY: j7PECAceMkzWqN9vzEcgX4QruWG54odGOB0oeT0q3Ws=
+      HUB_LOG_LEVEL: ${LOADTEST_LOG_LEVEL:-WARNING}
+      HUB_DB_AUTO_MIGRATE: "true"
+      # Вход и веб не участвуют в прогоне; адрес указывает на мок, чтобы Hub
+      # физически не мог обратиться к настоящему LiteLLM.
+      HUB_LITELLM_BASE_URL: http://mock-upstream:8080
+      HUB_WEB_AUTH: litellm
+      # Лимиты сняты: измеряется пропускная способность, а не работа rate-limiter'а.
+      # Отдельный прогон с боевыми лимитами — см. loadtest/README.md.
+      HUB_RATE_LIMIT_MCP: "1000000"
+      HUB_RATE_LIMIT_TOKEN: "1000000"
+      HUB_RATE_LIMIT_REGISTER: "1000000"
+      HUB_MAX_SSE_PER_USER: "64"
+      # Фоновое обновление токенов выключено: refresh проверяется сценарием (в).
+      HUB_TOKEN_REFRESH_ENABLED: "false"
+      HUB_CLIENT_SESSION_TTL: "86400"
+      HUB_UPSTREAM_IDLE_TTL: "86400"
+      # Адреса «целевой системы» для catalog.loadtest.yaml — только мок.
+      LOADTEST_UPSTREAM_URL: http://mock-upstream:8080/mcp
+      LOADTEST_UPSTREAM_AUTHORIZE_URL: http://mock-upstream:8080/oauth/authorize
+      LOADTEST_UPSTREAM_TOKEN_URL: http://mock-upstream:8080/oauth/token
+      LOADTEST_UPSTREAM_REVOKE_URL: http://mock-upstream:8080/oauth/revoke
+      LOADTEST_CLIENT_ID: loadtest-client
+      LOADTEST_CLIENT_SECRET: loadtest-secret
+    volumes:
+      - ./catalog.loadtest.yaml:/app/catalog.loadtest.yaml:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      mock-upstream: { condition: service_healthy }
+    deploy:
+      replicas: ${LOADTEST_HUB_REPLICAS:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  mock-upstream:
+    build:
+      context: ./mock_upstream
+    image: opencode-mcp-hub/mock-upstream:dev
+    ports:
+      - "${LOADTEST_MOCK_PORT:-8080}:8080"
+    environment:
+      # Ноль задержки: тогда время ответа Hub — это и есть добавка proxy
+      # плюс измеряемая отдельно собственная латентность мока (сценарий direct).
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-0}
+      MOCK_LATENCY_JITTER_MS: ${MOCK_LATENCY_JITTER_MS:-0}
+      MOCK_TOOLS: ${MOCK_TOOLS:-30}
+      MOCK_FAIL_RATE: ${MOCK_FAIL_RATE:-0}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hub
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: hub
+    ports:
+      - "${LOADTEST_PG_PORT:-55432}:5432"
+    volumes:
+      - loadpgdata:/var/lib/postgresql/data
+    command:
+      # Нагрузочный контур: данные одноразовые, fsync не нужен и мешает измерению.
+      ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "max_connections=300"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hub -d hub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${LOADTEST_REDIS_PORT:-56379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  loadpgdata:
