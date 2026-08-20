@@ -28,7 +28,7 @@ install_previous_version() {
   run diff "$BATS_TEST_TMPDIR/after1" "$BATS_TEST_TMPDIR/after2"
   assert_status 0
   [ "$(count_lines_with "$HOME/.zshrc" "# >>> opencode-magnit >>>")" = "1" ]
-  [ "$(count_lines_with "$HOME/.zshrc" "export PATH=\"$(bin_dir_path):")" = "1" ]
+  [ "$(count_lines_with "$HOME/.zshrc" "export PATH='$(bin_dir_path)':")" = "1" ]
   run find "$(config_dir_path)" -name 'opencode.json.bak'
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = "1" ]
 }

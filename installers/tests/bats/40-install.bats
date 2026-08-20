@@ -109,7 +109,7 @@ setup() {
 @test "AC-56: bin_dir не в PATH → строка export PATH в блоке профиля и пункт «Откройте новый терминал»" {
   oc_run --no-launch
   assert_status 0
-  assert_file_contains "$HOME/.zshrc" "export PATH=\"$(bin_dir_path):\$PATH\""
+  assert_file_contains "$HOME/.zshrc" "export PATH='$(bin_dir_path)':\"\$PATH\""
   assert_output_contains "1. Откройте новый терминал"
   assert_output_contains "PATH: добавлен $(bin_dir_path)"
 }

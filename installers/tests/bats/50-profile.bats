@@ -20,8 +20,17 @@ block_count() {
   [ -f "$HOME/.zshrc" ]
   [ "$(block_count "$HOME/.zshrc")" = "1" ]
   assert_file_contains "$HOME/.zshrc" "# >>> opencode-magnit >>>"
-  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS=\"$(config_dir_path)/tander-ca-bundle.pem\""
+  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS='$(config_dir_path)/tander-ca-bundle.pem'"
   assert_file_contains "$HOME/.zshrc" "# <<< opencode-magnit <<<"
+  # Ревизия 1.5 (N5-I13): значение печатается в ОДИНАРНЫХ кавычках; двойных кавычек вокруг
+  # значения в блоке нет. Единственные допустимые двойные кавычки в блоке — вокруг "$PATH".
+  local block
+  block=$(sed -n '/# >>> opencode-magnit >>>/,/# <<< opencode-magnit <<</p' "$HOME/.zshrc")
+  printf '%s\n' "$block" | grep -F 'NODE_EXTRA_CA_CERTS' | grep -F -q '"' && {
+    printf 'В строке NODE_EXTRA_CA_CERTS блока есть двойные кавычки:\n%s\n' "$block" >&2
+    return 1
+  }
+  return 0
 }
 
 @test "AC-42: повторный запуск оставляет ровно один блок и не дублирует строку PATH" {
@@ -32,7 +41,7 @@ block_count() {
   assert_status 0
   [ "$(block_count "$HOME/.zshrc")" = "1" ]
   [ "$(count_lines_with "$HOME/.zshrc" "# <<< opencode-magnit <<<")" = "1" ]
-  [ "$(count_lines_with "$HOME/.zshrc" "export PATH=\"$(bin_dir_path):")" = "1" ]
+  [ "$(count_lines_with "$HOME/.zshrc" "export PATH='$(bin_dir_path)':")" = "1" ]
   [ "$(count_lines_with "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS=")" = "1" ]
 }
 
@@ -109,8 +118,10 @@ block_count() {
   local f="$HOME/.config/fish/conf.d/opencode-magnit.fish"
   [ -f "$f" ]
   [ "$(block_count "$f")" = "1" ]
-  assert_file_contains "$f" "set -gx NODE_EXTRA_CA_CERTS \"$(config_dir_path)/tander-ca-bundle.pem\""
-  assert_file_contains "$f" "fish_add_path \"$(bin_dir_path)\""
+  assert_file_contains "$f" "set -gx NODE_EXTRA_CA_CERTS '$(config_dir_path)/tander-ca-bundle.pem'"
+  assert_file_contains "$f" "fish_add_path '$(bin_dir_path)'"
+  # Ревизия 1.5 (N5-I13): в fish-профиле двойных кавычек нет вовсе.
+  refute_file_contains "$f" '"'
   [ ! -e "$HOME/.zshrc" ]
   [ ! -e "$HOME/.bashrc" ]
   [ ! -e "$HOME/.profile" ]
@@ -163,7 +174,7 @@ PROFILE
   [ "$(count_lines_with "$HOME/.zshrc" "# <<< opencode-magnit <<<")" = "1" ]
   [ "$(count_lines_with "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS=")" = "1" ]
   # Содержимое блока обновлено на актуальное значение, устаревшее ушло.
-  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS=\"$(config_dir_path)/tander-ca-bundle.pem\""
+  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS='$(config_dir_path)/tander-ca-bundle.pem'"
   refute_file_contains "$HOME/.zshrc" "/stale/ca.pem"
   # Позиция: блок остался на месте первого — между USER_ONE и USER_TWO, а не уехал в конец файла.
   local n_one n_block n_two n_three
