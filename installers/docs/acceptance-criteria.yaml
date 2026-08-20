@@ -1,0 +1,1275 @@
+# Критерии приёмки I-5: установщики и пакет для портала
+# Спецификация: installers/docs/spec.md
+# Формат: id, rule (правила спецификации), type (unit|integration|manual|ci), given/when/then.
+#
+# type:
+#   unit        — проверка отдельной функции/разбора/валидации (bats-хелперы, Pester на pwsh)
+#   integration — полный прогон установщика в фейковом $HOME/--prefix, без sudo и без сети
+#   manual      — требует Windows-стенда (D-9), macOS с Desktop-артефактом или реального GUI-сеанса
+#   ci          — проверяется заданием конвейера (lint, наличие файлов, прогон release.sh)
+#
+# Критерии AC-01…AC-134 относятся к установщикам (правила N5-*).
+# Критерии HAC-01…HAC-12 — отдельный раздел hub_backlog_criteria: бэклог Hub (правила H5-*),
+# реализуется в репозитории Hub, ветка pipeline/i3-hub-oauth-facade-proxy (I-3+), НЕ в installers/.
+
+version: 1.0
+spec: installers/docs/spec.md
+criteria:
+
+  # ---------------------------------------------------------- N5-P*: пакет, манифест, репозиторий
+  - id: AC-01
+    rule: [N5-P1]
+    type: ci
+    given: репозиторий на ветке итерации I-5
+    when: перечислено содержимое каталога installers/
+    then: >
+      присутствуют common/install-posix.sh, common/manifest.schema.json,
+      common/manifest.example.json, macos/install.sh, linux/install.sh, windows/install.ps1,
+      windows/install.bat, release.sh, ci/installers.yml, docs/install-user.md,
+      docs/install-admin.md, tests/bats/, tests/pester/, tests/fixtures/;
+      macos/install.sh и linux/install.sh не содержат логики установки (короче 20 строк каждый)
+      и передают управление common/install-posix.sh
+
+  - id: AC-02
+    rule: [N5-P2]
+    type: integration
+    given: собранный пакет opencode-magnit-linux-x64-1.17.9-magnit.1 распакован
+    when: перечислено содержимое каталога пакета
+    then: >
+      есть install.sh с исполняемым битом, common/install-posix.sh, common/manifest.json,
+      bin/opencode, certs/tander-ca-bundle.pem, README.md; каталога windows-установщиков нет
+
+  - id: AC-03
+    rule: [N5-P2]
+    type: integration
+    given: пакет распакован в /tmp/pkg, текущий каталог — домашний каталог пользователя
+    when: выполнено `bash /tmp/pkg/install.sh --check`
+    then: манифест найден по пути /tmp/pkg/common/manifest.json, отчёт напечатан, код выхода 0 или 7
+
+  - id: AC-04
+    rule: [N5-P3]
+    type: unit
+    given: файл installers/common/manifest.example.json и схема common/manifest.schema.json
+    when: пример проверен по схеме
+    then: >
+      пример валиден; в нём есть schema=1, product="opencode-magnit", version, os, arch, hub_url,
+      built_at, source_release, ca{file,sha256,install_name}, artifacts[], purge_paths[]
+
+  - id: AC-05
+    rule: [N5-P3, N5-P4]
+    type: unit
+    given: манифест с двумя артефактами kind="cli"
+    when: манифест проверен установщиком
+    then: >
+      проверка не пройдена, сообщение называет поле artifacts, код выхода 2; тот же результат
+      для манифеста с двумя артефактами kind="desktop" и для манифеста без артефакта kind="cli"
+
+  - id: AC-06
+    rule: [N5-P4]
+    type: integration
+    given: каталог пакета без файла common/manifest.json
+    when: запущен install.sh
+    then: в stderr сообщение с путём к ожидаемому манифесту, код выхода 2, ни один файл в $HOME не создан
+
+  - id: AC-07
+    rule: [N5-P4]
+    type: integration
+    given: common/manifest.json содержит текст, не являющийся JSON
+    when: запущен install.sh
+    then: сообщение об ошибке разбора с путём к манифесту, код выхода 2, ничего не установлено
+
+  - id: AC-08
+    rule: [N5-P4]
+    type: unit
+    given: манифест с полем schema=2
+    when: манифест проверен
+    then: сообщение называет поле schema и ожидаемое значение 1, код выхода 2
+
+  - id: AC-09
+    rule: [N5-P4]
+    type: unit
+    given: манифест без поля version (и, в отдельном прогоне, с пустым version)
+    when: манифест проверен
+    then: сообщение называет поле version, код выхода 2
+
+  - id: AC-10
+    rule: [N5-P4]
+    type: unit
+    given: манифест, где sha256 CLI-артефакта состоит из 63 символов (в отдельном прогоне — содержит "Z")
+    when: манифест проверен
+    then: сообщение называет поле sha256 и требование «64 символа [0-9a-f]», код выхода 2
+
+  - id: AC-11
+    rule: [N5-P4, N5-P3]
+    type: unit
+    given: манифест, где file равен "../../etc/passwd" (в отдельных прогонах — "/etc/passwd", "C:\\x")
+    when: манифест проверен
+    then: во всех трёх случаях проверка не пройдена, код выхода 2, файл по указанному пути не читается
+
+  - id: AC-12
+    rule: [N5-P4]
+    type: integration
+    given: снимок фейкового $HOME до запуска и невалидный манифест
+    when: запущен install.sh и снят повторный снимок $HOME
+    then: снимки совпадают побайтово — ни файл, ни каталог, ни профиль shell не изменены
+
+  - id: AC-13
+    rule: [N5-P5]
+    type: integration
+    given: пакет, в котором bin/opencode изменён после генерации манифеста
+    when: запущен install.sh
+    then: >
+      сообщение содержит имя файла, ожидаемый и фактический sha256; бинарник в bin_dir не появился;
+      код выхода 4
+
+  - id: AC-14
+    rule: [N5-P5]
+    type: integration
+    given: пакет, в котором certs/tander-ca-bundle.pem не соответствует ca.sha256
+    when: запущен install.sh
+    then: CA не скопирован в каталог конфига, профиль shell не изменён, код выхода 4
+
+  - id: AC-15
+    rule: [N5-P5]
+    type: integration
+    given: PATH, в котором нет ни sha256sum, ни shasum, ни openssl
+    when: запущен install.sh
+    then: сообщение перечисляет все три искомые утилиты, код выхода 3, ничего не установлено
+
+  - id: AC-16
+    rule: [N5-P5]
+    type: unit
+    given: манифест, где sha256 записан заглавными буквами, и корректный файл
+    when: выполнено сравнение хешей
+    then: хеши признаны совпавшими, установка продолжается
+
+  - id: AC-17
+    rule: [N5-P5, N5-I1]
+    type: integration
+    given: пакет с неверным хешем бинарника
+    when: запущен install.sh --skip-hash-check (и --no-verify)
+    then: аргумент не распознан, код выхода 2, установка не выполнена — флага пропуска проверки не существует
+
+  - id: AC-18
+    rule: [N5-P6]
+    type: ci
+    given: исходники installers/**/*.sh, *.ps1, *.bat, release.sh
+    when: выполнен поиск curl, wget, nc, Invoke-WebRequest, Invoke-RestMethod, WebClient, git, npm, brew, apt, winget, choco
+    then: совпадений нет ни в одном файле
+
+  - id: AC-19
+    rule: [N5-P6]
+    type: integration
+    given: среда без доступа к сети (все исходящие соединения блокируются) и корректный пакет
+    when: выполнен полный прогон install.sh --no-launch
+    then: установка завершается кодом 0, бинарник и CA на месте, ни одной ошибки о сети в выводе
+
+  - id: AC-20
+    rule: [N5-P7]
+    type: ci
+    given: архив, собранный release.sh
+    when: сопоставлены имя архива и поля манифеста внутри него
+    then: >
+      имя равно opencode-magnit-<os>-<arch>-<version> с os/arch/version из манифеста; версия,
+      которую печатает установленный бинарник по --version, равна той же строке
+
+  - id: AC-21
+    rule: [N5-P7, N5-B2]
+    type: ci
+    given: сборка для целей darwin-arm64, linux-x64 и windows-x64
+    when: перечислены собранные архивы
+    then: для darwin и linux расширение .tar.gz, для windows — .zip
+
+  - id: AC-22
+    rule: [N5-P8]
+    type: integration
+    given: пакет, где certs/tander-ca-bundle.pem — синтаксически некорректный PEM, но его sha256 верен
+    when: запущен install.sh
+    then: файл установлен без замечаний, код выхода 0 — установщик проверяет только целостность, но не содержимое CA
+
+  # ---------------------------------------------------------- N5-I1, N5-I2: общий контракт
+  - id: AC-23
+    rule: [N5-I1]
+    type: integration
+    given: любой корректный пакет
+    when: запущен install.sh --help
+    then: справка со всеми флагами напечатана в stdout, код выхода 0, $HOME не изменён
+
+  - id: AC-24
+    rule: [N5-I1]
+    type: integration
+    given: манифест с version=1.17.9-magnit.1, os=linux, arch=x64
+    when: запущен install.sh --version
+    then: напечатано ровно `opencode-magnit 1.17.9-magnit.1 (linux-x64)`, код выхода 0
+
+  - id: AC-25
+    rule: [N5-I1]
+    type: integration
+    given: корректный пакет
+    when: запущен install.sh --wat
+    then: справка напечатана в stderr, код выхода 2, ничего не изменено
+
+  - id: AC-26
+    rule: [N5-I1]
+    type: unit
+    given: аргументы --dry-run --check
+    when: выполнен разбор аргументов
+    then: сообщение о взаимоисключающих режимах, код выхода 2
+
+  - id: AC-27
+    rule: [N5-I1]
+    type: unit
+    given: аргументы --check --uninstall
+    when: выполнен разбор аргументов
+    then: сообщение о взаимоисключающих режимах, код выхода 2
+
+  - id: AC-28
+    rule: [N5-I1]
+    type: unit
+    given: аргументы --system --prefix /opt/x
+    when: выполнен разбор аргументов
+    then: сообщение о взаимоисключающих режимах, код выхода 2
+
+  - id: AC-29
+    rule: [N5-I1, N5-C1]
+    type: integration
+    given: установленный пакет
+    when: запущен install.sh --dry-run --uninstall
+    then: напечатан план удаления, ни один файл не удалён, код выхода 0
+
+  - id: AC-30
+    rule: [N5-I1]
+    type: integration
+    given: stdin закрыт (`< /dev/null`), терминала нет
+    when: выполнен полный прогон install.sh --no-launch
+    then: установка завершается кодом 0 без ожидания ввода — интерактивных вопросов нет ни в одном режиме
+
+  - id: AC-31
+    rule: [N5-I2]
+    type: manual
+    given: Windows-стенд с политикой выполнения Restricted
+    when: выполнен двойной клик по install.bat (и запуск `install.bat -Check` из cmd)
+    then: >
+      install.ps1 выполняется (ExecutionPolicy Bypass), русские строки отчёта читаемы,
+      код выхода cmd равен коду выхода install.ps1
+
+  - id: AC-32
+    rule: [N5-I2, N5-T6]
+    type: unit
+    given: файл installers/windows/install.bat
+    when: проверены байты файла
+    then: >
+      все байты < 0x80 (только ASCII); файл содержит вызов powershell -NoProfile -ExecutionPolicy
+      Bypass -File "%~dp0install.ps1" %* и `exit /b %ERRORLEVEL%`
+
+  - id: AC-33
+    rule: [N5-I3]
+    type: integration
+    given: манифест с os="darwin" на машине с uname -s = Linux
+    when: запущен install.sh
+    then: сообщение содержит обе пары «пакет darwin-…» и «система linux-…», код выхода 3, ничего не установлено
+
+  - id: AC-34
+    rule: [N5-I3]
+    type: integration
+    given: манифест с arch="x64" на машине с uname -m = arm64
+    when: запущен install.sh
+    then: код выхода 3, установка не выполняется — запуск сборки другой архитектуры не допускается
+
+  - id: AC-35
+    rule: [N5-I3]
+    type: manual
+    given: Windows с PowerShell 5.0
+    when: запущен install.ps1
+    then: сообщение с найденной версией и требуемой 5.1, код выхода 3, ничего не установлено
+
+  - id: AC-36
+    rule: [N5-I3]
+    type: unit
+    given: значения uname -m = aarch64, x86_64, amd64, armv7l
+    when: выполнена нормализация архитектуры
+    then: получены arm64, x64, x64 и отказ (код 3) соответственно
+
+  # ---------------------------------------------------------- N5-I4…N5-I6: CA
+  - id: AC-37
+    rule: [N5-I4]
+    type: integration
+    given: фейковый $HOME без каталога .config/opencode
+    when: выполнен install.sh --no-launch
+    then: >
+      создан каталог $HOME/.config/opencode с правами 0755, в нём файл tander-ca-bundle.pem
+      с правами 0644 и содержимым, совпадающим с certs/ пакета
+
+  - id: AC-38
+    rule: [N5-I4, N5-U3]
+    type: integration
+    given: CA уже установлен и его sha256 совпадает с манифестом; зафиксирован mtime файла
+    when: выполнен install.sh --no-launch
+    then: "в отчёте строка `CA: уже установлен`, mtime файла не изменился"
+
+  - id: AC-39
+    rule: [N5-I4]
+    type: integration
+    given: в каталоге конфига лежит устаревший tander-ca-bundle.pem с другим содержимым
+    when: выполнен install.sh --no-launch
+    then: файл перезаписан содержимым из пакета, резервная копия CA не создаётся
+
+  - id: AC-40
+    rule: [N5-I4]
+    type: integration
+    given: XDG_CONFIG_HOME=$HOME/xdg
+    when: выполнен install.sh --no-launch
+    then: CA установлен в $HOME/xdg/opencode/tander-ca-bundle.pem, каталог $HOME/.config не создан
+
+  - id: AC-41
+    rule: [N5-I5]
+    type: integration
+    given: SHELL=/bin/zsh, файл ~/.zshrc отсутствует
+    when: выполнен install.sh --no-launch
+    then: >
+      создан ~/.zshrc, в нём ровно один блок между `# >>> opencode-magnit >>>` и
+      `# <<< opencode-magnit <<<` со строкой export NODE_EXTRA_CA_CERTS="<config_dir>/tander-ca-bundle.pem"
+
+  - id: AC-42
+    rule: [N5-I5, N5-U1]
+    type: integration
+    given: установка уже выполнена, профиль содержит блок
+    when: install.sh запущен второй раз
+    then: в файле профиля по-прежнему ровно один блок с маркерами, строка PATH не продублирована
+
+  - id: AC-43
+    rule: [N5-I5]
+    type: integration
+    given: блок в профиле уже содержит ровно те строки, которые записал бы установщик; зафиксирован mtime
+    when: install.sh запущен повторно
+    then: mtime файла профиля не изменился — файл не переписывается без необходимости
+
+  - id: AC-44
+    rule: [N5-I5]
+    type: integration
+    given: существующий ~/.zshrc с пользовательскими строками, блока установщика нет
+    when: install.sh выполнен дважды
+    then: >
+      создан ровно один ~/.zshrc.opencode-magnit.bak с исходным содержимым; после второго запуска
+      его содержимое не изменилось
+
+  - id: AC-45
+    rule: [N5-I5]
+    type: integration
+    given: SHELL=/bin/bash на linux, SHELL=/bin/bash на macos, SHELL пустой
+    when: выполнен install.sh --no-launch в каждом случае
+    then: правится ~/.bashrc, ~/.bash_profile и ~/.profile соответственно, и ровно один файл за запуск
+
+  - id: AC-46
+    rule: [N5-I5]
+    type: integration
+    given: SHELL=/usr/local/bin/fish
+    when: выполнен install.sh --no-launch
+    then: >
+      создан ~/.config/fish/conf.d/opencode-magnit.fish с блоком маркеров и строкой
+      set -gx NODE_EXTRA_CA_CERTS <путь>; файлы ~/.zshrc, ~/.bashrc, ~/.profile не изменены
+
+  - id: AC-47
+    rule: [N5-I5]
+    type: integration
+    given: ~/.zshrc содержит собственную строку export NODE_EXTRA_CA_CERTS=/other/ca.pem вне блока
+    when: выполнен install.sh --no-launch
+    then: >
+      чужая строка сохранена без изменений, наш блок дописан в конец файла, в отчёте предупреждение
+      с именем файла и номером строки; код выхода 0
+
+  - id: AC-48
+    rule: [N5-I5, N5-I7]
+    type: integration
+    given: bin_dir уже присутствует в $PATH процесса
+    when: выполнен install.sh --no-launch
+    then: в блоке профиля строки export PATH нет, строка NODE_EXTRA_CA_CERTS есть
+
+  - id: AC-49
+    rule: [N5-I6]
+    type: manual
+    given: Windows-стенд без переменной NODE_EXTRA_CA_CERTS
+    when: выполнен install.ps1
+    then: >
+      переменная пользователя NODE_EXTRA_CA_CERTS равна %USERPROFILE%\.config\opencode\tander-ca-bundle.pem;
+      переменная уровня Machine не создана; права администратора не запрашивались
+
+  - id: AC-50
+    rule: [N5-I6, N5-U1]
+    type: manual
+    given: переменная пользователя уже равна целевому значению
+    when: install.ps1 запущен повторно
+    then: "запись в реестр не выполняется, в отчёте строка `NODE_EXTRA_CA_CERTS: уже задан`"
+
+  # ---------------------------------------------------------- N5-I7, N5-I8: бинарник и PATH
+  - id: AC-51
+    rule: [N5-I7]
+    type: integration
+    given: фейковый $HOME без каталога .local/bin
+    when: выполнен install.sh --no-launch
+    then: создан $HOME/.local/bin, в нём файл opencode с правами 0755 и содержимым из bin/ пакета
+
+  - id: AC-52
+    rule: [N5-I7]
+    type: integration
+    given: чистая установка
+    when: установка завершена
+    then: >
+      в bin_dir нет файлов вида .opencode.new.*; при принудительном прерывании установки после
+      копирования временного файла целевой opencode остаётся прежней версии (не повреждён)
+
+  - id: AC-53
+    rule: [N5-I7]
+    type: integration
+    given: каталог bin_dir существует и снят бит записи (chmod 0555)
+    when: выполнен install.sh --no-launch
+    then: код выхода 5, сообщение называет каталог, sudo не вызывался, бинарник не заменён
+
+  - id: AC-54
+    rule: [N5-I7]
+    type: integration
+    given: запуск не под root, sudo в PATH отсутствует
+    when: выполнен install.sh --system
+    then: >
+      код выхода 5, сообщение содержит подсказку запустить под root или без --system
+      (установка в $HOME/.local/bin)
+
+  - id: AC-55
+    rule: [N5-I1, N5-I7]
+    type: integration
+    given: --prefix $TMPDIR/opt
+    when: выполнен install.sh --prefix "$TMPDIR/opt" --no-launch
+    then: бинарник установлен в $TMPDIR/opt/bin/opencode, каталог $HOME/.local/bin не создан
+
+  - id: AC-56
+    rule: [N5-I7, N5-I12]
+    type: integration
+    given: bin_dir не входит в $PATH
+    when: выполнен install.sh --no-launch
+    then: в блоке профиля есть строка export PATH с bin_dir, в отчёте есть пункт «Откройте новый терминал»
+
+  - id: AC-57
+    rule: [N5-I8, N5-U2]
+    type: manual
+    given: Windows-стенд с уже установленным opencode.exe другой версии
+    when: выполнен install.ps1
+    then: прежний файл сохранён как opencode.exe.bak, новый opencode.exe установлен, код выхода 0
+
+  - id: AC-58
+    rule: [N5-I8]
+    type: manual
+    given: Windows-стенд, файл opencode.exe заблокирован сторонним процессом (переименование невозможно)
+    when: выполнен install.ps1
+    then: "код выхода 6, сообщение «файл занят: закройте OpenCode и повторите запуск», новый файл не записан"
+
+  - id: AC-59
+    rule: [N5-I8]
+    type: manual
+    given: User PATH в реестре имеет тип REG_EXPAND_SZ и содержит %USERPROFILE%\bin
+    when: выполнен install.ps1
+    then: >
+      после установки значение по-прежнему типа REG_EXPAND_SZ и содержит неразвёрнутую строку
+      %USERPROFILE%\bin, а также добавленный каталог установки
+
+  - id: AC-60
+    rule: [N5-I8, N5-U1]
+    type: manual
+    given: каталог установки уже есть в User PATH (в другом регистре и с завершающим обратным слэшем)
+    when: install.ps1 запущен повторно
+    then: PATH не изменён, дубликат не добавлен
+
+  - id: AC-61
+    rule: [N5-I8]
+    type: manual
+    given: рассылка WM_SETTINGCHANGE завершилась таймаутом
+    when: выполнен install.ps1
+    then: в отчёте предупреждение, установка считается успешной, код выхода 0
+
+  # ---------------------------------------------------------- N5-I9, N5-I10: Desktop
+  - id: AC-62
+    rule: [N5-I9]
+    type: manual
+    given: пакет darwin-arm64 с артефактом kind="desktop", installer_type="dmg"
+    when: выполнен install.sh (в отдельном прогоне — при искусственной ошибке копирования)
+    then: >
+      приложение скопировано в /Applications/OpenCode.app; в обоих прогонах образ отмонтирован
+      (hdiutil info не показывает точку монтирования пакета)
+
+  - id: AC-63
+    rule: [N5-I9]
+    type: manual
+    given: нет прав на запись в /Applications, флаг --system не задан
+    when: выполнен install.sh
+    then: приложение установлено в ~/Applications, в отчёте предупреждение, код выхода 0
+
+  - id: AC-64
+    rule: [N5-I9, N5-U3]
+    type: manual
+    given: /Applications/OpenCode.app уже той же версии, что в пакете
+    when: выполнен install.sh
+    then: "образ не монтируется, в отчёте строка `Desktop: уже установлен`"
+
+  - id: AC-65
+    rule: [N5-I10]
+    type: manual
+    given: Windows-пакет с desktop-артефактом и silent_args ["/S"]
+    when: выполнен install.ps1
+    then: штатный установщик запущен с аргументом /S и дождался завершения, приложение установлено
+
+  - id: AC-66
+    rule: [N5-I10]
+    type: integration
+    given: Windows-манифест с desktop-артефактом без поля silent_args
+    when: построен план установки (dry-run на pwsh)
+    then: >
+      в плане строка `Desktop: запустите установщик вручную` с абсолютным путём к файлу,
+      запуска установщика в плане нет, код выхода 0
+
+  - id: AC-67
+    rule: [N5-I10]
+    type: manual
+    given: штатный установщик Desktop завершается кодом 1
+    when: выполнен install.ps1
+    then: >
+      в отчёте строка `Desktop: ошибка (код 1)`, общий код выхода 1; при этом opencode.exe,
+      CA и переменная пользователя остаются установленными (откат не выполняется)
+
+  - id: AC-68
+    rule: [N5-I10]
+    type: integration
+    given: манифест linux-x64 без артефакта kind="desktop"
+    when: выполнен install.sh --no-launch
+    then: "в отчёте строка `Desktop: не входит в пакет`, код выхода 0"
+
+  - id: AC-69
+    rule: [N5-I10, N5-I1]
+    type: integration
+    given: пакет с desktop-артефактом
+    when: выполнен install.sh --no-desktop --no-launch
+    then: "в отчёте строка `Desktop: пропущен (--no-desktop)`, установщик Desktop не запускался, код выхода 0"
+
+  # ---------------------------------------------------------- N5-I11, N5-I12: конфиг и итог
+  - id: AC-70
+    rule: [N5-I11]
+    type: integration
+    given: существующий $HOME/.config/opencode/opencode.json с пользовательскими настройками
+    when: выполнен install.sh --no-launch
+    then: >
+      opencode.json побайтово не изменён; рядом создан opencode.json.bak с тем же содержимым;
+      в отчёте строка `Конфиг: <путь> (не изменялся)`
+
+  - id: AC-71
+    rule: [N5-I11, N5-U1]
+    type: integration
+    given: opencode.json.bak уже существует и отличается от текущего opencode.json
+    when: install.sh запущен повторно
+    then: opencode.json.bak не перезаписан — сохранена ранее сделанная копия
+
+  - id: AC-72
+    rule: [N5-I11]
+    type: integration
+    given: файла opencode.json нет
+    when: выполнен install.sh --no-launch
+    then: >
+      opencode.json не создан и opencode.json.bak не создан; в каталоге конфига есть только
+      установленный CA-файл
+
+  - id: AC-73
+    rule: [N5-I11]
+    type: integration
+    given: каталог данных с файлом auth.json, содержащим строку-маркер
+    when: выполнен install.sh --no-launch
+    then: >
+      auth.json не изменён и не прочитан (проверяется по atime/по отсутствию маркера в выводе);
+      в выводе установщика нет ни одной строки, похожей на ключ или токен
+
+  - id: AC-74
+    rule: [N5-I12]
+    type: integration
+    given: успешная установка пакета 1.17.9-magnit.1
+    when: прочитан stdout установщика
+    then: >
+      присутствуют строки `Готово: OpenCode 1.17.9-magnit.1 установлен.`, `  Бинарник: <путь>`,
+      `  CA: <путь>`, `  Desktop: …`, `  Конфиг: <путь> (не изменялся)`, `  Hub: <hub_url>`
+      и блок `Дальше:` — в этом порядке
+
+  - id: AC-75
+    rule: [N5-I12]
+    type: integration
+    given: bin_dir уже в PATH и блок профиля уже актуален (повторный запуск)
+    when: прочитан stdout установщика
+    then: "строки «Откройте новый терминал» нет; строка «Запустите: opencode» есть"
+
+  - id: AC-76
+    rule: [N5-I12]
+    type: integration
+    given: фикстурный бинарник, который на `corp status` печатает диагностику и завершается кодом 1
+    when: выполнен install.sh (без --no-launch)
+    then: вывод corp status напечатан, код выхода установщика 0 — код corp status игнорируется
+
+  - id: AC-77
+    rule: [N5-I12, N5-I1]
+    type: integration
+    given: фикстурный бинарник, записывающий факт вызова в файл-маркер
+    when: выполнен install.sh --no-launch
+    then: файл-маркер не создан — corp status не запускался
+
+  - id: AC-78
+    rule: [N5-I12]
+    type: integration
+    given: фикстурный бинарник, записывающий в маркер каждый свой вызов с аргументами
+    when: выполнена установка без --no-launch
+    then: >
+      в маркере ровно один вызов и он равен `corp status`; вызовов без аргументов (запуск TUI)
+      и запусков Desktop-приложения нет
+
+  # ---------------------------------------------------------- N5-U*: идемпотентность и обновление
+  - id: AC-79
+    rule: [N5-U1]
+    type: integration
+    given: чистый фейковый $HOME
+    when: install.sh --no-launch выполнен два раза подряд с одинаковыми аргументами
+    then: >
+      оба запуска завершились кодом 0; снимок $HOME после второго запуска отличается от снимка
+      после первого только метками времени; в профиле один блок, в PATH один экземпляр bin_dir,
+      ровно один opencode.json.bak
+
+  - id: AC-80
+    rule: [N5-U2]
+    type: integration
+    given: установлен бинарник версии 1.17.9-magnit.0, пакет содержит 1.17.9-magnit.1
+    when: выполнен install.sh --no-launch
+    then: >
+      $HOME/.local/bin/opencode.bak содержит прежний бинарник, opencode — новый;
+      каталог конфига, opencode.json и opencode.json.bak не изменены
+
+  - id: AC-81
+    rule: [N5-U2]
+    type: integration
+    given: уже существующий opencode.bak от предыдущего обновления
+    when: выполнено ещё одно обновление
+    then: opencode.bak содержит непосредственно предыдущую версию, файлов opencode.bak.1 и подобных нет
+
+  - id: AC-82
+    rule: [N5-U2, N5-I11]
+    type: integration
+    given: пользовательский opencode.json и auth.json существуют, выполняется обновление версии
+    when: выполнен install.sh --no-launch
+    then: оба файла побайтово не изменены
+
+  - id: AC-83
+    rule: [N5-U3]
+    type: integration
+    given: установленный бинарник, sha256 которого совпадает с манифестом; зафиксирован mtime
+    when: выполнен install.sh --no-launch
+    then: >
+      в отчёте строка `Бинарник: уже установлен (1.17.9-magnit.1)`, mtime не изменился,
+      opencode.bak не создан и не изменён
+
+  - id: AC-84
+    rule: [N5-U4]
+    type: integration
+    given: установлен 1.17.9-magnit.3, пакет содержит 1.17.9-magnit.1
+    when: выполнены install.sh --no-launch и затем install.sh --check
+    then: >
+      установлена версия из пакета (1.17.9-magnit.1); в выводе --check до установки была строка
+      `Бинарник: другая версия (установлена 1.17.9-magnit.3, в пакете 1.17.9-magnit.1)`;
+      слов «новее» и «старее» в выводе нет
+
+  # ---------------------------------------------------------- N5-R*: удаление
+  - id: AC-85
+    rule: [N5-R1]
+    type: integration
+    given: полностью установленный пакет (бинарник, opencode.bak, блок профиля, CA)
+    when: выполнен install.sh --uninstall
+    then: >
+      удалены opencode, opencode.bak, блок профиля вместе с обеими строками-маркерами и
+      установленный CA-файл; каждый объект перечислен в отчёте; код выхода 0
+
+  - id: AC-86
+    rule: [N5-R1]
+    type: integration
+    given: профиль содержит пользовательские строки до и после блока установщика
+    when: выполнен install.sh --uninstall
+    then: файл существует, пользовательские строки сохранены побайтово, маркеров в файле нет
+
+  - id: AC-87
+    rule: [N5-R1]
+    type: manual
+    given: переменная пользователя NODE_EXTRA_CA_CERTS указывает на путь, отличный от установленного нами
+    when: выполнен install.ps1 -Uninstall
+    then: переменная не удалена и не изменена, в отчёте строка о том, что значение чужое
+
+  - id: AC-88
+    rule: [N5-R1]
+    type: integration
+    given: установленный пакет, пользовательские opencode.json, opencode.json.bak и auth.json
+    when: выполнен install.sh --uninstall (без --purge)
+    then: все три файла на месте и не изменены, каталог конфига существует
+
+  - id: AC-89
+    rule: [N5-R2]
+    type: integration
+    given: manifest.purge_paths = ["${XDG_CONFIG_HOME}/opencode", "${XDG_DATA_HOME}/opencode"], оба каталога существуют
+    when: выполнен install.sh --uninstall --purge
+    then: оба каталога удалены целиком, каждый перечислен в выводе до удаления, код выхода 0
+
+  - id: AC-90
+    rule: [N5-R2]
+    type: integration
+    given: manifest.purge_paths содержит "/etc" (в отдельных прогонах — "~/../other", "/tmp/x")
+    when: выполнен install.sh --uninstall --purge
+    then: >
+      путь не удалён, напечатано предупреждение с этим путём, код выхода 2; пути из того же
+      списка, прошедшие проверку, при этом не удаляются тоже (список отвергается целиком)
+
+  - id: AC-91
+    rule: [N5-R2]
+    type: integration
+    given: manifest.purge_paths содержит "~" (сам домашний каталог)
+    when: выполнен install.sh --uninstall --purge
+    then: домашний каталог не удалён, код выхода 2
+
+  - id: AC-92
+    rule: [N5-R2, N5-C1]
+    type: integration
+    given: установленный пакет и существующие purge-каталоги
+    when: выполнен install.sh --dry-run --uninstall --purge
+    then: напечатан полный список удаляемых путей, ни один файл не удалён, код выхода 0
+
+  - id: AC-93
+    rule: [N5-R3]
+    type: integration
+    given: чистый фейковый $HOME, ничего не установлено
+    when: выполнен install.sh --uninstall
+    then: "для каждого объекта напечатана строка вида `<объект>: не найден`, код выхода 0"
+
+  - id: AC-94
+    rule: [N5-R3]
+    type: integration
+    given: установленный пакет
+    when: install.sh --uninstall выполнен два раза подряд
+    then: оба запуска завершились кодом 0, состояние $HOME после второго совпадает с состоянием после первого
+
+  - id: AC-95
+    rule: [N5-R4]
+    type: integration
+    given: установленный пакет и существующие purge-каталоги
+    when: выполнен install.sh --purge
+    then: сообщение «--purge применяется только вместе с --uninstall», код выхода 2, ничего не удалено
+
+  # ---------------------------------------------------------- N5-C*: dry-run и check
+  - id: AC-96
+    rule: [N5-C1]
+    type: integration
+    given: чистый фейковый $HOME и корректный пакет
+    when: выполнен install.sh --dry-run
+    then: >
+      напечатан нумерованный план, в котором для каждого шага указаны абсолютные пути (источник и
+      приёмник), имя правимого файла профиля и целевое значение NODE_EXTRA_CA_CERTS
+
+  - id: AC-97
+    rule: [N5-C1, N5-C4]
+    type: integration
+    given: снимок фейкового $HOME до запуска
+    when: выполнен install.sh --dry-run и снят повторный снимок
+    then: снимки совпадают — не создано ни файла, ни каталога, профиль не изменён, код выхода 0
+
+  - id: AC-98
+    rule: [N5-C1, N5-P5]
+    type: integration
+    given: пакет с изменённым bin/opencode
+    when: выполнен install.sh --dry-run
+    then: код выхода 4, сообщение о несовпадении хеша — dry-run пригоден как проверка целостности пакета
+
+  - id: AC-99
+    rule: [N5-C1]
+    type: integration
+    given: запуск не под root
+    when: выполнен install.sh --dry-run --system
+    then: в плане фигурирует /usr/local/bin, sudo не вызывался, код выхода 0
+
+  - id: AC-100
+    rule: [N5-C2]
+    type: integration
+    given: полностью установленный пакет той же версии
+    when: выполнен install.sh --check
+    then: >
+      напечатаны строки `Пакет: opencode-magnit 1.17.9-magnit.1 (linux-x64)`, `Манифест: корректен`,
+      `Бинарник: установлен 1.17.9-magnit.1 (<путь>)`, `PATH: содержит <bin_dir>`, `CA: установлен (<путь>)`,
+      `NODE_EXTRA_CA_CERTS: задан (<путь>)`, `Конфиг: <путь> (не изменяется установщиком)`,
+      `Hub: <hub_url>`, `Итог: всё установлено`
+
+  - id: AC-101
+    rule: [N5-C2]
+    type: integration
+    given: чистый фейковый $HOME
+    when: выполнен install.sh --check
+    then: >
+      напечатаны `Бинарник: не установлен`, `PATH: не содержит <bin_dir>`, `CA: не установлен`,
+      `NODE_EXTRA_CA_CERTS: не задан`, `Итог: требуется установка`
+
+  - id: AC-102
+    rule: [N5-C2, N5-U4]
+    type: integration
+    given: установлен бинарник версии 1.17.9-magnit.0, пакет содержит 1.17.9-magnit.1
+    when: выполнен install.sh --check
+    then: "строка `Бинарник: другая версия (установлена 1.17.9-magnit.0, в пакете 1.17.9-magnit.1)`"
+
+  - id: AC-103
+    rule: [N5-C2]
+    type: integration
+    given: установленный бинарник, который на --version завершается кодом 2 без вывода
+    when: выполнен install.sh --check
+    then: "строка `Бинарник: установлен, версия не определена (<путь>)`, --check не падает"
+
+  - id: AC-104
+    rule: [N5-C2]
+    type: integration
+    given: установленный CA-файл с содержимым, отличным от пакетного
+    when: выполнен install.sh --check
+    then: "строка `CA: отличается от пакета (<путь>)`"
+
+  - id: AC-105
+    rule: [N5-C2]
+    type: integration
+    given: установка только что выполнена, текущая сессия shell профиль ещё не перечитывала
+    when: выполнен install.sh --check в той же сессии
+    then: >
+      строка `NODE_EXTRA_CA_CERTS: задан (<путь>)` — признак берётся из блока в профиле,
+      а не только из переменной окружения процесса
+
+  - id: AC-106
+    rule: [N5-C3]
+    type: integration
+    given: полностью установленный пакет
+    when: выполнен install.sh --check
+    then: код выхода 0
+
+  - id: AC-107
+    rule: [N5-C3]
+    type: integration
+    given: чистый фейковый $HOME
+    when: выполнен install.sh --check
+    then: код выхода 7
+
+  - id: AC-108
+    rule: [N5-C3]
+    type: integration
+    given: linux-пакет без desktop-артефакта, всё остальное установлено
+    when: выполнен install.sh --check
+    then: "строка `Desktop: не входит в пакет`, код выхода 0 — отсутствие Desktop расхождением не считается"
+
+  - id: AC-109
+    rule: [N5-C3, N5-C4]
+    type: integration
+    given: домашний каталог доступен только на чтение (chmod 0555)
+    when: выполнен install.sh --check
+    then: отчёт напечатан полностью, ошибки прав нет, код выхода 7
+
+  - id: AC-110
+    rule: [N5-C4]
+    type: integration
+    given: чистый фейковый $HOME без каталогов .config и .local
+    when: последовательно выполнены install.sh --help, --version, --check, --dry-run
+    then: каталоги $HOME/.config, $HOME/.config/opencode и $HOME/.local/bin не созданы
+
+  # ---------------------------------------------------------- N5-B*: сборка пакета
+  - id: AC-111
+    rule: [N5-B1]
+    type: ci
+    given: вызов release.sh без --version (и в отдельных прогонах без --artifacts, --ca, --hub-url)
+    when: скрипт выполнен
+    then: справка напечатана в stderr, код выхода 2, каталог --out не создан
+
+  - id: AC-112
+    rule: [N5-B2]
+    type: ci
+    given: фикстурный каталог артефактов с opencode-linux-x64-1.17.9-magnit.1.zip и CA-файлом
+    when: выполнен release.sh --artifacts … --version 1.17.9-magnit.1 --ca … --hub-url https://hub.test
+    then: >
+      собран архив opencode-magnit-linux-x64-1.17.9-magnit.1.tar.gz; внутри — дерево N5-P2 и
+      common/manifest.json, где sha256 каждого файла совпадает с фактическим, hub_url=https://hub.test,
+      source_release=v1.17.9-magnit.1, purge_paths непустой
+
+  - id: AC-113
+    rule: [N5-B2]
+    type: ci
+    given: собранные архивы для linux-x64 и windows-x64
+    when: архивы распакованы
+    then: >
+      в POSIX-архиве install.sh и bin/opencode имеют исполняемый бит; windows-архив — zip,
+      содержит install.ps1 и install.bat и не содержит install.sh
+
+  - id: AC-114
+    rule: [N5-B2]
+    type: ci
+    given: каталог артефактов содержит opencode-linux-x64-1.17.9-magnit.0.zip, запрошена версия 1.17.9-magnit.1
+    when: выполнен release.sh
+    then: сообщение с обеими версиями, код выхода 2, архив не собран
+
+  - id: AC-115
+    rule: [N5-B2]
+    type: ci
+    given: сборка пакета завершена
+    when: release.sh выполняет самопроверку
+    then: >
+      архив распакован во временный каталог и install.sh --dry-run завершился кодом 0;
+      при искусственной порче архива самопроверка валит сборку ненулевым кодом
+
+  - id: AC-116
+    rule: [N5-B2]
+    type: ci
+    given: каталог артефактов с dmg только для darwin-arm64
+    when: выполнен release.sh --targets darwin-arm64,darwin-x64,linux-x64
+    then: >
+      dmg попал только в пакет darwin-arm64; в пакетах darwin-x64 и linux-x64 каталога desktop/ нет
+      и артефакта kind="desktop" в манифесте нет
+
+  - id: AC-117
+    rule: [N5-B3]
+    type: ci
+    given: собраны архивы для трёх целей
+    when: прочитан файл SHA256SUMS в каталоге --out
+    then: >
+      он содержит по одной строке `<64 hex>  <имя архива>` на каждый архив, и все хеши совпадают
+      с фактическими; проверка `sha256sum -c SHA256SUMS` проходит
+
+  - id: AC-118
+    rule: [N5-B3]
+    type: ci
+    given: сборка без флага --publish
+    when: release.sh завершён
+    then: >
+      напечатано «публикация пропущена: добавьте --publish», команда gh не вызывалась,
+      сетевых обращений не было
+
+  - id: AC-119
+    rule: [N5-B4]
+    type: ci
+    given: каталог артефактов без CLI-артефакта для windows-x64
+    when: выполнен release.sh --targets windows-x64
+    then: >
+      код выхода ненулевой, напечатан список ожидаемых имён файлов
+      (opencode-windows-x64-<ver>.zip и opencode-windows-x64/bin/opencode.exe); молчаливого пропуска нет
+
+  - id: AC-120
+    rule: [N5-B5]
+    type: ci
+    given: исходник installers/release.sh
+    when: выполнен поиск вызовов bun, corp/build.ts, codesign, signtool и сетевых утилит
+    then: совпадений нет; в справке скрипта есть строки о том, что сборка форка и подпись выполняются отдельно
+
+  # ---------------------------------------------------------- N5-D*: документация
+  - id: AC-121
+    rule: [N5-D1]
+    type: ci
+    given: файл installers/docs/install-user.md
+    when: проверено наличие обязательных разделов
+    then: >
+      есть разделы «что делает установщик», «чего установщик не делает», запуск на macOS/Linux/Windows,
+      обход предупреждений Gatekeeper и SmartScreen, первый запуск и SSO, витрина /connectors,
+      проверка (--check, opencode corp status), удаление (--uninstall, --purge) и таблица кодов
+      выхода 0…7; документ на русском языке
+
+  - id: AC-122
+    rule: [N5-D2]
+    type: ci
+    given: файл installers/docs/install-admin.md
+    when: проверено наличие обязательных разделов
+    then: >
+      есть описание release.sh, таблица полей manifest.json, таблица «путь или переменная → когда
+      создаётся → удаляется при --uninstall/--purge», ручной откат через .bak, статус подписи
+      сборок со ссылкой на R-14/D-7/S-B9, выкладка в GitHub Releases и на портал, раздел
+      «известные ограничения» с отсутствием GUI-переменной на macOS/Linux и Desktop для Linux
+
+  - id: AC-123
+    rule: [N5-D3]
+    type: ci
+    given: собранный пакет
+    when: прочитан README.md внутри пакета
+    then: >
+      он содержит версию и цель из манифеста, ровно одну команду запуска для этой ОС, ссылку на
+      install-user.md и указание, где взять SHA256SUMS; длина файла не превышает 60 строк
+
+  # ---------------------------------------------------------- N5-T*: тесты и CI
+  - id: AC-124
+    rule: [N5-T1]
+    type: ci
+    given: реальный домашний каталог пользователя, зафиксирован его снимок
+    when: выполнен полный прогон `bats installers/tests/bats` дважды подряд
+    then: >
+      оба прогона зелёные, снимок реального домашнего каталога не изменился, sudo не вызывался,
+      сетевых обращений не было
+
+  - id: AC-125
+    rule: [N5-T2]
+    type: unit
+    given: сессия pwsh
+    when: выполнено `. installers/windows/install.ps1`
+    then: >
+      файл загружен, функции доступны, ни одного изменения файловой системы и переменных
+      окружения не произошло — исполняемый вход не сработал
+
+  - id: AC-126
+    rule: [N5-T2]
+    type: ci
+    given: pwsh на ubuntu-latest без Windows-реестра
+    when: выполнено `Invoke-Pester installers/tests/pester`
+    then: >
+      все тесты зелёные; тесты реестра, User PATH, WM_SETTINGCHANGE, занятого exe и тихой установки
+      Desktop в этот набор не входят (они помечены manual)
+
+  - id: AC-127
+    rule: [N5-T3]
+    type: ci
+    given: набор тестов installers/tests/
+    when: сопоставлены имена тестов и перечень обязательных сценариев N5-T3
+    then: >
+      каждому сценарию (чистая система, повторный запуск, обновление, совпадение хеша, конфликт
+      конфига, dry-run, check, uninstall, повторный uninstall, purge, неверный хеш, повреждённый
+      манифест, чужая ОС/архитектура, нет утилиты хеширования, нет прав, занятый бинарник,
+      --purge без --uninstall, неизвестный аргумент, отсутствие сети) соответствует хотя бы один тест
+
+  - id: AC-128
+    rule: [N5-T4]
+    type: ci
+    given: файл installers/ci/installers.yml
+    when: прочитан список заданий
+    then: >
+      есть задания bats (ubuntu-latest и macos-latest), pester (ubuntu-latest, pwsh), lint
+      (shellcheck и Invoke-ScriptAnalyzer) и release-dry-run; каждое из них помечено как
+      обязательное для PR
+
+  - id: AC-129
+    rule: [N5-T4]
+    type: ci
+    given: pull request, изменяющий любой файл в installers/
+    when: конвейер выполнен
+    then: >
+      все четыре задания зелёные; искусственная поломка любого из них (падающий тест bats)
+      приводит к красному статусу PR
+
+  - id: AC-130
+    rule: [N5-T5]
+    type: ci
+    given: все файлы installers/**/*.sh
+    when: выполнен `shellcheck -s bash`
+    then: >
+      ошибок и предупреждений нет; каждое подавление `# shellcheck disable=` сопровождается
+      комментарием-обоснованием в соседней строке
+
+  - id: AC-131
+    rule: [N5-T5]
+    type: ci
+    given: все файлы installers/**/*.sh
+    when: выполнен поиск конструкций bash 4+ (declare -A, mapfile, readarray, ${var^^}, ${var,,}, local -n, &>>)
+    then: совпадений нет; прогон bats на macos-latest (bash 3.2) зелёный
+
+  - id: AC-132
+    rule: [N5-T5]
+    type: ci
+    given: файл installers/windows/install.ps1
+    when: выполнен Invoke-ScriptAnalyzer с правилом совместимости PowerShell 5.1
+    then: >
+      нарушений нет; в файле есть директива `#Requires -Version 5.1` и нет конструкций
+      `? :`, `??`, `?.`, `-Parallel`, `Join-String`, `$PSStyle`
+
+  - id: AC-133
+    rule: [N5-T6]
+    type: unit
+    given: файл installers/windows/install.ps1
+    when: прочитаны первые три байта файла
+    then: они равны EF BB BF — файл сохранён в UTF-8 с BOM, русские строки читаются PowerShell 5.1 корректно
+
+  - id: AC-134
+    rule: [N5-T6]
+    type: unit
+    given: все файлы installers/**/*.sh
+    when: проверены первые байты и переводы строк
+    then: BOM отсутствует, первая строка начинается с `#!`, символов CR в файлах нет
+
+# ------------------------------------------------------------------------------------------------
+# Покрытие правил критериями (каждое правило N5-* — минимум один AC)
+# ------------------------------------------------------------------------------------------------
+coverage:
+  N5-P1: [AC-01]
+  N5-P2: [AC-02, AC-03]
+  N5-P3: [AC-04, AC-05, AC-11]
+  N5-P4: [AC-05, AC-06, AC-07, AC-08, AC-09, AC-10, AC-11, AC-12]
+  N5-P5: [AC-13, AC-14, AC-15, AC-16, AC-17, AC-98]
+  N5-P6: [AC-18, AC-19]
+  N5-P7: [AC-20, AC-21]
+  N5-P8: [AC-22]
+  N5-I1: [AC-17, AC-23, AC-24, AC-25, AC-26, AC-27, AC-28, AC-29, AC-30, AC-55, AC-69, AC-77]
+  N5-I2: [AC-31, AC-32]
+  N5-I3: [AC-33, AC-34, AC-35, AC-36]
+  N5-I4: [AC-37, AC-38, AC-39, AC-40]
+  N5-I5: [AC-41, AC-42, AC-43, AC-44, AC-45, AC-46, AC-47, AC-48]
+  N5-I6: [AC-49, AC-50]
+  N5-I7: [AC-48, AC-51, AC-52, AC-53, AC-54, AC-55, AC-56]
+  N5-I8: [AC-57, AC-58, AC-59, AC-60, AC-61]
+  N5-I9: [AC-62, AC-63, AC-64]
+  N5-I10: [AC-65, AC-66, AC-67, AC-68, AC-69]
+  N5-I11: [AC-70, AC-71, AC-72, AC-73, AC-82]
+  N5-I12: [AC-56, AC-74, AC-75, AC-76, AC-77, AC-78]
+  N5-U1: [AC-42, AC-50, AC-60, AC-71, AC-79]
+  N5-U2: [AC-57, AC-80, AC-81, AC-82]
+  N5-U3: [AC-38, AC-64, AC-83]
+  N5-U4: [AC-84, AC-102]
+  N5-R1: [AC-85, AC-86, AC-87, AC-88]
+  N5-R2: [AC-89, AC-90, AC-91, AC-92]
+  N5-R3: [AC-93, AC-94]
+  N5-R4: [AC-95]
+  N5-C1: [AC-29, AC-92, AC-96, AC-97, AC-98, AC-99]
+  N5-C2: [AC-100, AC-101, AC-102, AC-103, AC-104, AC-105]
+  N5-C3: [AC-106, AC-107, AC-108, AC-109]
+  N5-C4: [AC-97, AC-109, AC-110]
+  N5-B1: [AC-111]
+  N5-B2: [AC-21, AC-112, AC-113, AC-114, AC-115, AC-116]
+  N5-B3: [AC-117, AC-118]
+  N5-B4: [AC-119]
+  N5-B5: [AC-120]
+  N5-D1: [AC-121]
+  N5-D2: [AC-122]
+  N5-D3: [AC-123]
+  N5-T1: [AC-124]
+  N5-T2: [AC-125, AC-126]
+  N5-T3: [AC-127]
+  N5-T4: [AC-128, AC-129]
+  N5-T5: [AC-130, AC-131, AC-132]
+  N5-T6: [AC-32, AC-133, AC-134]
+
+negative_scenarios:
+  bad_hash: [AC-13, AC-14, AC-17, AC-98]
+  broken_manifest: [AC-05, AC-06, AC-07, AC-08, AC-09, AC-10, AC-11, AC-12]
+  wrong_os_or_arch: [AC-33, AC-34, AC-35, AC-36]
+  missing_permissions: [AC-53, AC-54, AC-63, AC-109]
+  busy_binary_windows: [AC-58, AC-61]
+  repeated_run: [AC-38, AC-42, AC-43, AC-44, AC-50, AC-60, AC-64, AC-71, AC-79, AC-83, AC-94]
+  no_network: [AC-18, AC-19, AC-118, AC-120]
+  bad_arguments: [AC-17, AC-25, AC-26, AC-27, AC-28, AC-95]
+  missing_tooling: [AC-15]
+  desktop_failure: [AC-66, AC-67, AC-68, AC-69]
+  unsafe_paths: [AC-11, AC-90, AC-91]
+  user_data_preserved: [AC-70, AC-71, AC-73, AC-82, AC-86, AC-87, AC-88]
+  missing_artifact: [AC-114, AC-119]
+  nothing_installed: [AC-93, AC-101, AC-107]
+
+# ------------------------------------------------------------------------------------------------
+# Бэклог Hub (правила H5-*, spec.md §12).
+# ЗОНА РЕАЛИЗАЦИИ: репозиторий Hub, ветка pipeline/i3-hub-oauth-facade-proxy (I-3+),
+# файлы src/hub/proxy.py и src/hub/routes/oauth.py. НЕ входит в объём installers/ и в набор AC-*.
+# Тесты — pytest против локальных моков и фейкового KV, как и остальные тесты Hub.
+# ------------------------------------------------------------------------------------------------
+hub_backlog_criteria:
+
+  - id: HAC-01
+    rule: [H5-1]
+    type: unit
+    given: >
+      выключатель alias открыт, HUB_CB_RESET=30, HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300;
+      окно истекло и первый запрос захватил право на пробу, ответ upstream ещё не получен
+    when: часы сдвинуты на 60 секунд вперёд и приходит новый запрос
+    then: >
+      право на пробу второй раз не выдаётся: запрос получает 503 с JSON-RPC -32004
+      upstream_unavailable и заголовком Retry-After, upstream не вызывается
+
+  - id: HAC-02
+    rule: [H5-1]
+    type: unit
+    given: HUB_CB_RESET=30, HUB_UPSTREAM_TIMEOUT=30, HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300, HUB_CB_PROBE_GRACE=5
+    when: право на пробу захвачено
+    then: >
+      TTL ключа cb:<alias>:probe равен 305 секундам, значение until равно now+305;
+      Retry-After отказов в half-open вычисляется от этого until и не меньше 1 секунды
+
+  - id: HAC-03
+    rule: [H5-1, H5-3]
+    type: unit
+    given: выключатель в half-open, проба выполняется
+    when: проба завершилась успешно
+    then: >
+      ключ cb:<alias>:probe удалён немедленно (не по TTL), состояние cb:<alias> равно
+      {failures: 0, open_until: 0.0}, следующий запрос идёт на upstream без задержки
+
+  - id: HAC-04
+    rule: [H5-2]
+    type: unit
+    given: HUB_TRUST_PROXY=true, соединение с адресом 10.0.0.7
+    when: приходит запрос на /oauth/register с заголовком X-Forwarded-For "not-an-ip, 10.1.1.1"
+    then: ключ rate-limit равен rl:register:10.0.0.7 — значение заголовка отброшено
+
+  - id: HAC-05
+    rule: [H5-2]
+    type: unit
+    given: HUB_TRUST_PROXY=true, соединение с адресом 10.0.0.7
+    when: приходит запрос с X-Forwarded-For длиной 4096 символов
+    then: >
+      значение отброшено без попытки разбора, ключ равен rl:register:10.0.0.7;
+      в KV не появляется ключей длиннее ожидаемого
+
+  - id: HAC-06
+    rule: [H5-2]
+    type: unit
+    given: HUB_TRUST_PROXY=true
+    when: приходят запросы с X-Forwarded-For "203.0.113.5", "[2001:db8::1]:443" и "2001:db8::1"
+    then: во всех трёх случаях ключ содержит нормализованный IP-адрес клиента, а не адрес соединения
+
+  - id: HAC-07
+    rule: [H5-2]
+    type: unit
+    given: HUB_TRUST_PROXY=true и заведомо мусорный X-Forwarded-For
+    when: запрос обработан и прочитаны записи журнала
+    then: >
+      есть запись уровня WARNING о непринятом заголовке, само значение в журнал не попало
+      (в тексте записи его нет), в audit_log значения тоже нет
+
+  - id: HAC-08
+    rule: [H5-2]
+    type: unit
+    given: HUB_TRUST_PROXY=false (по умолчанию), соединение с адресом 10.0.0.7
+    when: приходит запрос с X-Forwarded-For "203.0.113.5"
+    then: ключ равен rl:register:10.0.0.7 — поведение по умолчанию не изменилось
+
+  - id: HAC-09
+    rule: [H5-3]
+    type: unit
+    given: выключатель закрыт, счётчик операций фейкового KV обнулён
+    when: успешно проксирован один запрос
+    then: >
+      в KV выполнена ровно одна операция записи состояния cb:<alias> и ноль операций удаления;
+      ответ клиенту не изменился
+
+  - id: HAC-10
+    rule: [H5-3]
+    type: unit
+    given: HUB_CB_FAILURES подряд идущих ошибок перевели выключатель в открытое состояние
+    when: после истечения окна проба завершилась успешно и затем прошли ещё два обычных запроса
+    then: >
+      выключатель закрыт, ключ пробы отсутствует, на два последующих запроса пришлось ноль
+      операций удаления в KV
+
+  - id: HAC-11
+    rule: [H5-4]
+    type: unit
+    given: выключатель в half-open, право на пробу захвачено
+    when: пробный запрос завершился ошибкой 502
+    then: >
+      состояние cb:<alias> равно {failures: HUB_CB_FAILURES, open_until: now + HUB_CB_RESET},
+      ключ пробы удалён, следующий запрос получает 503 с -32004
+
+  - id: HAC-12
+    rule: [H5-4]
+    type: unit
+    given: набор тестов Hub на circuit-breaker (в т.ч. проверяющий AC-151 и AC-152 спецификации I-3)
+    when: применено изменение H5-4 и прогнаны тесты
+    then: >
+      все тесты проходят без правок ожиданий — наблюдаемое поведение R-P10 не изменилось;
+      мутация «failures = 0 в ветке повторного открытия» валит тест AC-151
+
+hub_backlog_coverage:
+  H5-1: [HAC-01, HAC-02, HAC-03]
+  H5-2: [HAC-04, HAC-05, HAC-06, HAC-07, HAC-08]
+  H5-3: [HAC-03, HAC-09, HAC-10]
+  H5-4: [HAC-11, HAC-12]
