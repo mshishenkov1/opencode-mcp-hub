@@ -508,7 +508,7 @@ build_target() {
     desktop_sha=$(sha256_of "$stage/$desktop_rel")
     desktop_size=$(size_of "$stage/$desktop_rel")
     case $desktop_src in
-      *.dmg) desktop_type="dmg"; desktop_app="OpenCode.app" ;;
+      *.dmg) desktop_type="dmg"; desktop_app="OpenCode Magnit.app" ;;
       *.msi) desktop_type="msi" ;;
       *) desktop_type="nsis" ;;
     esac
