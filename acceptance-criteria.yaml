@@ -873,3 +873,135 @@ criteria:
     given: "набор тестов Hub на circuit-breaker (в т.ч. проверяющий AC-151 и AC-152)"
     when: "применено изменение записи состояния в ветке повторного открытия окна и прогнаны тесты"
     then: "все тесты проходят без правок ожиданий — наблюдаемое поведение R-P10 не изменилось; мутация «failures = 0 в ветке повторного открытия» валит тест AC-151"
+
+  # --- Ревизия 3 (I-4): подключение коннектора пользовательским токеном (R-U1..R-U10) ---
+  - id: AC-169
+    text: "Каталог принимает список способов подключения auth_methods, а сервер с прежним полем auth остаётся валидным и ведёт себя как один способ (R-U1)"
+    given: "два каталога: первый — facade-сервер с auth_methods из способов corp_oauth (type oauth2, available false) и session_token (type user_token); второй — копия catalog.yaml репозитория с полем auth"
+    when: "для каждого вызывается create_app() и GET /api/catalog (Bearer)"
+    then: "оба каталога загружаются без ошибок; у первого сервера в публичном представлении есть auth_methods с двумя элементами и auth_kind == 'user_token' (тип первого доступного способа); у серверов второго каталога ключа auth_methods нет и auth_kind == 'oauth2'"
+  - id: AC-170
+    text: "Некорректный auth_methods отклоняется при загрузке каталога с путём к полю (R-U1)"
+    given: "варианты каталога: (а) сервер с обоими полями auth и auth_methods; (б) auth_methods: []; (в) два способа с одинаковым id 'session_token'; (г) способ с type: 'pat'; (д) способ с лишним полем"
+    when: "для каждого варианта вызывается create_app()"
+    then: "во всех случаях старт завершается ошибкой; сообщение содержит путь вида servers[0].auth_methods (для (в) — также сам id 'session_token', для (г) и (д) — путь вида servers[0].auth_methods[0].<поле>)"
+  - id: AC-171
+    text: "Способ user_token требует mode: facade, field и verify (R-U1)"
+    given: "варианты каталога: (а) native-сервер со способом type: user_token; (б) facade-сервер со способом user_token без field; (в) то же без verify; (г) verify без headers"
+    when: "для каждого варианта вызывается create_app()"
+    then: "во всех случаях ошибка старта; сообщения содержат соответственно servers[0].auth_methods[0].type (недопустим при mode native), servers[0].auth_methods[0].field, servers[0].auth_methods[0].verify, servers[0].auth_methods[0].verify.headers"
+  - id: AC-172
+    text: "Сохранённый пользовательский токен подставляется в credential_headers при проксировании, клиентский Authorization удаляется (R-U2, R-P2)"
+    given: "facade-сервер со способом user_token и credential_headers {Authorization: 'Bearer {{access_token}}'}; пользователь подключился токеном 'usr-tok-1'; мок upstream записывает полученные заголовки"
+    when: "клиент вызывает POST /mcp/{alias} с собственным заголовком Authorization: Bearer <access-токен Hub>"
+    then: "upstream получил Authorization: 'Bearer usr-tok-1'; access-токена Hub в заголовках запроса к upstream нет"
+  - id: AC-173
+    text: "Успешная проверка токена у целевой системы создаёт подключение и сохраняет account (R-U3, R-U4)"
+    given: "способ user_token с verify {url, method GET, headers {Authorization: 'Bearer {{access_token}}'}, account_field: username}; мок целевой системы отвечает 200 и телом с полем username 'm.ivanov'"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-1'}"
+    then: "мок получил проверочный GET с заголовком Authorization: 'Bearer usr-tok-1'; ответ 200 со status 'connected', auth_method — id способа, account == 'm.ivanov'; в БД connections.status == 'connected' и есть строка upstream_tokens"
+  - id: AC-174
+    text: "Токен, отклонённый целевой системой, не сохраняется (R-U3, R-U4)"
+    given: "мок целевой системы отвечает на проверочный запрос 401 (и в отдельном прогоне 403)"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'bad-token'}"
+    then: "в обоих случаях 400 {error: 'token_rejected'}; в БД нет строки upstream_tokens для этого подключения, status подключения не стал 'connected'"
+  - id: AC-175
+    text: "Недоступность целевой системы на проверке не разрушает прежнее подключение (R-U3, R-U4)"
+    given: "пользователь уже подключён токеном 'usr-tok-1'; мок целевой системы отвечает на проверку 500 (и в отдельных прогонах — сетевой ошибкой и таймаутом)"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-2'}"
+    then: "во всех случаях 502 {error: 'upstream_unavailable'}; подключение осталось 'connected', а следующий вызов /mcp/{alias} уходит на upstream по-прежнему с 'usr-tok-1'"
+  - id: AC-176
+    text: "Успешный ответ эндпоинта подключения токеном содержит договорённые поля и не содержит токена (R-U4)"
+    given: "способ user_token, мок целевой системы отвечает 200"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-1', preset: 'readonly'}"
+    then: "200; тело — объект с ключами alias, status, auth_method, preset, groups, account, updated_at; значения 'usr-tok-1' в теле ответа нет ни в одном поле; аудит содержит запись connection_connected с details.auth_method"
+  - id: AC-177
+    text: "Невалидное тело запроса отклоняется без обращения к целевой системе (R-U4)"
+    given: "способ user_token с field.max_length 4096; счётчик запросов мока целевой системы обнулён"
+    when: "выполняются POST /api/me/connections/{alias}/token с телами: не JSON; JSON-массив; {} без token; {token: ''}; {token: <4097 символа>}; {token: 'ok', preset: 'admin'}; {token: 'ok', groups: 'core'}"
+    then: "каждый ответ — 400 {error: 'invalid_request'} с русским message; мок целевой системы не получил ни одного запроса; подключение не создано"
+  - id: AC-178
+    text: "Подключение токеном доступно только для видимого пользователю facade-сервера и только аутентифицированному пользователю (R-U4)"
+    given: "каталог с native-сервером 'nat', unconfigured-сервером 'unc', facade-сервером 'closed' с audience ['other'] и facade-сервером 'ok' со способом user_token"
+    when: "POST /api/me/connections/{alias}/token для alias 'missing', 'nat', 'unc', 'closed' (с Bearer), а также для 'ok' без заголовка авторизации"
+    then: "для четырёх первых — 404 {error: 'not_found'}; для запроса без авторизации — 401; ни в одном случае подключение не создано"
+  - id: AC-179
+    text: "Выбор способа подключения проверяется: обязательность, известность, тип и доступность (R-U4)"
+    given: "сервер 'multi' с двумя способами user_token (id 'a' и 'b') и способом oauth2 'corp' с available: false; сервер 'single' ровно с одним способом user_token"
+    when: "выполняются POST …/token: для 'multi' без method; для 'multi' с method 'nope'; для 'multi' с method 'corp'; для 'single' без method"
+    then: "без method для 'multi' — 400 invalid_request с указанием, что нужно выбрать способ; method 'nope' — 400 invalid_request; method 'corp' — 409 {error: 'auth_method_unavailable'}; для 'single' без method — 200 (способ определён однозначно)"
+  - id: AC-180
+    text: "Повторное подключение заменяет прежний токен, не оставляя старого значения (R-U4)"
+    given: "пользователь подключён токеном 'usr-tok-1'; мок целевой системы принимает оба токена"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-2'}, затем выполняется MCP-вызов"
+    then: "200; в БД ровно одна строка upstream_tokens для подключения, её расшифровка равна 'usr-tok-2'; connections.revision вырос; upstream получил Authorization с 'usr-tok-2'; строки со значением 'usr-tok-1' в БД и KV не осталось"
+  - id: AC-181
+    text: "Отключение стирает пользовательский токен и не обращается к revoke_url (R-U5)"
+    given: "подключение способом user_token; у сервера в каталоге задан revoke_url, мок отзыва считает запросы"
+    when: "DELETE /api/me/connections/{alias}, затем POST /mcp/{alias} с прежним access-токеном Hub и GET /remote-config"
+    then: "200 {alias, status: 'not_connected'}; строки upstream_tokens нет, connections.auth_method пуст; мок revoke_url не получил ни одного запроса; MCP-вызов отвечает 401 либо JSON-RPC -32002 с reason 'not_connected'; /remote-config не содержит alias; аудит содержит connection_disconnected"
+  - id: AC-182
+    text: "401 от upstream переводит подключение user_token в needs_reauth без попытки обновления, а новый токен его восстанавливает (R-U6)"
+    given: "подключение способом user_token; мок upstream отвечает 401 на MCP-запрос; счётчик запросов к token_url обнулён"
+    when: "выполняется POST /mcp/{alias}, затем POST /api/me/connections/{alias}/token с новым токеном и повторный MCP-вызов тем же access-токеном Hub"
+    then: "первый вызов — 200 с JSON-RPC -32002, data.reason == 'needs_reauth' и data.hint_url == '<HUB>/ui/servers/{alias}'; к token_url обращений не было и запрос к upstream не повторялся; connections.status == 'needs_reauth', есть аудит connection_needs_reauth; после подключения новым токеном status == 'connected' и повторный MCP-вызов проходит на upstream с новым токеном"
+  - id: AC-183
+    text: "Фоновое обновление токенов не выбирает подключения user_token (R-U6, R-B4)"
+    given: "одно подключение user_token (без refresh-токена и без expires_at) и одно OAuth-подключение с истекающим токеном"
+    when: "выполняется один цикл фонового обновления"
+    then: "обновлено ровно одно подключение — OAuth; к token_url обращений по подключению user_token не было; его статус остался 'connected', а токен в БД не изменился"
+  - id: AC-184
+    text: "Расширение прав readonly → readwrite для user_token не требует повторной авторизации (R-U7)"
+    given: "подключение user_token с preset 'readonly' у сервера с permission_model.kind tool_filter; параллельно — OAuth-подключение с preset 'readonly'"
+    when: "PUT /api/me/connections/{alias}/permissions с телом {preset: 'readwrite'} для обоих подключений"
+    then: "для user_token — 200 со status 'connected' (не 'needs_reauth'), следующий tools/list отдаёт инструменты пресета readwrite; для OAuth-подключения поведение прежнее — status 'needs_reauth' с пояснением (AC-111 не изменён)"
+  - id: AC-185
+    text: "Витрина отдаёт описание способов подключения без секретов и без адреса проверки (R-U8)"
+    given: "сервер со способами corp_oauth (available false, unavailable_reason, client_id, client_secret) и session_token (field с label, hint, docs_url, secret; verify с url и headers)"
+    when: "GET /api/catalog (Bearer)"
+    then: "у сервера есть auth_methods из двух элементов с полями id, title, type, available, unavailable_reason; у session_token есть field {label, hint, docs_url, secret, min_length, max_length}, у corp_oauth поля field нет; во всём ответе нет ключей verify, authorize_url, token_url, revoke_url, scopes, client_id, client_secret и нет адреса проверки; у сервера без auth_methods ключ auth_methods отсутствует"
+  - id: AC-186
+    text: "Страница сервера показывает выбор способа только когда способов больше одного (R-U8)"
+    given: "веб-сессия; сервер 'multi' со способами corp_oauth (available false, unavailable_reason) и session_token; сервер 'single' ровно с одним способом user_token"
+    when: "GET /ui/servers/multi и GET /ui/servers/single"
+    then: "на странице 'multi' есть выбор способа с обоими title, элемент corp_oauth неактивен (disabled) и рядом выведен текст unavailable_reason; на странице 'single' переключателя способов нет, сразу показана форма подключения"
+  - id: AC-187
+    text: "Форма ввода токена и состояния подключения отображаются по каталогу и не раскрывают токен (R-U8)"
+    given: "веб-сессия; способ user_token с field {label, hint, docs_url, secret: true}"
+    when: "GET /ui/servers/{alias} для состояний not_connected, connected (account 'm.ivanov') и needs_reauth"
+    then: "во всех состояниях поле ввода имеет type='password' и пустое значение, на странице есть label, текст hint и ссылка docs_url; в состоянии connected показаны статус 'Подключён', название способа, account и кнопки замены токена и отключения; в состоянии needs_reauth показано, что токен больше не действует, и предложена форма ввода нового; значения токена в HTML нет ни в одном состоянии"
+  - id: AC-188
+    text: "Пользовательский токен не попадает в журнал и в аудит (R-U9)"
+    given: "включён перехват логов всех уровней; токен 'usr-tok-SECRET-1'"
+    when: "выполняется полный цикл: подключение токеном, MCP-вызов, смена прав, 401 от upstream, отключение; затем просматриваются все записи журнала и все строки audit_log"
+    then: "ни одна запись журнала и ни одно поле audit_log.details не содержит 'usr-tok-SECRET-1' и ни одного его фрагмента длиной 8 и более символов; при этом в audit_log есть connection_connected с details.auth_method, connection_needs_reauth и connection_disconnected"
+  - id: AC-189
+    text: "Пользовательский токен не отдаётся наружу и хранится только зашифрованным (R-U9, R-B9)"
+    given: "подключение токеном 'usr-tok-SECRET-2'; веб-сессия для страниц"
+    when: "запрашиваются ответ POST …/token, GET /api/me/connections, GET /api/catalog, GET /remote-config, GET /metrics, GET /ui/connections, GET /ui/servers/{alias}"
+    then: "ни один ответ не содержит 'usr-tok-SECRET-2'; в БД upstream_tokens.access_token_enc не равен открытому значению, а его расшифровка ключом HUB_ENCRYPTION_KEY равна ему; в KV-записи conn:<user_id>:<alias> хранится тот же шифртекст, открытого значения там нет"
+  - id: AC-190
+    text: "Токен одного пользователя недоступен другому (R-U9)"
+    given: "пользователь A подключил токен 'tok-A', пользователь B — 'tok-B' к тому же alias"
+    when: "B выполняет MCP-вызов, GET /api/me/connections, PUT …/permissions и DELETE /api/me/connections/{alias}"
+    then: "upstream по запросу B получил Authorization с 'tok-B'; ответы B не содержат 'tok-A'; в /api/me/connections B видит только своё подключение; действия B не изменили подключение A — оно осталось 'connected' и его токен в БД прежний"
+  - id: AC-191
+    text: "Описанная в спеке запись каталога для коннектора tag загружается и публикуется корректно (R-U10)"
+    given: "каталог с записью tag из R-U10 (mode facade, upstream_url задан, два способа, permission_model.kind tool_filter); HUB_PUBLIC_URL='https://hub.test'"
+    when: "create_app() и GET /api/catalog (Bearer)"
+    then: "старт успешен; у tag mode == 'facade', mcp_url == 'https://hub.test/mcp/tag', auth_kind == 'user_token', auth_methods содержит corp_oauth (available false с причиной) и session_token (type user_token с field); при незаданной переменной ${TAG_MCP_URL} сервер помечается unconfigured и в /api/catalog не показывается"
+  - id: AC-192
+    text: "Коннектор tag, подключённый токеном, работает через Hub с персональным срезом прав (R-U10)"
+    given: "запись tag из R-U10; мок ТЭГ-MCP отдаёт на tools/list инструменты whoami, search_posts, get_thread, create_post, update_post; пользователь подключился токеном 'tag-tok-1' с пресетом readonly"
+    when: "выполняются POST /mcp/tag с tools/list и затем tools/call для create_post"
+    then: "мок ТЭГ-MCP получил Authorization: 'Bearer tag-tok-1'; в отфильтрованном ответе tools/list есть whoami, search_posts, get_thread и нет create_post и update_post; вызов create_post отвечает 200 с JSON-RPC -32001 и data.hint_url, запрос на upstream при этом не отправлен"
+  - id: AC-193
+    text: "Корпоративный OAuth ТЭГ объявлен, но недоступен до выдачи приложения (R-U10)"
+    given: "запись tag из R-U10 (способ corp_oauth с available: false и unavailable_reason)"
+    when: "POST /api/me/connections/tag/token с телом {method: 'corp_oauth', token: 'x'} и, отдельно, попытка подключиться этим способом через флоу авторизации"
+    then: "409 {error: 'auth_method_unavailable'} с текстом причины из каталога; подключение не создано, запись upstream_tokens не появилась; сам способ при этом виден в /api/catalog и на странице сервера"
+  - id: AC-194
+    text: "Незаданная переменная внутри недоступного способа не скрывает сервер из каталога (R-U1, уточнение R-C2)"
+    given: "beta-сервер со способами corp_oauth (available: false, client_id '${TAG_OAUTH_CLIENT_ID}') и session_token (type user_token); переменная TAG_OAUTH_CLIENT_ID не задана, upstream_url задан"
+    when: "create_app() и GET /api/catalog (Bearer)"
+    then: "сервер не помечен unconfigured и виден в /api/catalog, подключение способом session_token работает; при этом незаданная переменная в любом другом поле того же beta-сервера (например в upstream_url) по-прежнему делает его unconfigured и скрывает из каталога"
