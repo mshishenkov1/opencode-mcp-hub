@@ -1,0 +1,118 @@
+{
+  "verdict": "request_changes",
+  "iteration": "I-5",
+  "cycle": 2,
+  "scope": {
+    "spec": "installers/docs/spec.md ревизия 1.1 (§0 + N5-P3/P4, N5-R1, N5-C2, N5-B1, N5-I5, N5-U1)",
+    "criteria": "installers/docs/acceptance-criteria.yaml 1.1 (AC-01…AC-137)",
+    "delta": "git diff ab1c0dd...HEAD -- installers reports (ebb8f46, 35a0f94, eebe0f4, fb067de, 15d0f6d, cf7b9f5, f680871, f8d1792, ba335a6)",
+    "previous_review": "reports/review-i5-1.json"
+  },
+  "verification": {
+    "poc_blocker_1": {
+      "method": "независимый PoC вне тестового набора: во временном каталоге собирался пакет (install.sh + common/install-posix.sh + certs + bin + desktop/OpenCode.dmg), манифест правился sed, HOME/TMPDIR подменялись, рядом создавался каталог-жертва с файлом-канарейкой",
+      "cases": 26,
+      "result": "26/26 — код выхода 2, каталог-жертва и канарейка целы, ни одной файловой операции",
+      "matrix": "artifacts[].app_name = '../..<абс.путь>/victim' на путях --uninstall, --dry-run --uninstall, --uninstall --purge, --dry-run --uninstall --purge, установка без флагов, --check, --dry-run, --version, --no-desktop --uninstall; формы значения: абсолютный путь, '..\\\\evil', 'C:\\\\evil', 'OpenCode.app/../../x'; те же формы для ca.install_name и artifacts[].install_name; ca.file и artifacts[].file с обходом и абсолютным путём",
+      "negative_control": "тот же PoC на версии install-posix.sh из ab1c0dd (до фикса): --uninstall → код 0, каталог-жертва УДАЛЁН, в отчёте «Desktop: удалён (/Applications/../../…/victim)» — PoC воспроизводит блокер и, значит, осмысленно проверяет фикс",
+      "conclusion": "блокер 1 первого цикла закрыт; обхода через --check/--purge/--dry-run/комбинации флагов нет — manifest_load вызывается в main до check_system/compute_layout/выбора режима"
+    },
+    "bats": "153/153 ok, exit 0; прогон воспроизведён дважды (bats на macOS, bash 3.2)",
+    "shellcheck": "shellcheck 0.11.0 -s bash по installers/**/*.sh — чисто, код 0",
+    "pester": "не запускался (pwsh в среде отсутствует) — Uninstall.Tests.ps1 (18 тестов) и правки install.ps1 оценены чтением",
+    "trace_ac": "installers/tests/trace-ac.sh: 137 критериев, все unit/integration покрыты; AC-135 — 18 тестов, AC-136 — 10, AC-137 — 2",
+    "mutation_testing": {
+      "method": "8 мутаций через bash/python с откатом git checkout -- installers; после прогона git status по installers/ чист",
+      "result": "4 убиты, 4 выжили",
+      "cases": [
+        {"id": "M1", "mutation": "из manifest_load удалена ветка проверки app_name", "killed": true, "failed_tests": 8, "killers": "35-manifest-paths.bats (AC-11/AC-135)"},
+        {"id": "M2", "mutation": "is_safe_pkg_path: снята ветка обратного слэша (*\\\\*)", "killed": true, "failed_tests": 1, "killers": "AC-135 «app_name с обратным слэшем»"},
+        {"id": "M3", "mutation": "is_safe_pkg_path: снята ветка ведущего /", "killed": true, "failed_tests": 3, "killers": "AC-135 ×2, AC-11 (file=/etc/passwd)"},
+        {"id": "M4", "mutation": "is_safe_pkg_path: не отвергаются '..' и '../*' в начале (осталось только '*/../*')", "killed": true, "failed_tests": 3, "killers": "AC-11/AC-135 по ca.install_name и artifacts[].install_name"},
+        {"id": "M5", "mutation": "apply_profile_block: откат схлопывания — правится только первый блок", "killed": false, "note": "требование ревизии 1.1 (N5-I5/N5-U1) не покрыто ни одним тестом"},
+        {"id": "M6", "mutation": "profile_foreign_env_line: откат к «любое упоминание переменной»", "killed": false, "note": "требование ревизии 1.1 (N5-I5) не покрыто ни одним тестом"},
+        {"id": "M7", "mutation": "release.sh: снята валидация формата --version", "killed": false, "note": "требование ревизии 1.1 (N5-B1) не покрыто ни одним тестом"},
+        {"id": "M8", "mutation": "release.sh: json_escape сделана тождественной", "killed": false, "note": "требование ревизии 1.1 (N5-B1) не покрыто ни одним тестом"}
+      ]
+    },
+    "unvalidated_fields_sweep": "перечитаны все места rm/mv/cp/ln/find/hdiutil/ditto/run_priv/mkdir и сборка путей: bin_target/bin_backup ← install_name (проверяется), ca_target ← ca.install_name (проверяется), $dest/$app_name и /Applications/$app_name ← app_name (проверяется, если поле задано — см. находку 1), $pkg_root/$MF_ca_file и $pkg_root/$MF_cli_file/$MF_desktop_file ← file (проверяется + существование), purge_paths (валидируется целиком до первого удаления), bin_dir ← --prefix (аргумент CLI, не манифест). hub_url и version в файловые операции не попадают — только в строки отчёта. Формат printf везде — константа файла",
+    "minors_cycle_1": {
+      "m4_schema_app_name": "закрыт: manifest.schema.json app_name → $ref pkgPath",
+      "m5_check_path_wider_than_spec": "закрыт текстом спеки: N5-C2 ревизии 1.1 явно описывает поблажку для PATH так же, как для NODE_EXTRA_CA_CERTS (AC-100)",
+      "m6_windows_check_desktop_path": "закрыт: Get-DesktopUninstallEntry отдаёт DisplayTarget = InstallLocation, иначе DisplayName; то же значение в --check и в отчёте --uninstall; поведение зафиксировано в спеке и install-admin.md",
+      "m7_release_version_and_json": "функционально закрыт (проверка формата --version и json_escape для hub_url/desktop_rel/app_name), но без тестов — см. находку 3",
+      "m8_profile_double_block": "функционально закрыт — проверено экспериментально: 1 блок → ручное дублирование → 2 → повторный запуск → 1, третий запуск файл не меняет (идемпотентность сохранена); без тестов — см. находку 3",
+      "m9_foreign_env_line": "функционально закрыт — проверено экспериментально: комментарии и упоминания в тексте молчат, присваивания (NAME=, export NAME=, setenv NAME, set -gx NAME, с отступом) предупреждают, наш собственный путь не считается чужим; без тестов — см. находку 3 и находку 6"
+    },
+    "spec_1_1_review": "требования не ослаблены: N5-P4 расширен (таблица пяти путевых полей, явная фиксация момента проверки «до любой файловой операции, включая --uninstall и --dry-run --uninstall»), N5-R1 детализирован (порядок QuietUninstallString → UninstallString+silent_args → «удалите вручную», ожидание процесса, код 1 при провале, запрет печатать «удалён» без запуска), N5-I1 код 1 расширен на провал деинсталлятора, N5-B1 добавил валидацию --version и экранирование JSON, N5-C2 приведён к реализации без снижения контракта. Расхождений спеки с кодом не найдено, кроме зафиксированной в самой спеке формулировки «app_name проверяется, если поле задано» — см. находку 1"
+  },
+  "findings": [
+    {
+      "severity": "blocker",
+      "where": "installers/common/install-posix.sh:616-625 (manifest_load), 1043-1067 (install_desktop)",
+      "what": "Отсутствующий или пустой artifacts[].app_name при installer_type=\"dmg\" не отвергается, и install_desktop выполняет `run_priv rm -rf \"$dest/\"` — то есть удаление ВСЕГО каталога /Applications (или ~/Applications), а при --system — `sudo rm -rf /Applications/`. Новая проверка обойдена собственным охранником `[ -n \"$MF_desktop_app\" ] &&` (строка 623): поле объявлено необязательным, тогда как строки 1064-1067 подставляют его без проверки на пустоту: `[ -d \"$dest/\" ]` истинно всегда, `rm -rf \"$dest/\"` сносит каталог, следом `ditto \"$mount_point/\" \"$dest/\"`. Схема common/manifest.schema.json требует app_name для dmg (allOf → if installer_type==dmg then required app_name), но схема во время выполнения не применяется — единственный контроль это manifest_load, и он этого не требует. Подтверждено: (а) сквозной прогон install.sh --check на пакете с installer_type dmg и удалённым/пустым app_name печатает «Манифест: корректен» и код 7, а не 2; (б) install_desktop, вызванный при OPENCODE_INSTALLER_SOURCE_ONLY=1 с заглушками границ среды (hdiutil/ditto/run_priv/desktop_dest_dir), получает rm -rf с целью «<dest>/». Эксплуатация не требует ничего сверх подменённого манифеста из модели угроз находки 1 первого цикла: dmg в пакете подлинный, hdiutil attach проходит, verify_package хеш app_name не покрывает. Требуется: для kind=\"desktop\" с installer_type=\"dmg\" сделать app_name обязательным и непустым (mf_require + is_safe_pkg_path) и дополнительно запретить значения-разделители («.», «./x», завершающий «/»), а в install_desktop добавить страховочную проверку непустоты перед rm -rf. Ту же обязательность полезно продублировать в install.ps1 (там пустое app_name подменяется на 'OpenCode' и в rm не попадает, но расхождение с dmg-веткой лучше убрать).",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/windows/install.ps1:891 (Get-DesktopUninstallEntry), 1153-1161 (Invoke-Uninstall)",
+      "what": "Подстановочные символы в app_name не экранируются: `$displayName -like ('*' + $appName.Replace('.app','') + '*')`. Test-PackagePath запрещает '..', '\\', ведущий '/' и букву диска, но не '*' и '?'. До реализации N5-R1 совпадение только печаталось, теперь совпавшая запись реально ИСПОЛНЯЕТСЯ: манифест с app_name=\"*\" совпадает с первой же записью HKCU/HKLM\\...\\Uninstall, и её UninstallString запускается через Start-Process, причём аргументы дополняются подконтрольным манифесту silent_args (строка 1158). Для типовой записи вида `MsiExec.exe /X{GUID}` это даёт запуск msiexec с произвольными добавленными ключами. Требуется экранировать шаблон ([System.Management.Automation.WildcardPattern]::Escape($appName)) либо перейти на сравнение подстрокой (.Contains / -eq), и/или запретить '*' и '?' в Test-PackagePath.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/50-profile.bats, installers/tests/bats/90-release.bats, installers/docs/acceptance-criteria.yaml",
+      "what": "Четыре поведения, которые ревизия 1.1 спеки объявила требованиями, не покрыты ни одним критерием и ни одним тестом — мутации, откатывающие их, выживают: (1) N5-I5/N5-U1 «схлопывание задвоенного маркированного блока профиля» (мутация M5 — откат к правке только первого блока: 0 падений на 50-profile/40-install/60-update); (2) N5-I5 «предупреждение о чужом NODE_EXTRA_CA_CERTS только на присваивание» (мутация M6 — откат к «любое упоминание»: 0 падений; AC-47 подаёт настоящее присваивание и потому нечувствителен); (3) N5-B1 «--version проверяется регулярным выражением, иначе код 2» (мутация M7: 0 падений на 90-release.bats); (4) N5-B1 «строковые значения экранируются при записи в manifest.json» (мутация M8 — json_escape сделана тождественной: 0 падений). Нужны AC и тесты: профиль с двумя блоками → после запуска ровно один; строка-комментарий с именем переменной → предупреждения нет, а `export NAME=<чужое>` → предупреждение с номером строки; release.sh --version 1.17.9 / v1.17.9-magnit.1 / 1.17.9-magnit → код 2 и dist не создан; --hub-url со значением, содержащим кавычку и обратный слэш → манифест синтаксически корректен и значение прочитано установщиком без искажения.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/35-manifest-paths.bats, installers/tests/pester/Uninstall.Tests.ps1",
+      "what": "Набор не ловит находки 1 и 2 этого цикла. Отсутствуют: (а) тест на манифест с installer_type=\"dmg\" БЕЗ app_name и с пустым app_name — ожидание «код 2, ни одной файловой операции» (сейчас манифест принимается, а установка на macOS выполнила бы rm -rf каталога Applications; в bats это проверяемо через --check/--dry-run и через прямой вызов install_desktop с заглушками hdiutil/ditto/run_priv при OPENCODE_INSTALLER_SOURCE_ONLY=1); (б) Pester-тест на Get-DesktopUninstallEntry — сейчас функция целиком замокана во всех тестах Invoke-Uninstall, поэтому логика сопоставления DisplayName (включая подстановочные символы в app_name) не проверяется ни разу; нужен тест на саму функцию с подменённым источником записей реестра, где app_name=\"*\" не должен совпадать с чужой записью.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/windows/install.ps1:900-926 (ConvertFrom-UninstallString)",
+      "what": "Разбор строки деинсталляции не покрывает два реальных случая: (1) путь без кавычек с пробелами (`C:\\Program Files\\App\\unins000.exe /S`) режется по первому пробелу — исполняемым файлом становится «C:\\Program»; (2) аргументы делятся `-split '\\s+'`, поэтому аргумент с пробелом в кавычках (`/D=\"C:\\Program Files\\App\"`) распадается на два. Штатные случаи (кавычки вокруг пути, MsiExec.exe /X{GUID}) разобраны верно и покрыты AC-136, но обе ветки стоит либо обработать, либо явно объявить вне объёма в спеке.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:799-826 (profile_foreign_env_line)",
+      "what": "Новый разбор сузил признак чужого присваивания сильнее, чем требует N5-I5: перестали распознаваться формы `declare -x NODE_EXTRA_CA_CERTS=…`, `typeset -x …`, присваивание внутри составной строки (`if …; then export NODE_EXTRA_CA_CERTS=…; fi`), `env NODE_EXTRA_CA_CERTS=… cmd`. До ревизии 1.1 они предупреждение вызывали — то есть вместе с ложными срабатываниями ушла и часть истинных. Ложных срабатываний больше нет (проверено), поэтому это не регрессия контракта, но список форм в спеке стоит дополнить хотя бы `declare/typeset -x`.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:495-505 (is_safe_pkg_path)",
+      "what": "Проверка написана для путей внутри пакета и потому пропускает значения, бессмысленные как имя приложения: «.», «./OpenCode.app», «OpenCode.app/» и вообще любые значения с «/». Для app_name это даёт цели вида `rm -rf \"/Applications/.\"` и `rm -rf \"/Applications/OpenCode.app/\"` (обе безвредны на BSD/GNU rm, но выражают не то намерение). Спека 1.1 сама называет app_name именем приложения — для него уместна отдельная, более строгая проверка «непустое имя без разделителей пути и не '.'/'..'», как отмечалось ещё в находке 1 первого цикла.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:841-859 (apply_profile_block)",
+      "what": "Схлопывание реализовано как «вырезать все блоки и дописать один в конец», поэтому существующий блок, стоявший в середине файла профиля, при очередном запуске переезжает в конец — раньше он правился на месте. Идемпотентность сохранена (проверено: третий запуск файл не меняет), поведение описано в спеке 1.1, но перенос чужого по расположению блока стоит упомянуть в install-user.md рядом с описанием блока профиля, чтобы не выглядело как самовольная правка порядка строк.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "acknowledged_good": [
+    "Блокер 1 первого цикла закрыт по существу, а не по симптому: проверка перенесена в manifest_load, то есть срабатывает до выбора режима — 26/26 кейсов независимого PoC дают код 2 и нетронутый каталог-жертва, включая --uninstall, --dry-run --uninstall, --uninstall --purge и все четыре формы небезопасного значения; негативный контроль на коде из ab1c0dd воспроизводит удаление",
+    "Находка 2 первого цикла закрыта честно: «Desktop: удалён» печатается только после фактического запуска деинсталлятора с нулевым кодом; отсутствие записи в реестре даёт «удалите вручную» и не портит код выхода; ненулевой код деинсталлятора даёт код выхода 1 (ExitFail), при этом удаление CLI/PATH/переменной/CA не откатывается — ровно как записано в N5-R1 ревизии 1.1",
+    "Invoke-Expression в install.ps1 по-прежнему отсутствует; запуск идёт через Start-Process -FilePath/-ArgumentList (без оболочки) с -Wait -PassThru, то есть ожидание процесса реальное; исполняемый файл берётся из реестра, а не из манифеста",
+    "Тесты 35-manifest-paths.bats нетавтологичны и чувствительны: сверяются с литеральными строками контракта, дополнительно сравнивают побайтовые снимки $HOME, корня --prefix и каталога-жертвы и проверяют ловушку sudo; мутация «удалить проверку app_name» убивает 8 из 13 — совпадает с заявленным в reports/test-report-i5.md",
+    "Pester-набор Uninstall.Tests.ps1 мокает только границы среды (реестр и запуск процесса); состав аргументов, выбор ветки, строки отчёта и код выхода проверяются как есть, ожидания вычислены независимо от реализации",
+    "Валидация покрывает все пять путевых полей и на POSIX, и на Windows; Test-PackagePath строже is_safe_pkg_path (любое вхождение '..' и '\\'), схема манифеста выровнена на pkgPath",
+    "release.sh: --version отвергается до создания dist, json_escape применён к hub_url, имени desktop-файла и app_name; самопроверка пакета N5-B2 сохранена как вторая линия",
+    "Документация приведена к фактическому поведению: install-admin.md §3 таблица удаления и новый раздел «Удаление Desktop на Windows», install-user.md — коды выхода и абзац про Desktop; расхождений с кодом не найдено"
+  ],
+  "dispute_resolutions": []
+}
