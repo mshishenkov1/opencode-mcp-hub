@@ -1,0 +1,18 @@
+{
+  "id": "BUG-I4-002",
+  "related_ac": "AC-84",
+  "severity": "critical",
+  "title": "Desktop не запускается: useCorpStatus вызван вне SDK-провайдера",
+  "repro_steps": [
+    "Собрать Desktop: cd packages/desktop && bun run prebuild && bun run build && bun run package:mac",
+    "Запустить dist/mac-arm64/OpenCode Dev.app"
+  ],
+  "expected": "Приложение стартует, показывает рабочую область; корп-функции (витрина, вход) доступны",
+  "actual": "Экран 'Something went wrong': Error: SDK context must be used within a context provider; стек: use → useCorpStatus → Layout2",
+  "failing_test": "(нет — рендер Electron-экранов не покрыт автотестами; см. reports/test-report-i4.md, ограничения)",
+  "stacktrace": "Error: SDK context must be used within a context provider\n  at useCorpStatus (main-*.js)\n  at Layout2 (main-*.js)",
+  "suspected_area": "packages/app/src/pages/layout.tsx (корп-правка) + packages/app/src/context/corp.ts — хук вызывается выше провайдера SDK",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "ручная проверка пользователя на собранном Desktop 2026-08-20"
+}

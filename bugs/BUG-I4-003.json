@@ -1,0 +1,17 @@
+{
+  "id": "BUG-I4-003",
+  "related_ac": "AC-101",
+  "severity": "high",
+  "title": "corp/build.ts --desktop пропускает electron-vite build",
+  "repro_steps": [
+    "CORP_HUB_URL=https://localhost:8443 bun run corp/build.ts --desktop --skip-cli"
+  ],
+  "expected": "Собирается Desktop-приложение (prebuild → electron-vite build → electron-builder), артефакты в packages/desktop/dist",
+  "actual": "electron-builder падает: Application entry file out/main/index.js was not found in this archive (шаг сборки Electron не выполнялся)",
+  "failing_test": "(нет — сборка Desktop в CI не выполняется, см. corp-ci.yml)",
+  "stacktrace": "app-builder-lib asarFileChecker: Application entry file ... is corrupted / was not found",
+  "suspected_area": "corp/build.ts — ветка --desktop вызывает package:mac без предшествующих prebuild/build",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "оркестратор при ручной сборке 2026-08-20"
+}
