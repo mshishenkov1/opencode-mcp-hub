@@ -16,9 +16,14 @@ on:
       - 'installers/**'
       - '.github/workflows/installers.yml'
   push:
-    branches: [main]
+    branches:
+      - main
+      # Работа конвейера идёт в ветках pipeline/**, PR в main до готовности итерации
+      # не открывается — без этой строки набор установщиков в CI не гоняется вовсе.
+      - 'pipeline/**'
     paths:
       - 'installers/**'
+      - '.github/workflows/installers.yml'
 
 permissions:
   contents: read
