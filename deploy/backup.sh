@@ -23,7 +23,7 @@
 #   docker compose ... exec -T postgres dropdb   -U hub --if-exists hub
 #   docker compose ... exec -T postgres createdb -U hub hub
 #   docker compose ... exec -T postgres pg_restore -U hub -d hub --no-owner \
-#       < backups/hub-20260820-1200.dump
+#       < backups/hub-20260820-120000.dump
 #   docker compose ... start hub
 #   bash deploy/smoke.sh https://mcp-hub.corp.tander.ru
 # Схема приводится к head миграциями при старте Hub (HUB_DB_AUTO_MIGRATE=true),
@@ -34,6 +34,10 @@
 # «Планировщика заданий» и cron: молчаливых провалов нет, всё пишется в stderr).
 
 set -euo pipefail
+# Дамп и копия .env содержат секреты (в т.ч. HUB_ENCRYPTION_KEY): создаём их сразу
+# с правами 600, а не выставляем их после записи — иначе .part и env-*.bak
+# кратко существуют с правами по umask.
+umask 077
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DEPLOY_DIR"
@@ -67,9 +71,14 @@ if [ -z "$("${COMPOSE[@]}" ps -q postgres 2>/dev/null)" ]; then
 fi
 
 mkdir -p "$BACKUP_DIR"
-STAMP="$(date +%Y%m%d-%H%M)"
+# Секунды в метке: два прогона в пределах минуты не должны перетирать копию.
+STAMP="$(date +%Y%m%d-%H%M%S)"
 DUMP="$BACKUP_DIR/hub-$STAMP.dump"
 TMP="$DUMP.part"
+if [ -e "$DUMP" ]; then
+  echo "Копия $DUMP уже существует — прогон прерван, чтобы её не перетереть." >&2
+  exit 1
+fi
 trap 'rm -f "$TMP"' EXIT
 
 echo "Дамп базы $BACKUP_DB → $DUMP"

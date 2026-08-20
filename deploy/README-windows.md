@@ -198,9 +198,18 @@ MCP-сессии, окна rate-limit и состояние circuit-breaker; п�
 
 Резервная копия — скриптом `deploy/backup.sh` (WSL) или `deploy/backup.ps1`
 (PowerShell 7, без WSL). Оба делают одно и то же: дамп Postgres в
-`deploy/backups/hub-<дата>-<время>.dump` (формат `custom`), рядом копия `.env`,
+`deploy/backups/hub-<ГГГГММДД>-<ЧЧММСС>.dump` (формат `custom`), рядом копия `.env`,
 проверка сигнатуры дампа и ротация последних `N` копий (по умолчанию 7).
 Ненулевой код возврата при любой ошибке — задание в планировщике не провалится молча.
+
+Доступ к обоим файлам ограничивается **только владельцем**: `backup.sh` ставит
+`chmod 600` (и работает под `umask 077`, чтобы файл не существовал открытым даже
+мгновение), `backup.ps1` снимает наследование ACL и оставляет единственное правило —
+полный доступ текущему пользователю. Это существенно: `.env` содержит
+`HUB_ENCRYPTION_KEY`, и вместе с дампом он даёт доступ к токенам целевых систем, а
+унаследованный от каталога ACL на доменной машине нередко включает чтение для
+`Authenticated Users`. Метка времени — с секундами, поэтому два прогона в пределах
+минуты не перетирают друг друга; если файл с такой меткой уже есть, прогон прерывается.
 
 ```bash
 # внутри WSL, каталог deploy/
@@ -237,7 +246,7 @@ docker compose -f docker-compose.yml -f docker-compose.windows.yml exec -T postg
 docker compose -f docker-compose.yml -f docker-compose.windows.yml exec -T postgres \
   createdb -U hub hub
 docker compose -f docker-compose.yml -f docker-compose.windows.yml exec -T postgres \
-  pg_restore -U hub -d hub --no-owner < backups/hub-20260820-1200.dump
+  pg_restore -U hub -d hub --no-owner < backups/hub-20260820-120000.dump
 docker compose -f docker-compose.yml -f docker-compose.windows.yml start hub
 ./smoke.sh https://mcp-hub.corp.tander.ru
 ```

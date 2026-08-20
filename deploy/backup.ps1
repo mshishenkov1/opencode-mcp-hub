@@ -10,6 +10,12 @@
     Дамп снимается внутри контейнера и забирается docker compose cp: так на Windows
     не участвует перенаправление вывода PowerShell, которое портит двоичный файл.
 
+    Дамп и копия .env содержат персональные данные, зашифрованные токены и
+    HUB_ENCRYPTION_KEY, поэтому у обоих файлов снимается наследование ACL и
+    остаётся единственное правило — полный доступ текущему пользователю
+    (аналог chmod 600 в backup.sh). Унаследованный от каталога ACL на доменной
+    машине нередко включает чтение для Authenticated Users.
+
     Код возврата: 0 — копия снята и проверена, 1 — любая ошибка. Годится для
     «Планировщика заданий»: молчаливых провалов нет.
 
@@ -23,7 +29,7 @@
       docker compose -f docker-compose.yml -f docker-compose.windows.yml stop hub
       docker compose ... exec -T postgres dropdb   -U hub --if-exists hub
       docker compose ... exec -T postgres createdb -U hub hub
-      cmd /c "docker compose ... exec -T postgres pg_restore -U hub -d hub --no-owner < backups\hub-20260820-1200.dump"
+      cmd /c "docker compose ... exec -T postgres pg_restore -U hub -d hub --no-owner < backups\hub-20260820-120000.dump"
       docker compose ... start hub
       pwsh -File .\smoke.ps1 https://mcp-hub.corp.tander.ru
     Схема приводится к head миграциями при старте Hub (HUB_DB_AUTO_MIGRATE=true),
@@ -54,6 +60,26 @@ function Die {
     exit 1
 }
 
+function Protect-File {
+    # Права только владельцу: наследование выключено, унаследованные правила не
+    # копируются, остаётся полный доступ текущему пользователю. Администраторы
+    # машины при необходимости берут владение файлом штатными средствами.
+    param([string] $Path)
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+        # $false во втором аргументе — унаследованные правила НЕ копировать в явные;
+        # после этого $acl.Access содержит только явные правила, их и убираем.
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $me, "FullControl", "Allow"))
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch {
+        Die "Не удалось ограничить доступ к $Path : $($_.Exception.Message)"
+    }
+}
+
 if (-not $BackupDir) { $BackupDir = Join-Path $deployDir "backups" }
 if ($Keep -lt 1) { Die "Keep должен быть >= 1, получено: $Keep" }
 
@@ -78,9 +104,13 @@ if ($ps.Code -ne 0 -or -not ($ps.Output -join "").Trim()) {
 }
 
 New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd-HHmm"
+# Секунды в метке: два прогона в пределах минуты не должны перетирать копию.
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $dump = Join-Path $BackupDir "hub-$stamp.dump"
 $inContainer = "/tmp/hub-$stamp.dump"
+if (Test-Path $dump) {
+    Die "Копия $dump уже существует — прогон прерван, чтобы её не перетереть."
+}
 
 Write-Host "Дамп базы $Database → $dump"
 $r = Invoke-Compose @("exec", "-T", "postgres", "pg_dump", "-U", $DbUser, "-d", $Database, "--format=custom", "-f", $inContainer)
@@ -104,11 +134,14 @@ if ($magic -ne "PGDMP") {
     Remove-Item -Force -ErrorAction SilentlyContinue $dump
     Die "Дамп пуст или не в формате custom — копия не создана."
 }
+Protect-File $dump
 
 # .env хранится рядом: без HUB_ENCRYPTION_KEY дамп бесполезен.
 $envFile = Join-Path $deployDir ".env"
 if (Test-Path $envFile) {
-    Copy-Item $envFile (Join-Path $BackupDir "env-$stamp.bak") -Force
+    $envCopy = Join-Path $BackupDir "env-$stamp.bak"
+    Copy-Item $envFile $envCopy -Force
+    Protect-File $envCopy
 } else {
     Write-Warning "$envFile не найден, копия ключей не сделана."
 }
