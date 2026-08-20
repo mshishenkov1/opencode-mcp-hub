@@ -1,0 +1,20 @@
+{
+  "id": "BUG-I3-001",
+  "related_ac": "AC-157",
+  "severity": "high",
+  "title": "Запись cb:<alias> живёт HUB_CB_RESET*2 и истекает раньше права на пробу: пока проба в полёте, выключатель «забывает» открытое окно и пропускает запросы на лежащий upstream",
+  "repro_steps": [
+    "Поднять Hub с HUB_CB_FAILURES=3, HUB_CB_RESET=30, HUB_UPSTREAM_TIMEOUT=30, HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300, HUB_CB_PROBE_GRACE=5",
+    "Тремя вызовами POST /mcp/gitlab с upstream, отвечающим 500, открыть выключатель (момент открытия T0, состояние cb:gitlab = {failures: 3, open_until: T0+30})",
+    "Сдвинуть часы на 31 с (T0+31) и отправить запрос: он захватывает право на пробу (cb:gitlab:probe с TTL 305 с) и удерживается upstream'ом — ответ ещё не получен (типично для SSE-потока: до HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300 с)",
+    "Не отпуская пробу, сдвинуть часы ещё на 60 с (T0+91) и отправить второй запрос"
+  ],
+  "expected": "AC-157 (R-P10, ревизия 2.2): пока проба в полёте, право на неё второй раз не выдаётся — второй запрос получает 503 с JSON-RPC -32004 upstream_unavailable и Retry-After, upstream не вызывается (счётчик обращений к upstream остаётся 4)",
+  "actual": "Второй запрос уходит на upstream и возвращает 200 (upstream.calls = 5). Причина: запись cb:<alias> пишется с ttl = settings.cb_reset * 2 (src/hub/proxy.py, CircuitBreaker.record_failure/record_success), то есть живёт 60 с от момента открытия окна, тогда как право на пробу cb:<alias>:probe теперь живёт max(30, 30, 300) + 5 = 305 с. Как только cb:gitlab истекает по TTL, CircuitBreaker.state() возвращает {failures: 0, open_until: 0.0}, check() отдаёт BreakerDecision(retry_after=None, was_open=False) и запросы идут на лежащий upstream в обход выключателя; ключ пробы при этом ещё жив, но его никто не смотрит. Граница воспроизводится точно: сдвиг на 28 с после захвата пробы — 503 (окно помнится), на 29 с и больше (T0+60 = TTL записи cb:gitlab) — 200 и обращение к upstream.",
+  "failing_test": "tests/test_proxy.py::test_probe_right_is_not_reissued_while_probe_is_in_flight",
+  "stacktrace": "tests/test_proxy.py:779: AssertionError\n    blocked = await hub.post(\"/mcp/gitlab\", content=_call(5), headers=headers)\n>   assert blocked.status_code == 503, blocked.text\nE   AssertionError: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"вызван list_mrs\"}],\"isError\":false}}\nE   assert 200 == 503\nE    +  where 200 = <Response [200 OK]>.status_code",
+  "suspected_area": "src/hub/proxy.py — CircuitBreaker.record_failure/record_success: ttl=self.settings.cb_reset * 2 для ключа cb:<alias>. Гипотеза: TTL записи состояния должен быть не меньше TTL права на пробу (_probe_ttl()), иначе продление права, сделанное в H5-1, ничего не защищает — окно перестаёт существовать раньше, чем истекает право.",
+  "impact": "Ровно тот сценарий, ради которого делался H5-1: длинная проба (SSE — до HUB_UPSTREAM_SSE_IDLE_TIMEOUT) переживает запись состояния, и через HUB_CB_RESET*2 после открытия окна выключатель фактически выключается — весь клиентский трафик alias идёт на недоступный upstream до первой новой ошибки. При дефолтах окно беззащитности — с 60-й по 300-ю секунду пробы.",
+  "iteration": 1,
+  "status": "open"
+}

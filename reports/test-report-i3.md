@@ -352,3 +352,71 @@ SQLite через событие `before_cursor_execute`.
 | `src/hub/routes/oauth.py` | 93 % |
 | `src/hub/routes/web.py` | 91 % |
 | `src/hub/app.py` | 96 % |
+
+## 9. H5 / ревизия 2.2 spec.md (AC-157…AC-168)
+
+Вход: ревизия 2.2 `spec.md` (правила R-P10, R-M4, R-T1, R-T5, §9.2) и новые критерии
+AC-157…AC-168 — перенос HAC-01…HAC-12 бэклога Hub. Код продукта не изменялся
+(`scripts/check_zone_diff.py test` — ok, зона `tests/` + `bugs/`).
+
+### 9.1 Итоги прогона
+
+| Показатель | Значение |
+|---|---|
+| Тестов в сьюте | **649** (было 633, добавлено 16) + 1 нагрузочный под маркером `load` |
+| Прошло / упало | **648 / 1** (два последовательных прогона, разные seed `pytest-randomly`, — тот же единственный отказ) |
+| Skip / xfail | 0 |
+| Deselected | 1 (`tests/test_load_sse.py::test_hundred_parallel_sse_streams`, маркер `load`) |
+| `ruff check src tests` | чисто |
+| `scripts/check_ac_traceability.py` | G6 OK: все **168** критериев покрыты |
+| `scripts/check_zone_diff.py test` | ok: изменения в пределах зоны |
+| Покрытие `src/` (строки) | **93 %** (`src/hub/proxy.py` — 93 %, `src/hub/routes/oauth.py` — 93 %) |
+| `diff-cover` к `main` | **92 %** (порог 90 %) |
+| Багов заведено | **1** — `bugs/BUG-I3-001.json` (`severity: high`, `related_ac: AC-157`) |
+| Помечено `flaky_suspect` | 0 |
+
+Прирост по файлам: `test_proxy.py` 31 → 38, `test_oauth_as.py` 73 → 82.
+В `tests/support.py` расширен `RecordingKeyValueStore`: добавлены `deleted_keys` и `reset_log()`
+(счёт операций удаления в KV для AC-165/AC-166); существующее поведение `written_keys` не менялось.
+
+### 9.2 Новые критерии AC-157…AC-168
+
+| AC | Тест | Что зафиксировано |
+|---|---|---|
+| AC-157 | `test_proxy.py::test_probe_right_is_not_reissued_while_probe_is_in_flight` | **ПАДАЕТ** → `BUG-I3-001`. Проба удерживается upstream'ом, часы +60 с: ожидается 503 `-32004` без обращения к upstream, фактически запрос уходит на лежащий upstream и возвращает 200 |
+| AC-158 | `test_proxy.py::test_probe_ttl_covers_the_longest_possible_request` | при `HUB_CB_RESET=30`, `HUB_UPSTREAM_TIMEOUT=30`, `HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300`, `HUB_CB_PROBE_GRACE=5` запись `cb:gitlab:probe` = `{until: now+305}`; `Retry-After` отказа в half-open = 305 (≥ 1); ключ жив на 304-й секунде и исчезает после 306-й (TTL ровно 305) |
+| AC-159 | `test_proxy.py::test_successful_probe_releases_right_immediately` | после успешной пробы `cb:gitlab:probe` отсутствует **без сдвига часов** (снят удалением, не по TTL), `cb:gitlab == {failures: 0, open_until: 0.0}`, следующий вызов уходит на upstream |
+| AC-160 | `test_oauth_as.py::test_non_ip_forwarded_for_falls_back_to_connection_address` | `HUB_TRUST_PROXY=true`, соединение `10.0.0.7`, заголовок `not-an-ip-ZZTOP, 10.1.1.1` → ключ `rl:register:10.0.0.7`, `oauth_clients.created_ip = 10.0.0.7` (второй элемент списка тоже не берётся) |
+| AC-161 | `test_oauth_as.py::test_overlong_forwarded_for_is_rejected_without_parsing` | заголовок длиной 4096 → ключ `rl:register:10.0.0.7`; ни один ключ, записанный в KV за запрос, не длиннее `len('rl:register:') + 45` |
+| AC-162 | `test_oauth_as.py::test_valid_forwarded_for_gives_normalized_ip_key` (5 параметров) | `203.0.113.5`, `[2001:db8::1]:443`, `2001:db8::1`, `[::1]:8080`, `2001:DB8:0:0:0:0:0:1` → ключи с нормализованным адресом (`2001:db8::1`, `::1`), а не с адресом соединения; тот же адрес в `created_ip` |
+| AC-163 | `test_oauth_as.py::test_rejected_forwarded_for_value_is_not_logged` | запись `forwarded_for_rejected` есть, её уровень — только WARNING, в ней указано имя заголовка; сырого значения нет ни в одной записи журнала (сообщение + все `extra`), ни в `audit_log`/`users`/`api_keys`/`connections`, ни в `oauth_clients` |
+| AC-164 | `test_oauth_as.py::test_forwarded_for_is_not_read_when_trust_proxy_is_off` | дефолт `HUB_TRUST_PROXY=false`: `X-Forwarded-For: 203.0.113.5` игнорируется, ключ и `created_ip` — адрес соединения |
+| AC-165 | `test_proxy.py::test_closed_breaker_writes_state_once_and_deletes_nothing` | в закрытом состоянии на один успешно проксированный запрос — ровно одна запись `cb:gitlab` и **ноль** удалений ключей `cb:*` (счётчик операций `RecordingKeyValueStore`), ответ клиенту прежний |
+| AC-166 | `test_proxy.py::test_requests_after_successful_probe_do_not_delete_probe_key` | после успешной пробы два обычных запроса дают ноль удалений `cb:*`, ключ пробы отсутствует, состояние закрыто |
+| AC-167 | `test_proxy.py::test_failed_probe_stores_threshold_state` | провал пробы (502) → `cb:gitlab == {failures: HUB_CB_FAILURES, open_until: now + HUB_CB_RESET}`, ключ пробы удалён, следующий запрос — 503 `-32004`, upstream не вызван |
+| AC-168 | `test_proxy.py::test_reopened_window_matches_state_reached_by_accumulation` | состояние окна, открытого провалом пробы, совпадает с состоянием окна, набранного `HUB_CB_FAILURES` ошибками (счётчик не обнуляется — мутация `failures = 0` в ветке повторного открытия падает здесь); наблюдаемое поведение R-P10 прежнее: 503 до истечения окна, успешная проба закрывает выключатель |
+
+Тесты AC-151 и AC-152 (ревизия 2.1) прошли **без правок ожиданий** — вторая половина требования
+HAC-12 выполнена: изменения H5-1…H5-4 наблюдаемое поведение R-P10 не изменили.
+
+### 9.3 Триаж падения: `BUG-I3-001` (`code_bug`, severity high)
+
+`test_probe_right_is_not_reissued_while_probe_is_in_flight` (AC-157) — единственное падение прогона,
+воспроизводится детерминированно на обоих прогонах и не зависит от порядка тестов.
+
+Симптом: пока пробный запрос half-open ещё в полёте, второй запрос уходит на лежащий upstream
+(ожидалось 503 `-32004`, получено 200).
+
+Причина по данным теста: запись состояния `cb:<alias>` пишется с `ttl = HUB_CB_RESET * 2` (60 с при
+дефолтах), а право на пробу `cb:<alias>:probe` после H5-1 живёт
+`max(30, 30, 300) + 5 = 305` с. Как только `cb:<alias>` истекает по TTL, `CircuitBreaker.state()`
+возвращает `{failures: 0, open_until: 0.0}` — выключатель «забывает» открытое окно и перестаёт
+смотреть на ключ пробы вовсе. Граница снята экспериментом: сдвиг часов на 28 с после захвата права
+— 503 (окно помнится), на 29 с и больше (момент `T0 + HUB_CB_RESET*2`) — 200 и обращение к upstream.
+
+Последствие — ровно тот сценарий, ради которого делался H5-1: длинная проба (SSE — до
+`HUB_UPSTREAM_SSE_IDLE_TIMEOUT`) переживает запись состояния, и с 60-й по 300-ю секунду пробы весь
+трафик alias идёт на недоступный upstream.
+
+Гипотеза для DEV (не приговор): TTL записи `cb:<alias>` должен быть не меньше `_probe_ttl()`.
+Падающий тест остаётся в сьюте как регрессионный; `src/` TEST-агентом не изменялся.

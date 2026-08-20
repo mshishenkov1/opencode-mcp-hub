@@ -423,19 +423,29 @@ def capture_json_logs() -> Iterator[JsonLogLines]:
 
 
 class RecordingKeyValueStore(InMemoryKeyValueStore):
-    """In-memory KeyValueStore, запоминающий все ключи, под которыми что-либо записывалось."""
+    """In-memory KeyValueStore, запоминающий все ключи, под которыми что-либо записывалось
+    (``written_keys``) и которые удалялись (``deleted_keys``, для счёта операций KV в AC-165/AC-166)."""
 
     def __init__(self, clock: Clock | None = None) -> None:
         super().__init__(clock)
         self.written_keys: list[str] = []
+        self.deleted_keys: list[str] = []
 
     async def set(self, key: str, value: Any, ttl: float | None = None) -> None:
         self.written_keys.append(key)
         await super().set(key, value, ttl)
 
+    async def delete(self, key: str) -> None:
+        self.deleted_keys.append(key)
+        await super().delete(key)
+
     async def rate_limit_hit(self, key: str, now: float, window: float, limit: int) -> tuple[bool, float]:
         self.written_keys.append(key)
         return await super().rate_limit_hit(key, now, window, limit)
+
+    def reset_log(self) -> None:
+        self.written_keys.clear()
+        self.deleted_keys.clear()
 
 
 async def kv_session(app: Any, login_id: str) -> dict[str, Any] | None:

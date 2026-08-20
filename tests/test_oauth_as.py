@@ -1,26 +1,32 @@
-"""Hub как authorization server (R-O1..R-O13): AC-75..AC-101, AC-148, AC-153, AC-155."""
+"""Hub как authorization server (R-O1..R-O13): AC-75..AC-101, AC-148, AC-153, AC-155,
+AC-160..AC-164 (ревизия 2.2, R-T5)."""
 
 from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
 import pytest
 
+from hub.clock import ManualClock
 from hub.crypto import jwt_decode, jwt_encode, sha256_hex
 from tests.conftest import Hub, HubFactory
 from tests.support import (
     CATALOG_ENV,
     LOOPBACK_REDIRECT,
     PUBLIC_URL,
+    RecordingKeyValueStore,
     audit_rows,
     authorize_params,
     authorize_to_code,
     bearer,
     connected_client,
+    dump_all_tables,
     exchange_code,
     fetch_rows,
     html_error_code,
@@ -31,6 +37,7 @@ from tests.support import (
     pkce_pair,
     provider_callback,
     query_of,
+    record_text,
     refresh_grant,
     register_client,
     seed_connection,
@@ -370,6 +377,125 @@ async def test_forwarded_for_does_not_affect_auth_or_alias(
         headers={"Content-Type": "application/json", "X-Forwarded-For": XFF_TWO_HOPS},
     )
     assert anonymous.status_code == 401, anonymous.text
+
+
+# --- AC-160..AC-164 (ревизия 2.2: X-Forwarded-For валидируется как IP) ------
+
+PEER_IP = "10.0.0.7"
+PEER_KEY = f"rl:register:{PEER_IP}"
+GARBAGE_XFF = "not-an-ip-ZZTOP"
+MAX_IP_KEY_LEN = len("rl:register:") + 45
+
+
+@asynccontextmanager
+async def _peer(hub: Hub, host: str = PEER_IP) -> AsyncIterator[httpx.AsyncClient]:
+    """Клиент с заданным адресом TCP-соединения (``request.client.host``)."""
+    transport = httpx.ASGITransport(app=hub.app, client=(host, 51234))
+    async with httpx.AsyncClient(transport=transport, base_url=hub.base_url) as client:
+        yield client
+
+
+async def _register_from(hub: Hub, *, forwarded: str | None, host: str = PEER_IP) -> httpx.Response:
+    headers = {} if forwarded is None else {"X-Forwarded-For": forwarded}
+    async with _peer(hub, host) as client:
+        return await client.post("/oauth/register", json=_register_payload(), headers=headers)
+
+
+def _register_keys(kv: RecordingKeyValueStore) -> list[str]:
+    return [key for key in kv.written_keys if key.startswith("rl:register:")]
+
+
+@pytest.mark.ac("AC-160")
+async def test_non_ip_forwarded_for_falls_back_to_connection_address(
+    make_hub: HubFactory, clock: ManualClock
+) -> None:
+    kv = RecordingKeyValueStore(clock)
+    hub = await _hub(make_hub, trust_proxy=True, kv=kv)
+
+    response = await _register_from(hub, forwarded=f"{GARBAGE_XFF}, 10.1.1.1")
+    assert response.status_code == 201, response.text
+
+    assert _register_keys(kv) == [PEER_KEY]
+    rows = await fetch_rows(hub.app, "SELECT created_ip FROM oauth_clients")
+    assert [row["created_ip"] for row in rows] == [PEER_IP]
+
+
+@pytest.mark.ac("AC-161")
+async def test_overlong_forwarded_for_is_rejected_without_parsing(
+    make_hub: HubFactory, clock: ManualClock
+) -> None:
+    kv = RecordingKeyValueStore(clock)
+    hub = await _hub(make_hub, trust_proxy=True, kv=kv)
+
+    response = await _register_from(hub, forwarded="1" * 4096)
+    assert response.status_code == 201, response.text
+
+    assert _register_keys(kv) == [PEER_KEY]
+    longest = max(len(key) for key in kv.written_keys)
+    assert longest <= MAX_IP_KEY_LEN, f"в KV появился ключ длиннее ожидаемого: {longest}"
+
+
+@pytest.mark.ac("AC-162")
+@pytest.mark.parametrize(
+    ("forwarded", "expected"),
+    [
+        ("203.0.113.5", "203.0.113.5"),
+        ("[2001:db8::1]:443", "2001:db8::1"),
+        ("2001:db8::1", "2001:db8::1"),
+        ("[::1]:8080", "::1"),
+        ("2001:DB8:0:0:0:0:0:1", "2001:db8::1"),
+    ],
+)
+async def test_valid_forwarded_for_gives_normalized_ip_key(
+    make_hub: HubFactory, clock: ManualClock, forwarded: str, expected: str
+) -> None:
+    kv = RecordingKeyValueStore(clock)
+    hub = await _hub(make_hub, trust_proxy=True, kv=kv)
+
+    response = await _register_from(hub, forwarded=forwarded)
+    assert response.status_code == 201, response.text
+
+    assert _register_keys(kv) == [f"rl:register:{expected}"]
+    rows = await fetch_rows(hub.app, "SELECT created_ip FROM oauth_clients")
+    assert [row["created_ip"] for row in rows] == [expected]
+
+
+@pytest.mark.ac("AC-163")
+async def test_rejected_forwarded_for_value_is_not_logged(
+    make_hub: HubFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    hub = await _hub(make_hub, trust_proxy=True)
+    caplog.clear()
+
+    response = await _register_from(hub, forwarded=GARBAGE_XFF)
+    assert response.status_code == 201, response.text
+
+    rejected = [r for r in caplog.records if r.getMessage() == "forwarded_for_rejected"]
+    assert rejected, "нет записи WARNING о непринятом заголовке"
+    assert {r.levelname for r in rejected} == {"WARNING"}
+    assert "X-Forwarded-For" in record_text(rejected[0])
+    for record in caplog.records:
+        assert GARBAGE_XFF not in record_text(record)
+    assert GARBAGE_XFF not in await dump_all_tables(hub.app)
+    assert GARBAGE_XFF not in json.dumps(
+        await fetch_rows(hub.app, "SELECT * FROM oauth_clients"), default=str, ensure_ascii=False
+    )
+
+
+@pytest.mark.ac("AC-164")
+async def test_forwarded_for_is_not_read_when_trust_proxy_is_off(
+    make_hub: HubFactory, clock: ManualClock
+) -> None:
+    kv = RecordingKeyValueStore(clock)
+    hub = await _hub(make_hub, kv=kv)
+    assert hub.settings.trust_proxy is False
+
+    response = await _register_from(hub, forwarded="203.0.113.5")
+    assert response.status_code == 201, response.text
+
+    assert _register_keys(kv) == [PEER_KEY]
+    rows = await fetch_rows(hub.app, "SELECT created_ip FROM oauth_clients")
+    assert [row["created_ip"] for row in rows] == [PEER_IP]
 
 
 # --- AC-83, AC-148 ---------------------------------------------------------

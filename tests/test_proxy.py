@@ -1,4 +1,5 @@
-"""MCP-proxy (R-P1..R-P11): AC-114..AC-121, AC-125..AC-130, AC-151, AC-152."""
+"""MCP-proxy (R-P1..R-P11): AC-114..AC-121, AC-125..AC-130, AC-151, AC-152,
+AC-157..AC-159 и AC-165..AC-168 (ревизия 2.2)."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
+from hub.clock import ManualClock
 from hub.crypto import jwt_decode, jwt_encode
 from hub.proxy import SESSION_PREFIX
 from tests.conftest import Hub, HubFactory
@@ -18,6 +20,7 @@ from tests.support import (
     INITIALIZE_PARAMS,
     SSE_MEDIA_TYPE,
     UPSTREAM_ACCESS,
+    RecordingKeyValueStore,
     asgi_stream,
     connected_client,
     execute,
@@ -721,6 +724,239 @@ async def test_only_one_request_probes_upstream_in_half_open(make_hub: HubFactor
     assert hub.upstream.calls == 5
     state = await hub.app.state.kv.get("cb:gitlab")
     assert state == {"failures": 0, "open_until": 0.0}
+
+
+# --- AC-157, AC-158, AC-159 (ревизия 2.2: TTL права на пробу) ---------------
+
+PROBE_KEY = "cb:gitlab:probe"
+CB_KEY = "cb:gitlab"
+# max(HUB_CB_RESET=30, HUB_UPSTREAM_TIMEOUT=30, HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300) + GRACE=5
+PROBE_TTL = 305.0
+CB_SETTINGS: dict[str, Any] = {
+    "cb_failures": 3,
+    "cb_reset": 30,
+    "upstream_timeout": 30.0,
+    "upstream_sse_idle_timeout": 300.0,
+    "cb_probe_grace": 5.0,
+}
+
+
+def _held_probe(gate: asyncio.Event) -> Any:
+    """Ответ upstream, который удерживается до ``gate.set()`` (проба «в полёте»)."""
+
+    async def hold(recorded: Any) -> httpx.Response:
+        await gate.wait()
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": recorded.json_body["id"], "result": {"ok": True}}
+        )
+
+    return hold
+
+
+async def _await_upstream_calls(hub: Hub, expected: int) -> None:
+    async with asyncio.timeout(5):
+        while hub.upstream.calls < expected:
+            await asyncio.sleep(0)
+
+
+@pytest.mark.ac("AC-157")
+async def test_probe_right_is_not_reissued_while_probe_is_in_flight(make_hub: HubFactory) -> None:
+    """Проба длится дольше HUB_CB_RESET — право на неё второй раз не выдаётся."""
+    hub = await _hub(make_hub, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    gate = asyncio.Event()
+    hub.upstream.push(_held_probe(gate))
+    hub.clock.advance(31)
+    probe = asyncio.create_task(hub.post("/mcp/gitlab", content=_call(4), headers=headers))
+    try:
+        await _await_upstream_calls(hub, 4)
+        # Ответ пробы ещё не получен, а часы ушли далеко за HUB_CB_RESET.
+        hub.clock.advance(60)
+        blocked = await hub.post("/mcp/gitlab", content=_call(5), headers=headers)
+        assert blocked.status_code == 503, blocked.text
+        error = blocked.json()["error"]
+        assert error["code"] == CODE_UPSTREAM
+        assert error["data"]["reason"] == "upstream_unavailable"
+        assert int(blocked.headers["Retry-After"]) >= 1
+        assert hub.upstream.calls == 4, "на лежащий upstream ушла вторая проба"
+    finally:
+        gate.set()
+        assert (await probe).status_code == 200
+
+
+@pytest.mark.ac("AC-158")
+async def test_probe_ttl_covers_the_longest_possible_request(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    gate = asyncio.Event()
+    hub.upstream.push(_held_probe(gate))
+    hub.clock.advance(31)
+    claimed_at = hub.clock.time()
+    probe = asyncio.create_task(hub.post("/mcp/gitlab", content=_call(4), headers=headers))
+    try:
+        await _await_upstream_calls(hub, 4)
+        record = await hub.app.state.kv.get(PROBE_KEY)
+        assert record == {"until": pytest.approx(claimed_at + PROBE_TTL)}
+
+        # Retry-After отказа в half-open считается от until и не меньше 1 секунды.
+        refused = await hub.post("/mcp/gitlab", content=_call(5), headers=headers)
+        assert refused.status_code == 503, refused.text
+        retry_after = int(refused.headers["Retry-After"])
+        assert retry_after == int(PROBE_TTL) >= 1
+
+        # Ключ живёт ровно PROBE_TTL: за секунду до истечения он на месте, после — нет.
+        hub.clock.advance(PROBE_TTL - 1)
+        assert await hub.app.state.kv.get(PROBE_KEY) is not None
+        hub.clock.advance(2)
+        assert await hub.app.state.kv.get(PROBE_KEY) is None
+    finally:
+        gate.set()
+        assert (await probe).status_code == 200
+
+
+@pytest.mark.ac("AC-159")
+async def test_successful_probe_releases_right_immediately(make_hub: HubFactory) -> None:
+    """Право снимается явным удалением, а не по TTL: часы после пробы не сдвигались."""
+    hub = await _hub(make_hub, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    hub.clock.advance(31)
+    probe = await hub.post("/mcp/gitlab", content=_call(4), headers=headers)
+    assert probe.status_code == 200, probe.text
+    assert hub.upstream.calls == 4
+
+    assert await hub.app.state.kv.get(PROBE_KEY) is None
+    assert await hub.app.state.kv.get(CB_KEY) == {"failures": 0, "open_until": 0.0}
+
+    following = await hub.post("/mcp/gitlab", content=_call(5), headers=headers)
+    assert following.status_code == 200, following.text
+    assert hub.upstream.calls == 5
+
+
+# --- AC-165, AC-166 (ревизия 2.2: удалений в KV на горячем пути нет) --------
+
+
+def _cb_writes(kv: RecordingKeyValueStore) -> list[str]:
+    return [key for key in kv.written_keys if key == CB_KEY]
+
+
+def _cb_deletes(kv: RecordingKeyValueStore) -> list[str]:
+    return [key for key in kv.deleted_keys if key.startswith("cb:")]
+
+
+@pytest.mark.ac("AC-165")
+async def test_closed_breaker_writes_state_once_and_deletes_nothing(
+    make_hub: HubFactory, clock: ManualClock
+) -> None:
+    kv = RecordingKeyValueStore(clock)
+    hub = await _hub(make_hub, kv=kv, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+
+    kv.reset_log()
+    response = await hub.post("/mcp/gitlab", content=_call(1), headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == 1
+    assert hub.upstream.calls == 1
+
+    assert _cb_writes(kv) == [CB_KEY]
+    assert _cb_deletes(kv) == []
+
+
+@pytest.mark.ac("AC-166")
+async def test_requests_after_successful_probe_do_not_delete_probe_key(
+    make_hub: HubFactory, clock: ManualClock
+) -> None:
+    kv = RecordingKeyValueStore(clock)
+    hub = await _hub(make_hub, kv=kv, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    hub.clock.advance(31)
+    probe = await hub.post("/mcp/gitlab", content=_call(4), headers=headers)
+    assert probe.status_code == 200, probe.text
+
+    kv.reset_log()
+    for request_id in (5, 6):
+        response = await hub.post("/mcp/gitlab", content=_call(request_id), headers=headers)
+        assert response.status_code == 200, response.text
+    assert hub.upstream.calls == 6
+
+    assert await kv.get(PROBE_KEY) is None
+    assert await kv.get(CB_KEY) == {"failures": 0, "open_until": 0.0}
+    assert _cb_deletes(kv) == []
+
+
+# --- AC-167, AC-168 (ревизия 2.2: состояние после провала пробы) ------------
+
+
+@pytest.mark.ac("AC-167")
+async def test_failed_probe_stores_threshold_state(make_hub: HubFactory) -> None:
+    hub = await _hub(make_hub, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+
+    hub.clock.advance(31)
+    hub.upstream.push(httpx.Response(502, json={"error": "bad gateway"}))
+    probe = await hub.post("/mcp/gitlab", content=_call(4), headers=headers)
+    assert probe.status_code == 502, probe.text
+    assert probe.json()["error"]["code"] == CODE_UPSTREAM
+
+    assert await hub.app.state.kv.get(CB_KEY) == {
+        "failures": hub.settings.cb_failures,
+        "open_until": pytest.approx(hub.clock.time() + hub.settings.cb_reset),
+    }
+    assert await hub.app.state.kv.get(PROBE_KEY) is None
+
+    blocked = await hub.post("/mcp/gitlab", content=_call(5), headers=headers)
+    assert blocked.status_code == 503, blocked.text
+    assert blocked.json()["error"]["code"] == CODE_UPSTREAM
+    assert hub.upstream.calls == 4
+
+
+@pytest.mark.ac("AC-168")
+async def test_reopened_window_matches_state_reached_by_accumulation(
+    make_hub: HubFactory,
+) -> None:
+    """Окно, открытое провалом пробы, неотличимо от окна, набранного HUB_CB_FAILURES ошибками."""
+    hub = await _hub(make_hub, **CB_SETTINGS)
+    _conn, tokens = await connected_client(hub)
+    headers = mcp_headers(tokens["access_token"])
+    await _open_breaker(hub, headers)
+    accumulated = await hub.app.state.kv.get(CB_KEY)
+    assert accumulated == {
+        "failures": hub.settings.cb_failures,
+        "open_until": pytest.approx(hub.clock.time() + hub.settings.cb_reset),
+    }
+
+    hub.clock.advance(31)
+    hub.upstream.push(httpx.Response(500, json={"error": "boom"}))
+    probe = await hub.post("/mcp/gitlab", content=_call(4), headers=headers)
+    assert probe.status_code == 502, probe.text
+    reopened = await hub.app.state.kv.get(CB_KEY)
+
+    # Счётчик после провала пробы тот же, что и после накопления ошибок (не обнуляется).
+    assert reopened["failures"] == accumulated["failures"] == hub.settings.cb_failures
+    assert reopened["open_until"] == pytest.approx(hub.clock.time() + hub.settings.cb_reset)
+
+    # Наблюдаемое поведение R-P10 прежнее: окно закрыто до истечения, затем проба восстанавливает.
+    blocked = await hub.post("/mcp/gitlab", content=_call(5), headers=headers)
+    assert blocked.status_code == 503, blocked.text
+    assert hub.upstream.calls == 4
+    hub.clock.advance(31)
+    recovered = await hub.post("/mcp/gitlab", content=_call(6), headers=headers)
+    assert recovered.status_code == 200, recovered.text
+    assert await hub.app.state.kv.get(CB_KEY) == {"failures": 0, "open_until": 0.0}
 
 
 # --- AC-129 ----------------------------------------------------------------
