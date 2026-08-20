@@ -23,8 +23,10 @@ from tests.support import (
     RecordingKeyValueStore,
     asgi_stream,
     connected_client,
-    execute,
+    ensure_user,
+    fetch_rows,
     i3_catalog,
+    issue_hub_tokens,
     jsonrpc_body,
     mcp_headers,
     refresh_grant,
@@ -964,10 +966,17 @@ async def test_reopened_window_matches_state_reached_by_accumulation(
 
 @pytest.mark.ac("AC-129")
 async def test_missing_connection_returns_jsonrpc_error(make_hub: HubFactory) -> None:
+    """Токен Hub выдан, подключения к 'gitlab' у пользователя нет.
+
+    Состояние воспроизводится штатно, без обхода внешних ключей: подключение не заводилось
+    вовсе, а токен выдан с ``cid=None`` — так их выдаёт сам продукт, когда на момент выдачи
+    кода подключения нет (``connection_id=conn.id if conn else None`` в ``/oauth/authorize``).
+    """
     hub = await _hub(make_hub)
-    conn, tokens = await connected_client(hub)
-    await execute(hub.app, "DELETE FROM connections WHERE id = :cid", cid=conn.id)
-    await hub.app.state.broker.invalidate_cache("u1", "gitlab")
+    await ensure_user(hub, "u1")
+    tokens = await issue_hub_tokens(hub, user_id="u1", alias="gitlab", connection_id=None)
+    # предусловие AC-129: строки connections нет (её и не удаляли — она не создавалась)
+    assert await fetch_rows(hub.app, "SELECT id FROM connections") == []
     headers = mcp_headers(tokens["access_token"])
 
     post = await hub.post(
