@@ -1,0 +1,8 @@
+{
+  "dispute": "disputes/test-dispute-BUG-I1-001-sqlite-fk.json",
+  "resolution": "uphold_dispute",
+  "decided_by": "оркестратор",
+  "reasoning": "Тест test_missing_connection_returns_jsonrpc_error удалял строку connections сырым SQL при живых зависимых строках (upstream_tokens/refresh_tokens/oauth_codes). На PostgreSQL такой DELETE невозможен, а продуктовый код строки connections вообще не удаляет: DELETE /api/me/connections/{alias} удаляет upstream-токены, отзывает токены Hub и переводит подключение в not_connected (R-B8). Значит тест воспроизводил состояние, недостижимое в бою, и держался только на выключенной проверке внешних ключей в SQLite. Включение PRAGMA foreign_keys=ON корректно и остаётся. Правки продукта не требуется.",
+  "assignee": "test",
+  "action": "переоформить сценарий «подключения нет» так, чтобы он воспроизводился и на PostgreSQL (например, обращение к alias без подключения либо удаление через штатный путь API)"
+}
