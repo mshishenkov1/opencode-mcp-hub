@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -30,10 +31,36 @@ STATE_PREFIX = "oauthstate:"
 RATE_REGISTER_PREFIX = "rl:register:"
 RATE_TOKEN_PREFIX = "rl:token:"
 RATE_WINDOW = 60.0
+MAX_IP_LEN = 45  # максимальная длина текстового представления IPv6 (H5-2)
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 
 MODE_MCP = "mcp"
 MODE_CONNECT = "connect"
+
+
+def _parse_forwarded_ip(value: str) -> str | None:
+    """Левый элемент ``X-Forwarded-For`` — только если это корректный IP-адрес (H5-2).
+
+    Типовой ingress (``proxy_add_x_forwarded_for``) заголовок не перезаписывает, а дополняет,
+    поэтому левое значение задаёт клиент: без проверки в ключи ``rl:register:<ip>`` и
+    ``rl:token:<client_id>:<ip>`` попадали бы произвольные строки — и обход лимита регистрации,
+    и неограниченная кардинальность/длина ключей KV. Отбрасываются скобки IPv6 и суффикс
+    ``:<port>``; значение длиннее максимального текстового представления IPv6 не разбирается.
+    """
+    if not value or len(value) > MAX_IP_LEN:
+        return None
+    if value.startswith("["):
+        host, sep, _ = value[1:].partition("]")
+        if not sep:
+            return None
+    elif value.count(":") == 1:
+        host = value.rpartition(":")[0]
+    else:
+        host = value
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return None
 
 
 def _client_ip(request: Request) -> str:
@@ -44,7 +71,14 @@ def _client_ip(request: Request) -> str:
         forwarded = request.headers.get("x-forwarded-for", "")
         first = forwarded.split(",")[0].strip()
         if first:
-            return first
+            parsed = _parse_forwarded_ip(first)
+            if parsed is not None:
+                return parsed
+            # Само значение в лог не идёт (R-T4, R-K3) — только заголовок и его длина.
+            logger.warning(
+                "forwarded_for_rejected",
+                extra={"header": "X-Forwarded-For", "value_length": len(first)},
+            )
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
