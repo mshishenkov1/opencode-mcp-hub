@@ -17,13 +17,47 @@ servers:
     docs_url: "https://github.com/mshishenkov1/magnit-tag-mcp"
     status: beta
     audience: ["all"]
-    mode: native                     # сервер сам реализует MCP-авторизацию (FastMCP OAuthProxy)
-    mcp_url: "${TAG_MCP_URL}"        # напр. https://tag-mcp.<domain>/mcp
+    mode: facade
+    upstream_url: "${TAG_MCP_URL}"        # ТЭГ-MCP, поднятый с MM_HTTP_AUTH=passthrough
+    auth_methods:
+      - id: corp_oauth
+        title: "Корпоративная авторизация ТЭГ"
+        type: oauth2
+        available: false
+        unavailable_reason: "OAuth-приложение ТЭГ ещё не выдано администраторами"
+        authorize_url: "https://tag.magnit.ru/oauth/authorize"
+        token_url: "https://tag.magnit.ru/oauth/access_token"
+        client_id: "${TAG_OAUTH_CLIENT_ID}"
+        client_secret: "env:TAG_OAUTH_CLIENT_SECRET"
+        pkce: true
+        scopes: { readonly: [], readwrite: [] }
+      - id: session_token
+        title: "Токен сессии ТЭГ"
+        type: user_token
+        field:
+          label: "Токен сессии ТЭГ"
+          hint: "ТЭГ → Профиль → Настройки безопасности → Личные токены доступа; либо значение cookie MMAUTHTOKEN"
+          docs_url: "https://github.com/mshishenkov1/magnit-tag-mcp#токен"
+          secret: true
+        verify:
+          # Адрес проверки — переменная: токен обязан проверяться на том же экземпляре
+          # Mattermost, с которым работает поднятый ТЭГ-MCP (в бою tag.magnit.ru,
+          # на стенде tag-test.corp.tander.ru). Отклонение от текста R-U10 намеренное.
+          url: "${TAG_VERIFY_URL}"
+          method: GET
+          headers:
+            Authorization: "Bearer {{access_token}}"
+          account_field: username
+    credential_headers:
+      Authorization: "Bearer {{access_token}}"
     permission_model:
-      kind: consent                  # права выбираются на экране согласия сервера
+      kind: tool_filter
       presets:
-        readonly: { write_mode: readonly }
-        readwrite: { write_mode: confirm }
+        readonly:
+          tools: ["whoami", "server_*", "resolve_channel", "get_*", "list_*", "search_*",
+                  "browse_public_channels", "summarize_*", "download_file"]
+        readwrite:
+          tools: ["*"]
 
   - alias: gitlab
     title: "GitLab (coderepo.corp.tander.ru)"
