@@ -10,10 +10,11 @@
   ],
   "expected": "400 token_rejected либо 400 invalid_request: значение непригодно как заголовок и должно отвергаться проверкой до обращения к целевой системе",
   "actual": "500 Internal Server Error. В логах: UnicodeEncodeError: 'ascii' codec can't encode characters in position 12-19: ordinal not in range(128), src/hub/broker.py:279 (verify_user_token), вызов из src/hub/routes/api.py:211",
-  "failing_test": "(нет — в тестах используются ASCII-токены)",
+  "failing_test": "tests/test_user_token.py::test_token_unusable_as_header_is_rejected_with_400",
   "suspected_area": "src/hub/broker.py:279 — формирование заголовков verify.headers из значения токена. Значение подставляется в HTTP-заголовок, а httpx кодирует заголовки в latin-1/ascii. Нужна проверка пригодности значения (только печатные ASCII без управляющих символов) в _validated_token (src/hub/routes/api.py) до сетевого обращения",
   "iteration": 1,
   "status": "open",
   "found_by": "сквозная проверка коннектора на стенде 2026-08-21",
-  "notes": "Пользователь вставляет токен вручную и легко занесёт кириллицу из буфера обмена. Пятисотка вместо внятного отказа выглядит как поломка Hub, а не как ошибка ввода"
+  "notes": "Пользователь вставляет токен вручную и легко занесёт кириллицу из буфера обмена. Пятисотка вместо внятного отказа выглядит как поломка Hub, а не как ошибка ввода. Воспроизводящий тест параметризован тремя значениями, непригодными как HTTP-заголовок: не-ASCII (кириллица), управляющий символ, перевод строки. Все три обязаны отвергаться 400 до обращения к целевой системе (счётчик мока проверки = 0); сейчас первый роняет запрос UnicodeEncodeError, а два других проходят как валидный токен и создают подключение",
+  "stacktrace": "UnicodeEncodeError: 'ascii' codec can't encode characters in position 12-19: ordinal not in range(128) — src/hub/broker.py:279 (verify_user_token), вызов из src/hub/routes/api.py:211 (api_connect_token)"
 }

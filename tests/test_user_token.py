@@ -1118,3 +1118,38 @@ async def test_corp_oauth_is_declared_but_unavailable(make_hub: HubFactory) -> N
     assert page.status_code == 200, page.text
     assert "Корпоративная авторизация ТЭГ" in page.text
     assert "OAuth-приложение ТЭГ ещё не выдано администраторами" in page.text
+# --- BUG-I4-005 (падает до фикса) ------------------------------------------
+
+
+@pytest.mark.ac("AC-175")
+@pytest.mark.parametrize(
+    ("title", "token"),
+    [
+        ("кириллица", "zzzz-заведомо-неверный-zzzz"),
+        ("управляющий символ", "tok\x01bad"),
+        ("перевод строки", "tok\nX-Injected: 1"),
+    ],
+    ids=["non-ascii", "control", "newline"],
+)
+async def test_token_unusable_as_header_is_rejected_with_400(
+    make_hub: HubFactory, title: str, token: str
+) -> None:
+    """BUG-I4-005: значение, непригодное для HTTP-заголовка, отвергается до обращения к системе.
+
+    Токен подставляется в заголовок проверочного запроса (R-U3), а заголовки кодируются в ASCII:
+    не-ASCII, управляющие символы и перевод строки обязаны отсеиваться проверкой тела запроса
+    (400 ``invalid_request``/``token_rejected``, R-U4), а не превращаться в 500.
+    """
+    hub = await _hub(make_hub)
+    await _user(hub)
+    assert hub.net is not None
+
+    try:
+        response = await connect_with_token(hub, alias="tag", token=token)
+    except Exception as exc:  # noqa: BLE001 — до фикса это UnicodeEncodeError, после фикса ответ 400
+        pytest.fail(f"{title}: подключение упало исключением {type(exc).__name__}: {exc}")
+
+    assert response.status_code == 400, f"{title}: {response.status_code} {response.text}"
+    assert response.json()["error"] in ("invalid_request", "token_rejected"), response.text
+    assert hub.net.verify.calls == 0, f"{title}: непригодное значение ушло в целевую систему"
+    assert await fetch_rows(hub.app, "SELECT connection_id FROM upstream_tokens") == []
