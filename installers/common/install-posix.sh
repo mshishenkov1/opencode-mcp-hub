@@ -492,6 +492,9 @@ is_sha256() {
 }
 
 # Путь внутри пакета: относительный, с разделителем "/", без "..", без буквы диска (N5-P3).
+# Дополнительно отвергаются формы, бессмысленные как элемент внутри пакета и опасные при
+# подстановке в файловые операции: "." и "./x" (самоссылка) и завершающий "/" — иначе
+# "<каталог>/<значение>" схлопывается в сам каталог, а не в объект внутри него.
 is_safe_pkg_path() {
   local p=$1
   [ -n "$p" ] || return 1
@@ -499,7 +502,22 @@ is_safe_pkg_path() {
     /*) return 1 ;;
     *\\*) return 1 ;;
     ..|../*|*/../*|*/..) return 1 ;;
+    .|./*|*/.) return 1 ;;
+    */) return 1 ;;
     [A-Za-z]:*) return 1 ;;
+  esac
+  return 0
+}
+
+# Имя приложения (artifacts[].app_name) подставляется в "<dest>/<app_name>" и участвует в
+# rm -rf (при --system — через sudo), поэтому проверяется строже пути внутри пакета: это ровно
+# одно имя каталога — непустое, без разделителей пути и без самоссылок (N5-P4).
+is_safe_app_name() {
+  local p=$1
+  is_safe_pkg_path "$p" || return 1
+  case $p in
+    */*) return 1 ;;
+    .|..) return 1 ;;
   esac
   return 0
 }
@@ -617,10 +635,17 @@ manifest_load() {
       MF_desktop_type=$(mf_val "artifacts.$idx.installer_type")
       MF_desktop_app=$(mf_val "artifacts.$idx.app_name")
       # app_name попадает в файловые операции (rm -rf в /Applications или $dest, при --system —
-      # через sudo), поэтому проходит ту же проверку пути, что file/install_name: запрет "..",
-      # ведущего "/", обратного слэша и буквы диска. Иначе — invalid manifest (код 2) до любых
-      # изменений системы, в т.ч. на пути --uninstall и --dry-run --uninstall (N5-P4, N5-R1).
-      if [ -n "$MF_desktop_app" ] && ! is_safe_pkg_path "$MF_desktop_app"; then
+      # через sudo), поэтому проходит проверку строже, чем file/install_name: одно имя каталога,
+      # запрет "..", ведущего "/", обратного слэша, буквы диска, "." и разделителей пути.
+      # Для installer_type="dmg" поле ОБЯЗАТЕЛЬНО и непусто (пробельное значение равносильно
+      # пустому): install_desktop подставляет его в rm -rf "<dest>/<app_name>", и пустое значение
+      # означало бы удаление самого каталога /Applications. Проверка выполняется в manifest_load,
+      # то есть до любой файловой операции, на всех путях исполнения: установка, --check,
+      # --dry-run, --uninstall и их комбинации (N5-P4, N5-R1).
+      if [ "$MF_desktop_type" = "dmg" ] && [ -z "${MF_desktop_app//[[:space:]]/}" ]; then
+        manifest_field_error "artifacts.$idx.app_name" "$MSG_ERR_FIELD_REQUIRED"
+      fi
+      if [ -n "$MF_desktop_app" ] && ! is_safe_app_name "$MF_desktop_app"; then
         manifest_field_error "artifacts.$idx.app_name" "$(fmt "$MSG_ERR_FIELD_PATH" "$MF_desktop_app")"
       fi
     fi
@@ -1010,6 +1035,26 @@ desktop_dest_dir() {
   fi
 }
 
+# Страховка перед разрушающими операциями с Desktop — вторая, независимая от manifest_load линия
+# защиты (defense in depth). Возвращает путь установленного приложения, только если он строго
+# внутри каталога назначения: не равен ему самому и не является его родителем. Пустое или
+# «схлопывающееся» app_name дало бы "<dest>/" → rm -rf всего каталога /Applications.
+desktop_target_path() {
+  local dest=$1 app=$2 target
+  is_safe_app_name "$app" || return 1
+  dest=${dest%/}
+  [ -n "$dest" ] || return 1
+  target="$dest/$app"
+  case $target in
+    "$dest"/?*) : ;;
+    *) return 1 ;;
+  esac
+  case "$dest/" in
+    "$target"/*) return 1 ;;
+  esac
+  printf '%s' "$target"
+}
+
 desktop_installed_version() {
   local app=$1
   [ -d "$app" ] || return 1
@@ -1020,7 +1065,7 @@ desktop_installed_version() {
 }
 
 install_desktop() {
-  local dest mount_point app_src app_version
+  local dest app_dest mount_point app_src app_version
   if [ -z "$MF_desktop_file" ]; then
     say "$MSG_DESKTOP_NONE"
     desktop_summary="не входит в пакет"
@@ -1038,14 +1083,19 @@ install_desktop() {
   fi
 
   dest=$(desktop_dest_dir)
+  # Путь вычисляется и проверяется ДО первой файловой операции (в т.ч. до mkdir): при пустом или
+  # небезопасном app_name манифест признаётся невалидным (код 2), и ни rm, ни ditto не выполняются.
+  if ! app_dest=$(desktop_target_path "$dest" "$MF_desktop_app"); then
+    manifest_field_error "artifacts[].app_name" "$(fmt "$MSG_ERR_FIELD_PATH" "$MF_desktop_app")"
+  fi
   if [ "$dest" != "/Applications" ]; then
     say "$MSG_DESKTOP_USER_DIR" "/Applications" "$dest"
     mkdir -p "$dest"
   fi
-  app_version=$(desktop_installed_version "$dest/$MF_desktop_app" || printf '')
+  app_version=$(desktop_installed_version "$app_dest" || printf '')
   if [ -n "$app_version" ] && [ "$app_version" = "$MF_version" ]; then
     say "$MSG_DESKTOP_SAME"
-    desktop_summary="$dest/$MF_desktop_app"
+    desktop_summary="$app_dest"
     return 0
   fi
 
@@ -1061,12 +1111,12 @@ install_desktop() {
     return 0
   fi
   app_src="$mount_point/$MF_desktop_app"
-  if [ -d "$dest/$MF_desktop_app" ]; then
-    run_priv rm -rf "$dest/$MF_desktop_app"
+  if [ -d "$app_dest" ]; then
+    run_priv rm -rf "$app_dest"
   fi
-  if run_priv ditto "$app_src" "$dest/$MF_desktop_app"; then
-    say "$MSG_DESKTOP_INSTALLED" "$dest/$MF_desktop_app"
-    desktop_summary="$dest/$MF_desktop_app"
+  if run_priv ditto "$app_src" "$app_dest"; then
+    say "$MSG_DESKTOP_INSTALLED" "$app_dest"
+    desktop_summary="$app_dest"
   else
     say "$MSG_DESKTOP_ERROR" "1"
     desktop_summary="ошибка (код 1)"
@@ -1250,14 +1300,16 @@ do_check() {
 }
 
 find_installed_desktop() {
-  local app=$MF_desktop_app
-  [ -n "$app" ] || return 1
-  if [ -d "/Applications/$app" ]; then
-    printf '/Applications/%s' "$app"
+  local app=$MF_desktop_app path
+  # Та же страховка, что в install_desktop: путь удаления строится только из безопасного имени,
+  # иначе Desktop считается ненайденным и ни одна файловая операция не выполняется (N5-P4).
+  is_safe_app_name "$app" || return 1
+  if path=$(desktop_target_path "/Applications" "$app") && [ -d "$path" ]; then
+    printf '%s' "$path"
     return 0
   fi
-  if [ -d "$HOME/Applications/$app" ]; then
-    printf '%s/Applications/%s' "$HOME" "$app"
+  if path=$(desktop_target_path "$HOME/Applications" "$app") && [ -d "$path" ]; then
+    printf '%s' "$path"
     return 0
   fi
   return 1
