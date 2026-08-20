@@ -616,6 +616,13 @@ manifest_load() {
       MF_desktop_sha=$kinds
       MF_desktop_type=$(mf_val "artifacts.$idx.installer_type")
       MF_desktop_app=$(mf_val "artifacts.$idx.app_name")
+      # app_name попадает в файловые операции (rm -rf в /Applications или $dest, при --system —
+      # через sudo), поэтому проходит ту же проверку пути, что file/install_name: запрет "..",
+      # ведущего "/", обратного слэша и буквы диска. Иначе — invalid manifest (код 2) до любых
+      # изменений системы, в т.ч. на пути --uninstall и --dry-run --uninstall (N5-P4, N5-R1).
+      if [ -n "$MF_desktop_app" ] && ! is_safe_pkg_path "$MF_desktop_app"; then
+        manifest_field_error "artifacts.$idx.app_name" "$(fmt "$MSG_ERR_FIELD_PATH" "$MF_desktop_app")"
+      fi
     fi
     idx=$((idx + 1))
   done

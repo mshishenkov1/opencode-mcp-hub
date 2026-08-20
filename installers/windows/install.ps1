@@ -354,6 +354,12 @@ function Read-Manifest {
             }
         } elseif ($kind -eq 'desktop') {
             $desktopCount++
+            # app_name проходит ту же проверку пути, что file/install_name (запрет "..", ведущего
+            # "/", буквы диска): вторая линия защиты параллельно POSIX-установщику (N5-P4).
+            $appName = Get-Prop $item 'app_name'
+            if (-not [string]::IsNullOrEmpty($appName) -and -not (Test-PackagePath $appName)) {
+                Invoke-ManifestFieldFailure -Path $manifestPath -Field ("artifacts.$i.app_name") -Reason ($script:MsgErrFieldPath -f $appName)
+            }
         }
     }
     if ($cliCount -ne 1) {

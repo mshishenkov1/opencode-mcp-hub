@@ -123,7 +123,7 @@
         },
         "install_name": { "$ref": "#/definitions/pkgPath" },
         "installer_type": { "type": "string", "enum": ["dmg", "nsis", "msi"] },
-        "app_name": { "type": "string", "minLength": 1 },
+        "app_name": { "$ref": "#/definitions/pkgPath" },
         "silent_args": {
           "type": "array",
           "items": { "type": "string" }
