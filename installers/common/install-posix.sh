@@ -833,20 +833,36 @@ profile_foreign_env_line() {
   [ -f "$file" ] || return 1
   awk -v b="$OM_BLOCK_BEGIN" -v e="$OM_BLOCK_END" -v name="$OM_ENV_NAME" -v target="$ca_target" '
     function ltrim(s) { sub(/^[ \t]+/, "", s); return s }
+    # Присваивание в одном сегменте команды. Отбрасываются управляющие слова составной команды
+    # (then/do/else) и объявляющие префиксы с их ключами: export, declare -x, typeset -x,
+    # readonly, local, env NAME=... cmd. Остаток обязан НАЧИНАТЬСЯ с формы присваивания —
+    # поэтому упоминание внутри строки (echo "NAME=...") присваиванием не считается.
+    function is_assign_seg(seg,   s) {
+      s = ltrim(seg)
+      while (s ~ /^(then|do|else|elif|export|declare|typeset|readonly|local|env|command|builtin)([ \t]|$)/ ||
+             s ~ /^-[A-Za-z]+([ \t]|$)/) {
+        sub(/^[^ \t]+[ \t]*/, "", s)
+      }
+      if (index(s, name "=") == 1) { return 1 }                                    # NAME=...
+      if (s ~ ("^setenv[ \t]+" name "([ \t]|$)")) { return 1 }                     # csh setenv NAME ...
+      if (s ~ ("^set([ \t]+-[a-zA-Z]+)*[ \t]+" name "([ \t]|$)")) { return 1 }     # fish set -gx NAME
+      return 0
+    }
     $0 == b { inblk = 1; next }
     $0 == e { inblk = 0; next }
     inblk == 1 { next }
     {
       # N5-I5: чужим считается именно ПРИСВАИВАНИЕ переменной вне нашего блока, а не любое
       # упоминание. Строки-комментарии и текст с подстрокой NODE_EXTRA_CA_CERTS предупреждения
-      # не вызывают.
+      # не вызывают. Строка разбивается на сегменты по разделителям команд, поэтому распознаётся
+      # и присваивание внутри составной строки (if ...; then export NAME=...; fi).
       line = ltrim($0)
       if (substr(line, 1, 1) == "#") { next }
       is_assign = 0
-      if (index(line, name "=") == 1) { is_assign = 1 }                 # NAME=...
-      else if (index(line, "export " name "=") == 1) { is_assign = 1 }  # export NAME=...
-      else if (index(line, "setenv " name " ") == 1) { is_assign = 1 }  # csh setenv NAME ...
-      else if (line ~ ("^set([ \t]+-[a-zA-Z]+)*[ \t]+" name "([ \t]|$)")) { is_assign = 1 } # fish set -gx NAME
+      parts = split($0, seg, /[;&|(){}]/)
+      for (i = 1; i <= parts; i++) {
+        if (is_assign_seg(seg[i])) { is_assign = 1; break }
+      }
       if (is_assign == 1 && index($0, target) == 0) { print NR; found = 1; exit }
     }
     END { if (found != 1) { exit 1 } }
@@ -866,19 +882,24 @@ apply_profile_block() {
 
   if [ -f "$profile_file" ]; then
     if profile_has_block "$profile_file"; then
-      # Вырезаем ВСЕ маркированные блоки и дописываем ровно один в конец: так гарантия N5-U1
-      # «в профиле ровно один блок» держится даже если ранее оказалось два блока (например,
-      # после ручного копирования) — они схлопываются в один.
-      local tmp_stripped
-      tmp_stripped=$(mktemp "${TMPDIR:-/tmp}/opencode-strip.XXXXXX")
-      awk -v b="$OM_BLOCK_BEGIN" -v e="$OM_BLOCK_END" '
-        $0 == b { inblk = 1; next }
+      # Блок правится НА МЕСТЕ: содержимое ПЕРВОГО маркированного блока заменяется новым, а все
+      # последующие блоки (например, после ручного копирования) вырезаются. Гарантия N5-U1
+      # «в профиле ровно один блок» держится, и при этом уже существующий блок не переезжает
+      # в конец файла — порядок строк профиля пользователя сохраняется.
+      awk -v b="$OM_BLOCK_BEGIN" -v e="$OM_BLOCK_END" -v bf="$tmp_block" '
+        $0 == b {
+          inblk = 1
+          if (done != 1) {
+            done = 1
+            while ((getline bl < bf) > 0) { print bl }
+            close(bf)
+          }
+          next
+        }
         inblk == 1 && $0 == e { inblk = 0; next }
         inblk == 1 { next }
         { print }
-      ' "$profile_file" >"$tmp_stripped"
-      cat "$tmp_stripped" "$tmp_block" >"$tmp_new"
-      rm -f "$tmp_stripped"
+      ' "$profile_file" >"$tmp_new"
     else
       cat "$profile_file" "$tmp_block" >"$tmp_new"
     fi
