@@ -263,7 +263,9 @@ class CircuitBreaker:
         now = self.clock.time()
         if open_until > 0.0:
             # Провал пробного запроса (или ошибка при уже открытом окне) — окно открывается снова.
-            failures = max(failures, self.settings.cb_failures)
+            # Счётчик в этой ветке порог не превышает (в него попадают только уже открытые окна),
+            # поэтому пишется ровно порог: провал пробы не требует копить ошибки заново (H5-4).
+            failures = self.settings.cb_failures
             open_until = now + self.settings.cb_reset
             await self.kv.delete(self._probe_key(alias))
         else:
