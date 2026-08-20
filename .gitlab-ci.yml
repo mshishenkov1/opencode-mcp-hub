@@ -79,9 +79,14 @@ bats:
   before_script:
     # Образ bats — alpine без архиваторов: фикстуры набора собирают пакеты zip/tar
     # и считают контрольные суммы, без этих утилит тесты падают с status 127.
-    - apk add --no-cache zip unzip tar coreutils python3
+    - apk add --no-cache zip unzip tar coreutils python3 bash shadow sudo
+    # Под root часть проверок теряет смысл: root пишет куда угодно, поэтому
+    # AC-53 (нет права записи в bin_dir) и AC-54 (--system не под root) в контейнере
+    # не воспроизводятся. Прогон идёт от обычного пользователя.
+    - useradd -m -u 1001 tester 2>/dev/null || adduser -D -u 1001 tester
+    - chown -R tester "$CI_PROJECT_DIR"
   script:
-    - bats installers/tests/bats
+    - su tester -c "cd '$CI_PROJECT_DIR' && bats installers/tests/bats"
 
 pester:
   # Только pwsh на Linux. Ветки набора, требующие семантики путей Windows,
