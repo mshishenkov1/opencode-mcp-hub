@@ -34,6 +34,8 @@ MSG_SUMS='Контрольные суммы: %s'
 MSG_SELFCHECK_OK='Самопроверка: %s — план установки построен'
 MSG_SELFCHECK_CROSS='Самопроверка: %s — целостность проверена, план не строится на этой ОС'
 MSG_SELFCHECK_NOPWSH='Самопроверка: %s — проверен только манифест (pwsh недоступен)'
+MSG_WARN_NO_PYTHON='Предупреждение: python3 недоступен — манифест %s проверен только на управляющие символы'
+MSG_SELFCHECK_DROPPED='Архив не прошёл самопроверку и удалён из каталога сборки: %s'
 MSG_NO_PUBLISH='публикация пропущена: добавьте --publish'
 MSG_PUBLISH_DONE='Черновик релиза %s создан'
 
@@ -366,6 +368,16 @@ MANIFEST
 }
 
 # --------------------------------------------------------------------------- самопроверка (N5-B2)
+# Провал самопроверки не должен оставлять собранный архив в каталоге --out: битый пакет рядом с
+# годными легко перепутать, а SHA256SUMS для него уже не создаётся (N5-B2).
+selfcheck_fail() {
+  local archive=$1
+  shift
+  rm -f "$archive"
+  say "$MSG_SELFCHECK_DROPPED" "$archive"
+  die "$EX_FAIL" "$@"
+}
+
 selfcheck_package() {
   local archive=$1 pkg_name=$2 os=$3 arch=$4 cli_sha=$5 ca_sha=$6
   local verify_dir="$tmp_root/verify-$os-$arch" root rc fake_home
@@ -378,15 +390,15 @@ selfcheck_package() {
   root="$verify_dir/$pkg_name"
 
   if [ "$(sha256_of "$root/certs/tander-ca-bundle.pem")" != "$ca_sha" ]; then
-    die "$EX_FAIL" "$MSG_ERR_SELFCHECK_HASH" "certs/tander-ca-bundle.pem"
+    selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK_HASH" "certs/tander-ca-bundle.pem"
   fi
   if [ "$os" = "windows" ]; then
     if [ "$(sha256_of "$root/bin/opencode.exe")" != "$cli_sha" ]; then
-      die "$EX_FAIL" "$MSG_ERR_SELFCHECK_HASH" "bin/opencode.exe"
+      selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK_HASH" "bin/opencode.exe"
     fi
   else
     if [ "$(sha256_of "$root/bin/opencode")" != "$cli_sha" ]; then
-      die "$EX_FAIL" "$MSG_ERR_SELFCHECK_HASH" "bin/opencode"
+      selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK_HASH" "bin/opencode"
     fi
   fi
 
@@ -397,7 +409,16 @@ selfcheck_package() {
   if command -v python3 >/dev/null 2>&1; then
     if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
       "$root/common/manifest.json" >/dev/null 2>&1; then
-      die "$EX_FAIL" "$MSG_ERR_SELFCHECK_JSON"
+      selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK_JSON"
+    fi
+  else
+    # Без python3 гарантия N5-B1/N5-B2 ослабевает — молча этого не делаем. Минимальная замена:
+    # сырые управляющие символы внутри JSON запрещены RFC 8259 и означают провал экранирования
+    # (bugs/BUG-I5-001) — ловим их побайтовым фильтром. Разрешён только перевод строки: сам
+    # манифест печатается многострочным, отступы — пробелами.
+    say "$MSG_WARN_NO_PYTHON" "$pkg_name"
+    if [ "$(LC_ALL=C tr -d '\012\040-\377' <"$root/common/manifest.json" | wc -c | tr -d ' ')" != "0" ]; then
+      selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK_JSON"
     fi
   fi
 
@@ -409,7 +430,7 @@ selfcheck_package() {
       pwsh -NoProfile -File "$root/install.ps1" -DryRun >/dev/null 2>&1 || rc=$?
       # Код 3 — «пакет для другой ОС»: на сборочной машине это ожидаемо (N5-I3).
       if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
-        die "$EX_FAIL" "$MSG_ERR_SELFCHECK" "$pkg_name" "$rc"
+        selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK" "$pkg_name" "$rc"
       fi
       say "$MSG_SELFCHECK_CROSS" "$pkg_name"
     else
@@ -422,12 +443,12 @@ selfcheck_package() {
   HOME="$fake_home" SHELL=/bin/sh bash "$root/install.sh" --dry-run >/dev/null 2>&1 || rc=$?
   if [ "$os" = "$host_os" ] && [ "$arch" = "$host_arch" ]; then
     if [ "$rc" -ne 0 ]; then
-      die "$EX_FAIL" "$MSG_ERR_SELFCHECK" "$pkg_name" "$rc"
+      selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK" "$pkg_name" "$rc"
     fi
     say "$MSG_SELFCHECK_OK" "$pkg_name"
   else
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
-      die "$EX_FAIL" "$MSG_ERR_SELFCHECK" "$pkg_name" "$rc"
+      selfcheck_fail "$archive" "$MSG_ERR_SELFCHECK" "$pkg_name" "$rc"
     fi
     say "$MSG_SELFCHECK_CROSS" "$pkg_name"
   fi
