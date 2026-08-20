@@ -86,6 +86,20 @@ def catalog_path(tmp_path: Path) -> Path:
     return write_catalog(tmp_path / "catalog.yaml", default_catalog())
 
 
+# Таймаут запуска/останова приложения в тестах. Значение по умолчанию у LifespanManager — 5 с,
+# и это ЕДИНСТВЕННОЕ место в сьюте, где результат зависит от скорости машины: под coverage в
+# контейнере CI create_all по файловой БД укладывался в лимит не всегда, и тесты на файловый
+# SQLite краснели там, где локально были зелёными. Лимит поднят до заведомо недостижимого при
+# исправной работе, но конечного — зависший запуск по-прежнему падает, а не висит вечно.
+LIFESPAN_TIMEOUT = 120.0
+
+
+def lifespan(app: Any) -> LifespanManager:
+    return LifespanManager(
+        app, startup_timeout=LIFESPAN_TIMEOUT, shutdown_timeout=LIFESPAN_TIMEOUT
+    )
+
+
 def base_settings_kwargs(catalog_path: Path | str, **overrides: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "public_url": PUBLIC_URL,
@@ -174,7 +188,7 @@ async def make_hub(
             settings = Settings(**base_settings_kwargs(cat_path, **overrides))
         http = litellm_http_client(litellm)
         app = create_app(settings, litellm_client=http, clock=clock, kv=kv, catalog_env=env)
-        await stack.enter_async_context(LifespanManager(app))
+        await stack.enter_async_context(lifespan(app))
         client = await stack.enter_async_context(
             httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://hub.test")
         )

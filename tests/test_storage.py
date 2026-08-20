@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from asgi_lifespan import LifespanManager
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
@@ -17,7 +16,7 @@ from hub.clock import ManualClock
 from hub.kv import create_kv_store
 from hub.metrics import Metrics
 from hub.settings import Settings
-from tests.conftest import Hub, HubFactory, base_settings_kwargs
+from tests.conftest import Hub, HubFactory, base_settings_kwargs, lifespan
 from tests.support import (
     audit_rows,
     execute,
@@ -76,15 +75,37 @@ EXPECTED_COLUMNS = {
 # --- AC-65 -----------------------------------------------------------------
 
 
+def sqlite_file_url(db_file: Path) -> str:
+    """URL файловой SQLite от АБСОЛЮТНОГО пути.
+
+    Форма ``sqlite+aiosqlite:///<abs>`` при абсолютном пути даёт четыре слэша — это и есть
+    правильная запись абсолютного пути. Ошибка здесь молча превращает файловую БД в
+    относительную (файл лёг бы в рабочий каталог процесса, а он у CI и локально разный),
+    поэтому путь приводится к абсолютному явно.
+    """
+    return f"sqlite+aiosqlite:///{db_file.resolve()}"
+
+
+def assert_file_backed(app: Any, db_file: Path) -> None:
+    """Движок работает с ОЖИДАЕМЫМ файлом, а не с БД в памяти.
+
+    Без этой проверки подмена файловой БД на in-memory (StaticPool в ``build_engine``
+    выбирается по пустому ``url.database``) осталась бы незамеченной: схема создалась бы,
+    тест прошёл бы, а проверялось бы не то, что заявлено.
+    """
+    actual = app.state.db.engine.url.database
+    assert actual == str(db_file.resolve()), (actual, str(db_file.resolve()))
+    assert db_file.exists(), sorted(p.name for p in db_file.parent.iterdir())
+
+
 @pytest.mark.ac("AC-65")
 async def test_schema_created_at_startup_in_sqlite_file(tmp_path: Path, catalog_path: Path) -> None:
     db_file = tmp_path / "hub.db"
-    settings = Settings(
-        **base_settings_kwargs(catalog_path, database_url=f"sqlite+aiosqlite:///{db_file}")
-    )
-    app = create_app(settings, litellm_client=litellm_http_client(make_litellm_router()))
-    async with LifespanManager(app):
-        assert db_file.exists()
+    settings = Settings(**base_settings_kwargs(catalog_path, database_url=sqlite_file_url(db_file)))
+    http = litellm_http_client(make_litellm_router())
+    app = create_app(settings, litellm_client=http)
+    async with lifespan(app):
+        assert_file_backed(app, db_file)
         async with app.state.db.engine.connect() as conn:
 
             def introspect(sync_conn: Any) -> dict[str, Any]:
@@ -108,6 +129,7 @@ async def test_schema_created_at_startup_in_sqlite_file(tmp_path: Path, catalog_
                 return {"tables": tables, "columns": columns, "uniques": uniques}
 
             info = await conn.run_sync(introspect)
+    await http.aclose()
     assert set(EXPECTED_COLUMNS) <= info["tables"]
     for table, expected in EXPECTED_COLUMNS.items():
         assert expected <= info["columns"][table], (table, info["columns"][table])
@@ -134,15 +156,23 @@ async def test_schema_creation_is_idempotent_across_restarts(
     tmp_path: Path, catalog_path: Path
 ) -> None:
     db_file = tmp_path / "hub.db"
-    settings = Settings(
-        **base_settings_kwargs(catalog_path, database_url=f"sqlite+aiosqlite:///{db_file}")
-    )
-    app1 = create_app(settings, litellm_client=litellm_http_client(make_litellm_router()))
-    async with LifespanManager(app1):
+    settings = Settings(**base_settings_kwargs(catalog_path, database_url=sqlite_file_url(db_file)))
+    http1 = litellm_http_client(make_litellm_router())
+    app1 = create_app(settings, litellm_client=http1)
+    async with lifespan(app1):
+        assert_file_backed(app1, db_file)
         await insert_user(app1, "persisted")
-    app2 = create_app(settings, litellm_client=litellm_http_client(make_litellm_router()))
-    async with LifespanManager(app2):
+        # Запись видна ещё до перезапуска: так провал «после перезапуска пусто» отличается
+        # от провала «запись вообще не дошла до БД».
+        written = await fetch_rows(app1, "SELECT user_id FROM users")
+        assert [r["user_id"] for r in written] == ["persisted"]
+    await http1.aclose()
+    http2 = litellm_http_client(make_litellm_router())
+    app2 = create_app(settings, litellm_client=http2)
+    async with lifespan(app2):
+        assert_file_backed(app2, db_file)
         rows = await fetch_rows(app2, "SELECT user_id FROM users")
+    await http2.aclose()
     assert [r["user_id"] for r in rows] == ["persisted"]
 
 

@@ -7,12 +7,11 @@ from pathlib import Path
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
 
 from hub.app import create_app
 from hub.errors import ConfigError
 from hub.settings import Settings
-from tests.conftest import Hub, HubFactory
+from tests.conftest import Hub, HubFactory, lifespan
 from tests.support import (
     FERNET_KEY,
     LITELLM_URL,
@@ -88,7 +87,7 @@ async def test_defaults_visible_in_wellknown(
     _set_required_env(monkeypatch, catalog_path)
     app = create_app(litellm_client=litellm_http_client(make_litellm_router()))
     async with (
-        LifespanManager(app),
+        lifespan(app),
         httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://hub.test"
         ) as client,
@@ -127,7 +126,7 @@ async def test_auth_command_default_with_public_url_substitution(
     _set_required_env(monkeypatch, catalog_path, HUB_PUBLIC_URL="https://hub.test/")
     app = create_app(litellm_client=litellm_http_client(make_litellm_router()))
     async with (
-        LifespanManager(app),
+        lifespan(app),
         httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://hub.test"
         ) as client,
@@ -230,7 +229,7 @@ async def test_create_app_with_settings_object_without_env(catalog_path: Path) -
     )
     app = create_app(settings=settings, litellm_client=litellm_http_client(make_litellm_router()))
     async with (
-        LifespanManager(app),
+        lifespan(app),
         httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://hub.test"
         ) as client,
@@ -308,7 +307,7 @@ async def test_litellm_client_injectable_via_app_state(catalog_path: Path) -> No
     start_route = mock_start(router)
     app.state.litellm_client = litellm_http_client(router)
     async with (
-        LifespanManager(app),
+        lifespan(app),
         httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://hub.test"
         ) as client,
