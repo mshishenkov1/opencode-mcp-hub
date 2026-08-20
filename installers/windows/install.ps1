@@ -551,11 +551,26 @@ function Confirm-PackageIntegrity {
 # =====================================================================================
 # Раскладка путей (N5-I4, N5-I8)
 # =====================================================================================
+function Get-UserProfileDir {
+    if (-not [string]::IsNullOrEmpty($env:USERPROFILE)) {
+        return $env:USERPROFILE
+    }
+    # Запасной вариант для прогона тестов на pwsh под macOS/Linux (N5-T2).
+    return $env:HOME
+}
+
+function Get-LocalAppDataDir {
+    if (-not [string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
+        return $env:LOCALAPPDATA
+    }
+    return (Join-Path (Get-UserProfileDir) 'AppData\Local')
+}
+
 function Get-Layout {
     param($Manifest, [string]$PackageRoot, [string]$PrefixDir)
-    $configDir = Join-Path (Join-Path $env:USERPROFILE '.config') 'opencode'
+    $configDir = Join-Path (Join-Path (Get-UserProfileDir) '.config') 'opencode'
     if ([string]::IsNullOrEmpty($PrefixDir)) {
-        $binDir = Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'opencode'
+        $binDir = Join-Path (Join-Path (Get-LocalAppDataDir) 'Programs') 'opencode'
     } else {
         $binDir = $PrefixDir
     }
@@ -959,8 +974,8 @@ function Get-UninstallPlan {
 function Expand-UserPathTemplate {
     param([string]$Value)
     $result = $Value
-    $userProfile = $env:USERPROFILE
-    $localAppData = $env:LOCALAPPDATA
+    $userProfile = Get-UserProfileDir
+    $localAppData = Get-LocalAppDataDir
     $result = $result.Replace('%USERPROFILE%', $userProfile)
     $result = $result.Replace('%LOCALAPPDATA%', $localAppData)
     $result = $result.Replace('${XDG_CONFIG_HOME}', (Join-Path $userProfile '.config'))
@@ -978,7 +993,7 @@ function Test-PurgePathSafe {
     param([string]$Raw, [string]$Expanded)
     if ($Raw.Contains('..') -or $Expanded.Contains('..')) { return $false }
     if ([string]::IsNullOrEmpty($Expanded)) { return $false }
-    $home2 = $env:USERPROFILE.TrimEnd('\')
+    $home2 = (Get-UserProfileDir).TrimEnd('\')
     $candidate = $Expanded.TrimEnd('\')
     if ($candidate.ToLowerInvariant() -eq $home2.ToLowerInvariant()) { return $false }
     if (-not $candidate.ToLowerInvariant().StartsWith(($home2 + '\').ToLowerInvariant())) { return $false }
