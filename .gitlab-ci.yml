@@ -1,0 +1,173 @@
+# Портирование .github/workflows/gates.yml и installers.yml на GitLab CI.
+#
+# Зачем: прогоны GitHub Actions на приватных репозиториях упираются в платные
+# минуты (Windows ×2, macOS ×10) и в лимит расходов аккаунта. Корпоративные
+# раннеры этих ограничений не имеют и стоят внутри контура.
+#
+# Образы тянутся через REGISTRY_PREFIX: на корпоративных раннерах Docker Hub
+# обычно закрыт, и префикс подменяется на внутреннее зеркало (переменная
+# задаётся в Settings → CI/CD → Variables на уровне проекта или группы).
+#
+# Чего здесь принципиально нет: заданий под Windows и macOS. Pester гоняется
+# только под pwsh на Linux, поэтому Windows-ветка требований установщиков
+# (AC-143, части AC-136/139/140) этим пайплайном НЕ подтверждается — для неё
+# нужен Windows-раннер либо прогон в GitHub Actions.
+
+variables:
+  REGISTRY_PREFIX: ""
+  PWSH_IMAGE: "mcr.microsoft.com/powershell:7.4-debian-12"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Гейт G2 сравнивает покрытие с базовой веткой: нужна вся история, иначе
+  # origin/main не разрешается (ровно на этом гейт был красным в GitHub).
+  GIT_DEPTH: "0"
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH =~ /^pipeline\//
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+stages: [gates, installers]
+
+# --- Гейты G1–G6 (ТЗ §5, независимая перепроверка того, что агент считал локально) ---
+
+gates:
+  stage: gates
+  image: "${REGISTRY_PREFIX}python:3.12-slim"
+  interruptible: true
+  before_script:
+    - python -m venv .venv
+    - .venv/bin/pip install --quiet -e ".[dev]"
+    # GitLab CI выкачивает только текущую ссылку, поэтому origin/main в клоне
+    # отсутствует и G2 не с чем сравнивать. `git fetch origin main` создаёт лишь
+    # FETCH_HEAD — нужен явный refspec, создающий remote-tracking ветку.
+    - git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main || true
+    - 'git rev-parse --verify --quiet origin/main >/dev/null && echo "база для G2 найдена" || echo "ВНИМАНИЕ - origin/main недоступна, G2 упадёт"'
+  script:
+    - .venv/bin/python scripts/run_gates.py --run-id "gl-$CI_PIPELINE_IID" --ci
+  artifacts:
+    when: always
+    paths:
+      - reports/gates-*.json
+      - reports/coverage.xml
+    expire_in: 30 days
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: reports/coverage.xml
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+
+# --- Установщики (installers/docs/spec.md, N5-T4) ---
+
+.installers-changed:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: [installers/**/*, .gitlab-ci.yml]
+    - if: $CI_COMMIT_BRANCH
+      changes: [installers/**/*, .gitlab-ci.yml]
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+bats:
+  stage: installers
+  needs: []
+  extends: .installers-changed
+  image:
+    name: "${REGISTRY_PREFIX}bats/bats:1.11.0"
+    entrypoint: [""]
+  interruptible: true
+  before_script:
+    # Образ bats — alpine без архиваторов: фикстуры набора собирают пакеты zip/tar
+    # и считают контрольные суммы, без этих утилит тесты падают с status 127.
+    - apk add --no-cache zip unzip tar coreutils python3 bash shadow sudo
+    # Под root часть проверок теряет смысл: root пишет куда угодно, поэтому
+    # AC-53 (нет права записи в bin_dir) и AC-54 (--system не под root) в контейнере
+    # не воспроизводятся. Прогон идёт от обычного пользователя.
+    - useradd -m -u 1001 tester 2>/dev/null || adduser -D -u 1001 tester
+    - chown -R tester "$CI_PROJECT_DIR"
+  script:
+    - su tester -c "cd '$CI_PROJECT_DIR' && bats installers/tests/bats"
+
+pester:
+  # Только pwsh на Linux. Ветки набора, требующие семантики путей Windows,
+  # здесь помечаются Set-ItResult -Skipped — это ожидаемо и не считается
+  # подтверждением Windows-требований.
+  stage: installers
+  needs: []
+  extends: .installers-changed
+  image: "${PWSH_IMAGE}"
+  interruptible: true
+  script:
+    - |
+      pwsh -NoProfile -Command '
+        Install-Module -Name Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -Scope CurrentUser -SkipPublisherCheck
+        Import-Module Pester -MinimumVersion 5.0.0 -Force
+        $r = Invoke-Pester -Path installers/tests/pester -PassThru
+        "Pester $((Get-Module Pester).Version): passed=$($r.PassedCount) failed=$($r.FailedCount) skipped=$($r.SkippedCount)"
+        if ($r.FailedCount -gt 0) { exit 1 }
+        # Пустой прогон обязан быть красным, а не зелёным.
+        if ($r.PassedCount -lt 1) { "Ни одного выполненного теста"; exit 1 }
+      '
+
+lint-shell:
+  stage: installers
+  needs: []
+  extends: .installers-changed
+  image:
+    name: "${REGISTRY_PREFIX}koalaman/shellcheck-alpine:stable"
+    entrypoint: [""]
+  interruptible: true
+  script:
+    - shellcheck --version
+    - find installers -name '*.sh' -not -path 'installers/dist/*' -print0 | xargs -0 shellcheck -s bash
+    # Кодировки (N5-T6): BOM у install.ps1, отсутствие BOM и CR у *.sh
+    - test "$(head -c 3 installers/windows/install.ps1 | od -An -tx1 | tr -d ' \n')" = "efbbbf"
+    - |
+      for f in $(find installers -name '*.sh' -not -path 'installers/dist/*'); do
+        test "$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')" != "efbbbf"
+        head -1 "$f" | grep -q '^#!'
+        ! grep -q "$(printf '\r')" "$f"
+      done
+    # Офлайновость (N5-P6, AC-18): установщик не имеет права ходить в сеть
+    - |
+      pattern='\b(curl|wget|nc|Invoke-WebRequest|Invoke-RestMethod|WebClient|git|npm|brew|apt|winget|choco)\b'
+      if grep -rInE "$pattern" --include='*.sh' --include='*.ps1' --include='*.bat' installers; then
+        echo "Найдены запрещённые вызовы: установщик обязан быть оффлайновым (N5-P6)" >&2
+        exit 1
+      fi
+
+lint-powershell:
+  stage: installers
+  needs: []
+  extends: .installers-changed
+  image: "${PWSH_IMAGE}"
+  interruptible: true
+  script:
+    - |
+      pwsh -NoProfile -Command '
+        Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+        $findings = Invoke-ScriptAnalyzer -Path installers -Recurse -Severity Warning,Error
+        $compat = Invoke-ScriptAnalyzer -Path installers/windows/install.ps1 -Recurse `
+          -IncludeRule PSUseCompatibleSyntax, PSUseCompatibleCmdlets `
+          -Settings @{ Rules = @{ PSUseCompatibleSyntax = @{ Enable = $true; TargetVersions = @("5.1") } } }
+        $all = @($findings) + @($compat)
+        if ($all.Count -gt 0) { $all | Format-Table -AutoSize | Out-String | Write-Output; exit 1 }
+      '
+
+release-dry-run:
+  stage: installers
+  needs: []
+  extends: .installers-changed
+  image: "${REGISTRY_PREFIX}debian:12-slim"
+  interruptible: true
+  script:
+    - set -eu
+    - work=$(mktemp -d)
+    - mkdir -p "$work/art/opencode-linux-x64/bin"
+    - printf '#!/bin/sh\necho 1.17.9-magnit.1\n' > "$work/art/opencode-linux-x64/bin/opencode"
+    - chmod +x "$work/art/opencode-linux-x64/bin/opencode"
+    - printf -- '-----BEGIN CERTIFICATE-----\nCI\n-----END CERTIFICATE-----\n' > "$work/ca.pem"
+    - bash installers/release.sh --artifacts "$work/art" --version 1.17.9-magnit.1 --ca "$work/ca.pem" --hub-url https://hub.example --out "$work/dist" --targets linux-x64
+    - tar -xzf "$work/dist/opencode-magnit-linux-x64-1.17.9-magnit.1.tar.gz" -C "$work"
+    - HOME="$work/home" bash "$work/opencode-magnit-linux-x64-1.17.9-magnit.1/install.sh" --dry-run
+    - cd "$work/dist" && sha256sum -c SHA256SUMS
