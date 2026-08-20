@@ -24,18 +24,23 @@ from hub.errors import CatalogError
 
 # Spec 1.1, R-C1: alias — 1–32 символа, ^[a-z][a-z0-9-]{0,31}$ (односимвольные alias из AC-54/AC-55 валидны).
 ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# R-U1: идентификатор способа подключения в auth_methods.
+AUTH_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 ENV_REF_RE = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 REF_RE = re.compile(r"^#/servers/([^/]+)/([^/]+)$")
 # R-P2: шаблоны в значениях заголовков; допустим только {{access_token}}.
 TEMPLATE_RE = re.compile(r"\{\{([^}]*)\}\}")
 
-# Поля, в которых допустима ссылка env:VAR (относительно сервера).
-_ENV_REF_ALLOWED_PREFIXES = (("auth", "client_secret"), ("credential_headers",), ("static_headers",))
-
 ServerStatus = Literal["beta", "ga", "deprecated"]
 ServerMode = Literal["native", "facade"]
 Preset = Literal["readonly", "readwrite", "none"]
+
+# R-U1: способ подключения по умолчанию для сервера, объявившего прежнее поле auth.
+DEFAULT_OAUTH_METHOD_ID = "oauth2"
+DEFAULT_OAUTH_METHOD_TITLE = "Корпоративная авторизация"
+# Потолок длины пользовательского токена (R-U2, решение 63).
+TOKEN_MAX_LENGTH = 4096
 
 
 class EnvRef:
@@ -174,7 +179,20 @@ class AuthScopes(_Strict):
     readwrite: list[str]
 
 
-class AuthOAuth2(_Strict):
+class _AuthMethodCommon(_Strict):
+    """Общие поля способа подключения (R-U1).
+
+    У прежнего блока ``auth`` их нет: он эквивалентен списку из одного способа, поэтому
+    ``id``/``title`` необязательны на уровне схемы и проверяются для ``auth_methods`` отдельно.
+    """
+
+    id: str | None = None
+    title: str | None = None
+    available: bool = True
+    unavailable_reason: str | None = None
+
+
+class AuthOAuth2(_AuthMethodCommon):
     type: Literal["oauth2"]
     authorize_url: str = Field(min_length=1)
     token_url: str = Field(min_length=1)
@@ -183,6 +201,40 @@ class AuthOAuth2(_Strict):
     client_secret: SecretValue
     pkce: bool
     scopes: AuthScopes
+
+
+class TokenField(_Strict):
+    """Описание поля ввода пользовательского токена (R-U2)."""
+
+    label: str = Field(min_length=1)
+    hint: str | None = None
+    docs_url: str | None = None
+    secret: bool = True
+    placeholder: str | None = None
+    min_length: int = Field(default=1, ge=1, le=TOKEN_MAX_LENGTH)
+    max_length: int = Field(default=TOKEN_MAX_LENGTH, ge=1, le=TOKEN_MAX_LENGTH)
+
+
+class TokenVerify(_Strict):
+    """Проверочный запрос к целевой системе перед сохранением токена (R-U3)."""
+
+    url: str = Field(min_length=1)
+    method: Literal["GET", "POST"] = "GET"
+    headers: dict[str, HeaderValue] = Field(min_length=1)
+    expect_status: int | None = None
+    account_field: str | None = None
+
+
+class AuthUserToken(_AuthMethodCommon):
+    """Учётные данные вводит сам пользователь (R-U1, R-U2, R-U3)."""
+
+    type: Literal["user_token"]
+    field: TokenField
+    verify: TokenVerify
+
+
+AuthMethod = Annotated[AuthOAuth2 | AuthUserToken, Field(discriminator="type")]
+_AUTH_METHOD_TYPES = {"oauth2", "user_token"}
 
 
 class ServerModel(_Strict):
@@ -199,22 +251,70 @@ class ServerModel(_Strict):
     mcp_url: str | None = None
     upstream_url: str | None = None
     auth: AuthOAuth2 | None = None
+    auth_methods: list[AuthMethod] | None = None
     credential_headers: dict[str, HeaderValue] | None = None
     static_headers: dict[str, HeaderValue] | None = None
     permission_model: PermissionModel
 
+    @model_validator(mode="before")
+    @classmethod
+    def _check_auth_methods_raw(cls, data: Any) -> Any:
+        """R-U1: правила ``auth_methods``, которые проверяются до разбора самих способов."""
+        if not isinstance(data, dict):
+            return data
+        methods = data.get("auth_methods")
+        if methods is None:
+            return data
+        if data.get("auth") is not None:
+            raise _PathError(("auth_methods",), "нельзя задавать вместе с auth (поля взаимоисключающи)")
+        if not isinstance(methods, list):
+            raise _PathError(("auth_methods",), "ожидается список")
+        if not methods:
+            raise _PathError(("auth_methods",), "список/объект не может быть пустым")
+        seen: set[str] = set()
+        for j, raw in enumerate(methods):
+            if not isinstance(raw, dict):
+                continue
+            method_id = raw.get("id")
+            if method_id is None:
+                raise _PathError(("auth_methods", j, "id"), "обязательное поле отсутствует")
+            if not isinstance(method_id, str) or not AUTH_METHOD_ID_RE.match(method_id):
+                raise _PathError(("auth_methods", j, "id"), "значение не соответствует формату")
+            if method_id in seen:
+                raise _PathError(("auth_methods",), f"id '{method_id}' повторяется")
+            seen.add(method_id)
+            title = raw.get("title")
+            if title is None:
+                raise _PathError(("auth_methods", j, "title"), "обязательное поле отсутствует")
+            if not isinstance(title, str) or not title:
+                raise _PathError(("auth_methods", j, "title"), "значение не может быть пустым")
+            if raw.get("type") == "user_token" and data.get("mode") != "facade":
+                raise _PathError(
+                    ("auth_methods", j, "type"),
+                    "способ user_token допустим только при mode: facade",
+                )
+        return data
+
     @model_validator(mode="after")
     def _check_header_templates(self) -> ServerModel:
-        """R-P2/R-C1: в заголовках допустим только шаблон ``{{access_token}}``."""
-        for field_name in ("credential_headers", "static_headers"):
-            headers = getattr(self, field_name) or {}
+        """R-P2/R-C1/R-U3: в заголовках допустим только шаблон ``{{access_token}}``."""
+        headers_by_path: list[tuple[str, dict[str, Any]]] = [
+            (field_name, getattr(self, field_name) or {})
+            for field_name in ("credential_headers", "static_headers")
+        ]
+        for j, method in enumerate(self.auth_methods or []):
+            if isinstance(method, AuthUserToken):
+                headers_by_path.append(
+                    (f"auth_methods[{j}].verify.headers", dict(method.verify.headers))
+                )
+        for path, headers in headers_by_path:
             for name, value in headers.items():
                 if not isinstance(value, str):
                     continue
                 for found in TEMPLATE_RE.findall(value):
                     if found.strip() != "access_token":
                         raise ValueError(
-                            f"{field_name}.{name}: недопустимый шаблон {{{{{found}}}}} "
+                            f"{path}.{name}: недопустимый шаблон {{{{{found}}}}} "
                             "(поддерживается только {{access_token}})"
                         )
         return self
@@ -228,19 +328,43 @@ class ServerModel(_Strict):
         else:
             if not self.upstream_url:
                 missing.append("upstream_url")
-            if self.auth is None:
+            if self.auth is None and not self.auth_methods:
                 missing.append("auth")
             if not self.credential_headers:
                 missing.append("credential_headers")
         if missing:
             raise _ModeFieldsMissing(missing)
+        # R-U1: сервер с прежним полем auth эквивалентен списку из одного способа.
+        if self.auth is not None:
+            if self.auth.id is None:
+                self.auth.id = DEFAULT_OAUTH_METHOD_ID
+            if self.auth.title is None:
+                self.auth.title = DEFAULT_OAUTH_METHOD_TITLE
         return self
+
+    @property
+    def methods(self) -> list[AuthOAuth2 | AuthUserToken]:
+        """Способы подключения сервера: объявленные списком либо один способ из ``auth`` (R-U1)."""
+        if self.auth_methods is not None:
+            return list(self.auth_methods)
+        if self.auth is not None:
+            return [self.auth]
+        return []
 
 
 class _ModeFieldsMissing(ValueError):
     def __init__(self, fields: list[str]) -> None:
         super().__init__(", ".join(fields))
         self.fields = fields
+
+
+class _PathError(ValueError):
+    """Ошибка схемы с явным путём к полю относительно сервера (R-C1)."""
+
+    def __init__(self, parts: tuple[Any, ...], text: str) -> None:
+        super().__init__(text)
+        self.parts = parts
+        self.text = text
 
 
 @dataclass(frozen=True)
@@ -270,6 +394,66 @@ class ServerEntry:
         audience = self.model.audience
         return "all" in audience or bool(set(audience) & set(groups))
 
+    @property
+    def auth_methods(self) -> list[AuthOAuth2 | AuthUserToken]:
+        return self.model.methods
+
+    def auth_method(self, method_id: str | None) -> AuthOAuth2 | AuthUserToken | None:
+        """Способ подключения по его ``id`` (R-U1).
+
+        ``method_id is None`` — способ определяется однозначно: единственный объявленный способ
+        либо (для подключений, созданных до появления колонки) единственный тип ``user_token``.
+        """
+        methods = self.auth_methods
+        if method_id is not None:
+            return next((m for m in methods if m.id == method_id), None)
+        if len(methods) == 1:
+            return methods[0]
+        user_token = [m for m in methods if isinstance(m, AuthUserToken)]
+        if user_token and len(user_token) == len(methods):
+            return user_token[0]
+        return None
+
+    def uses_user_token(self, method_id: str | None) -> bool:
+        """Подключение выполнено способом ``user_token`` (R-U5, R-U6, R-U7)."""
+        return isinstance(self.auth_method(method_id), AuthUserToken)
+
+    def user_token_methods(self) -> list[AuthUserToken]:
+        return [m for m in self.auth_methods if isinstance(m, AuthUserToken)]
+
+    def public_auth_kind(self) -> str:
+        """R-C6: тип первого доступного способа, иначе первого объявленного, иначе ``oauth2``."""
+        methods = self.auth_methods
+        if not methods:
+            return "oauth2"
+        available = next((m for m in methods if m.available), None)
+        return (available or methods[0]).type
+
+    def public_auth_methods(self) -> list[dict[str, Any]]:
+        """R-U8: способы подключения наружу — без ``verify``, client_id/secret, scopes и URL OAuth."""
+        result: list[dict[str, Any]] = []
+        for method in self.auth_methods:
+            view: dict[str, Any] = {
+                "id": method.id,
+                "title": method.title,
+                "type": method.type,
+                "available": method.available,
+                "unavailable_reason": method.unavailable_reason,
+            }
+            if isinstance(method, AuthUserToken):
+                f = method.field
+                view["field"] = {
+                    "label": f.label,
+                    "hint": f.hint,
+                    "docs_url": f.docs_url,
+                    "secret": f.secret,
+                    "placeholder": f.placeholder,
+                    "min_length": f.min_length,
+                    "max_length": f.max_length,
+                }
+            result.append(view)
+        return result
+
     def public_mcp_url(self, public_url: str) -> str:
         if self.model.mode == "native":
             return self.model.mcp_url or ""
@@ -293,7 +477,7 @@ class ServerEntry:
     def public_view(self, public_url: str) -> dict[str, Any]:
         """Публичное представление сервера (R-C6): без секретов и внутренних URL."""
         m = self.model
-        return {
+        view: dict[str, Any] = {
             "alias": m.alias,
             "title": m.title,
             "description": m.description,
@@ -304,8 +488,12 @@ class ServerEntry:
             "mode": m.mode,
             "mcp_url": self.public_mcp_url(public_url),
             "permission_model": self.public_permission_model(),
-            "auth_kind": "oauth2",
+            "auth_kind": self.public_auth_kind(),
         }
+        # R-C6/R-U8 (решение 69): ключ auth_methods есть только у серверов, объявивших его в каталоге.
+        if m.auth_methods is not None:
+            view["auth_methods"] = self.public_auth_methods()
+        return view
 
 
 @dataclass(frozen=True)
@@ -431,19 +619,63 @@ def _substitute_vars(value: Any, path: str, env: Mapping[str, str], missing: lis
     return value
 
 
-def _check_env_refs(value: Any, rel: tuple[str, ...], server_path: str) -> None:
-    """``env:VAR`` допустим только в auth.client_secret, credential_headers.*, static_headers.*."""
+def _env_ref_allowed(rel: tuple[Any, ...]) -> bool:
+    """R-C2/R-U3: где допустима ссылка ``env:VAR`` (путь относительно сервера)."""
+    if rel == ("auth", "client_secret"):
+        return True
+    if len(rel) == 2 and rel[0] in ("credential_headers", "static_headers"):
+        return True
+    if len(rel) >= 3 and rel[0] == "auth_methods" and str(rel[1]).isdigit():
+        tail = rel[2:]
+        if tail == ("client_secret",):
+            return True
+        if len(tail) == 3 and tail[0] == "verify" and tail[1] == "headers":
+            return True
+    return False
+
+
+def _unavailable_method_paths(raw: Any, index: int) -> tuple[str, ...]:
+    """Пути способов подключения с ``available: false`` (R-U1, решение 73)."""
+    if not isinstance(raw, dict):
+        return ()
+    methods = raw.get("auth_methods")
+    if not isinstance(methods, list):
+        return ()
+    return tuple(
+        f"servers[{index}].auth_methods[{j}]"
+        for j, method in enumerate(methods)
+        if isinstance(method, dict) and method.get("available") is False
+    )
+
+
+def _drop_unavailable_method_vars(
+    missing: list[tuple[str, str]], raw: Any, index: int
+) -> list[tuple[str, str]]:
+    """Незаданные ``${VAR}`` внутри недоступного способа не делают сервер ``unconfigured``.
+
+    Уточнение R-C2 (R-U1, решение 73): способом с ``available: false`` подключиться нельзя, его
+    значения наружу не отдаются и не читаются, поэтому настроенным он быть не обязан.
+    """
+    prefixes = _unavailable_method_paths(raw, index)
+    if not prefixes:
+        return missing
+    return [
+        item
+        for item in missing
+        if not any(item[0] == p or item[0].startswith((f"{p}.", f"{p}[")) for p in prefixes)
+    ]
+
+
+def _check_env_refs(value: Any, rel: tuple[Any, ...], server_path: str) -> None:
+    """``env:VAR`` допустим только в auth.client_secret, credential_headers.*, static_headers.*
+    и в тех же полях способов подключения (``auth_methods[j].client_secret``,
+    ``auth_methods[j].verify.headers.*``, R-U1/R-U3)."""
     if isinstance(value, str):
-        if ENV_REF_RE.match(value):
-            allowed = any(
-                rel[: len(prefix)] == prefix and len(rel) == len(prefix) + (0 if prefix[0] == "auth" else 1)
-                for prefix in _ENV_REF_ALLOWED_PREFIXES
+        if ENV_REF_RE.match(value) and not _env_ref_allowed(rel):
+            raise CatalogError(
+                f"{_path_str(server_path, rel)}: ссылка env:VAR недопустима в этом поле "
+                "(разрешено только в auth.client_secret, credential_headers, static_headers)"
             )
-            if not allowed:
-                raise CatalogError(
-                    f"{_path_str(server_path, rel)}: ссылка env:VAR недопустима в этом поле "
-                    "(разрешено только в auth.client_secret, credential_headers, static_headers)"
-                )
         return
     if isinstance(value, dict):
         for k, v in value.items():
@@ -472,10 +704,13 @@ _TYPE_MESSAGES = {
 
 
 def _pydantic_loc(loc: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Убрать теги discriminated union из пути (``permission_model.header_groups.header``)."""
+    """Убрать теги discriminated union из пути (``permission_model.header_groups.header``,
+    ``auth_methods[0].user_token.field``)."""
     out: list[Any] = []
     for i, part in enumerate(loc):
         if i > 0 and loc[i - 1] == "permission_model" and part in _PERMISSION_KINDS:
+            continue
+        if i > 1 and loc[i - 2] == "auth_methods" and part in _AUTH_METHOD_TYPES:
             continue
         out.append(part)
     return tuple(out)
@@ -493,10 +728,19 @@ def _format_schema_error(server_path: str, exc: ValidationError) -> str:
                     f"{_path_str(server_path, loc + (fld,))}: обязательное поле для режима отсутствует"
                 )
             continue
-        if etype == "union_tag_not_found" and loc and loc[-1] == "permission_model":
+        if isinstance(ctx_err, _PathError):
+            messages.append(f"{_path_str(server_path, loc + ctx_err.parts)}: {ctx_err.text}")
+            continue
+        if etype in ("union_tag_not_found", "union_tag_invalid") and loc and loc[-1] == "permission_model":
             loc = loc + ("kind",)
-        if etype == "union_tag_invalid" and loc and loc[-1] == "permission_model":
-            loc = loc + ("kind",)
+        # Тег способа подключения — поле ``type`` (R-U1).
+        if (
+            etype in ("union_tag_not_found", "union_tag_invalid")
+            and len(loc) >= 2
+            and loc[-2] == "auth_methods"
+            and isinstance(loc[-1], int)
+        ):
+            loc = loc + ("type",)
         msg = _TYPE_MESSAGES.get(etype)
         if msg is None:
             raw = str(err.get("msg", ""))
@@ -550,6 +794,7 @@ def parse_catalog(document: Any, env: Mapping[str, str] | None = None, *, source
     for i, raw in enumerate(servers_resolved):
         missing: list[tuple[str, str]] = []
         substituted = _substitute_vars(raw, f"servers[{i}]", environ, missing)
+        missing = _drop_unavailable_method_vars(missing, raw, i)
         status = raw.get("status") if isinstance(raw, dict) else None
         if missing and status != "beta":
             path, name = missing[0]
@@ -591,7 +836,10 @@ def load_catalog(path: str | os.PathLike[str], env: Mapping[str, str] | None = N
 
 
 __all__ = [
+    "TOKEN_MAX_LENGTH",
+    "AuthMethod",
     "AuthOAuth2",
+    "AuthUserToken",
     "Catalog",
     "CatalogError",
     "EnvRef",
@@ -601,6 +849,8 @@ __all__ = [
     "Secret",
     "ServerEntry",
     "ServerModel",
+    "TokenField",
+    "TokenVerify",
     "ToolMasks",
     "load_catalog",
     "parse_catalog",
