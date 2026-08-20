@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #
 # installers/tests/pester/DesktopEntry.Tests.ps1 — поиск и запуск штатного деинсталлятора Desktop
 # на Windows: сопоставление записи Uninstall с app_name (N5-R1, N5-P4) и разбор UninstallString.
@@ -22,7 +22,12 @@ BeforeAll {
     . $script:InstallScript
 
     # Подменённый источник записей реестра: корень Uninstall -> массив записей.
-    $script:FakeRoots = @{}
+    #
+    # Область видимости — ГЛОБАЛЬНАЯ намеренно. В Pester 5 тело Mock исполняется не в области
+    # блока It, поэтому присваивание $global:OmFakeRoots внутри It до мока не доходит: мок читает
+    # прежнее (пустое) значение, Get-DesktopUninstallEntry не находит ни одной записи, и тесты,
+    # ожидающие СОВПАДЕНИЯ, краснеют, а ожидающие $null проходят ложно-зелёными.
+    $global:OmFakeRoots = @{}
 
     function New-RegEntry {
         param(
@@ -78,9 +83,15 @@ BeforeAll {
         }
     }
 
+    # Временный каталог фикстуры. SupportsShouldProcess — требование PSScriptAnalyzer
+    # (PSUseShouldProcessForStateChangingFunctions) для функций с глаголом New-.
     function New-TempDir {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+        param()
         $path = Join-Path ([IO.Path]::GetTempPath()) ('opencode-pester-' + [Guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $path -Force
+        if ($PSCmdlet.ShouldProcess($path, 'Создать временный каталог фикстуры')) {
+            $null = New-Item -ItemType Directory -Path $path -Force
+        }
         return $path
     }
 
@@ -89,7 +100,7 @@ BeforeAll {
         param(
             [string]$Root,
             [string]$InstallerType = 'dmg',
-            [string]$AppName = 'OpenCode.app',
+            [string]$AppName = 'OpenCode Magnit.app',
             [switch]$NoAppName
         )
         foreach ($sub in @('common', 'bin', 'certs', 'desktop')) {
@@ -144,10 +155,13 @@ BeforeAll {
         return $Root
     }
 
+    # Код отказа действия: 0 — успех. Вывод самого действия ПОДАВЛЯЕТСЯ ($null = ...): иначе при
+    # успехе (например, Read-Manifest вернул объект манифеста) функция отдала бы в конвейер два
+    # значения — объект и 0, и утверждение `| Should -Be 0` не сработало бы.
     function Get-FailureCode {
         param([scriptblock]$Action)
         try {
-            & $Action
+            $null = & $Action
         } catch {
             $data = $_.Exception.Data
             if ($null -ne $data -and $data.Contains('Code')) {
@@ -161,23 +175,27 @@ BeforeAll {
 
 Describe 'Сопоставление записи Uninstall с app_name (N5-R1, N5-P4)' -Tag 'ci' {
     BeforeEach {
-        $script:FakeRoots = New-FakeRegistry
+        $global:OmFakeRoots = New-FakeRegistry
         Mock Test-IsWindowsHost { return $true }
         Mock Test-Path { return $true }
         Mock Get-ChildItem {
-            if ($script:FakeRoots.ContainsKey($LiteralPath)) {
-                return $script:FakeRoots[$LiteralPath]
+            if ($global:OmFakeRoots.ContainsKey($LiteralPath)) {
+                return $global:OmFakeRoots[$LiteralPath]
             }
             return @()
         }
         Mock Get-ItemProperty {
-            foreach ($root in @($script:FakeRoots.Keys)) {
-                foreach ($item in @($script:FakeRoots[$root])) {
+            foreach ($root in @($global:OmFakeRoots.Keys)) {
+                foreach ($item in @($global:OmFakeRoots[$root])) {
                     if ($item.PSPath -eq $LiteralPath) { return $item }
                 }
             }
             return $null
         }
+    }
+
+    AfterEach {
+        Remove-Variable -Name 'OmFakeRoots' -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'AC-139: app_name="*" не совпадает ни с одной чужой записью Uninstall' {
@@ -193,7 +211,11 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     }
 
     It 'AC-139: подстановочные символы не совпадают и когда наша запись в реестре есть' {
-        $script:FakeRoots = New-FakeRegistry -WithOpenCode
+        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        # Контроль ДО перебора: подменённый источник записей действительно доходит до функции.
+        # Без него весь перебор был бы ложно-зелёным на пустом реестре.
+        (Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode')) |
+            Should -Not -BeNullOrEmpty -Because 'подменённый реестр виден функции'
         foreach ($needle in @('*', '?', '[A-z]*', '*.app', 'Open*')) {
             $entry = Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName $needle)
             $entry | Should -BeNullOrEmpty -Because "app_name='$needle' — шаблон, а не имя"
@@ -201,7 +223,7 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     }
 
     It 'AC-139: app_name="OpenCode" совпадает со своей записью (негативный контроль)' {
-        $script:FakeRoots = New-FakeRegistry -WithOpenCode
+        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
         $entry = Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode')
         $entry | Should -Not -BeNullOrEmpty
         $entry.DisplayName | Should -Be 'OpenCode Magnit'
@@ -209,9 +231,10 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
         $entry.DisplayTarget | Should -Be 'C:\Apps\OpenCode'
     }
 
-    It 'AC-139: суффикс .app отбрасывается — app_name="OpenCode.app" находит ту же запись' {
-        $script:FakeRoots = New-FakeRegistry -WithOpenCode
-        $entry = Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode.app')
+    It 'AC-139, AC-154: суффикс .app отбрасывается — app_name="OpenCode Magnit.app" находит запись "OpenCode Magnit"' {
+        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        $entry = Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode Magnit.app')
+        $entry | Should -Not -BeNullOrEmpty -Because 'пробел в штатном имени сравнение не ломает'
         $entry.DisplayName | Should -Be 'OpenCode Magnit'
     }
 
@@ -222,12 +245,12 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     It 'AC-139: без desktop-артефакта и вне Windows возвращается $null' {
         Get-DesktopUninstallEntry -Manifest (New-ManifestObject -NoDesktop) | Should -BeNullOrEmpty
         Mock Test-IsWindowsHost { return $false }
-        $script:FakeRoots = New-FakeRegistry -WithOpenCode
+        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
         Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode') | Should -BeNullOrEmpty
     }
 
     It 'AC-139: пустой InstallLocation → DisplayTarget равен DisplayName' {
-        $script:FakeRoots = @{
+        $global:OmFakeRoots = @{
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' = @(
                 (New-RegEntry -Key 'HKCU:\U\OC' -DisplayName 'OpenCode Magnit' `
                         -UninstallString '"C:\Apps\OpenCode\Uninstall.exe"')
@@ -400,7 +423,7 @@ Describe 'Манифест: app_name для Desktop (N5-P4)' -Tag 'ci' {
     }
 
     It 'AC-139: штатное app_name принимается для dmg и для nsis (контроль)' {
-        $null = New-ManifestPackage -Root $script:PkgRoot -InstallerType 'dmg' -AppName 'OpenCode.app'
+        $null = New-ManifestPackage -Root $script:PkgRoot -InstallerType 'dmg' -AppName 'OpenCode Magnit.app'
         (Get-FailureCode { Read-Manifest -PackageRoot $script:PkgRoot }) | Should -Be 0
         $root = New-TempDir
         try {
@@ -417,10 +440,11 @@ Describe 'Манифест: app_name для Desktop (N5-P4)' -Tag 'ci' {
     }
 
     It 'AC-139: Test-AppName — таблица допустимых и запрещённых значений' {
-        foreach ($value in @('OpenCode', 'OpenCode.app', 'OpenCodeSetup.exe', 'Open Code.app')) {
+        # Пробел внутри имени допустим (N5-P3/N5-P4), ведущий и завершающий — нет.
+        foreach ($value in @('OpenCode', 'OpenCode.app', 'OpenCodeSetup.exe', 'Open Code.app', 'OpenCode Magnit.app')) {
             (Test-AppName $value) | Should -BeTrue -Because "'$value' — допустимое имя приложения"
         }
-        foreach ($value in @('', '   ', '.', '..', './x', 'x/', 'a/b', '..\x', 'C:\x', '/x', '*', '?', '[', ']', 'Open*')) {
+        foreach ($value in @('', '   ', '.', '..', './x', 'x/', 'a/b', '..\x', 'C:\x', '/x', '*', '?', '[', ']', 'Open*', ' a.pem', 'a.pem ', "a`tb.pem", 'a$(x).pem', 'a;b.pem', 'a&b.pem', "a'b.pem", 'a"b.pem', 'a`b.pem')) {
             (Test-AppName $value) | Should -BeFalse -Because "'$value' — недопустимое имя приложения"
         }
     }

@@ -14,6 +14,13 @@ REPO_ROOT=$(cd -- "$INSTALLERS_ROOT/.." && pwd -P)
 FIXTURES_DIR="$INSTALLERS_ROOT/tests/fixtures"
 export INSTALLERS_ROOT REPO_ROOT FIXTURES_DIR
 
+# Штатное имя корпоративного бандла Desktop (N5-I9, ревизия 1.5) — ЕДИНСТВЕННАЯ точка задания
+# имени в фикстурах bats (N5-T1). Тесты обязаны ссылаться на $OM_APP_NAME, а не на литерал:
+# sed-подстановка по литералу имени после переименования перестаёт срабатывать МОЛЧА (sed не
+# меняет файл и не возвращает ошибку), и тест начинает проверять не то, что заявлено.
+OM_APP_NAME='OpenCode Magnit.app'
+export OM_APP_NAME
+
 # Утилиты, из которых собирается урезанный PATH (см. min_path_dir).
 OM_TOOL_LIST="bash sh awk sed grep egrep fgrep cat cp mv rm mkdir rmdir chmod mktemp uname id \
 find head tail cmp diff dirname basename wc sort ls date touch stat tr env printenv sudo \
@@ -27,6 +34,19 @@ sha256_file() {
   else
     shasum -a 256 "$1" | awk '{ print $1 }'
   fi
+}
+
+# JSON-экранирование строкового значения для фабрики манифеста (N5-T1): фабрика принимает
+# значение поля КАК ЕСТЬ и сама делает из него валидную строку JSON. Так в фикстуру попадают
+# и метасимволы оболочки ($, `, ", ', ;, &, пробел), и управляющие символы.
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  printf '%s' "$s"
 }
 
 mode_of() {
@@ -89,6 +109,9 @@ install_trap_stubs() {
     cat >"$dir/$tool" <<STUB
 #!/usr/bin/env bash
 printf '%s %s\n' "$tool" "\$*" >>"$BATS_TEST_TMPDIR/forbidden.log"
+# Каждый аргумент отдельной строкой: так проверяется, что путь с пробелом дошёл ОДНИМ
+# аргументом и не был расщеплён оболочкой (N5-I9, штатное имя «OpenCode Magnit.app»).
+for om_arg in "\$@"; do printf 'ARG %s\n' "\$om_arg" >>"$BATS_TEST_TMPDIR/forbidden.log"; done
 exit 97
 STUB
     chmod 0755 "$dir/$tool"
@@ -165,6 +188,11 @@ write_noversion_binary() {
 # Переопределения через переменные окружения: PKG_OS, PKG_ARCH, PKG_VERSION, PKG_HUB,
 # PKG_DESKTOP (1 — добавить артефакт desktop), PKG_SHA_UPPER (1 — хеши заглавными),
 # PKG_PURGE (список путей purge_paths, по одному в строке).
+# Путевые поля манифеста задаются ПАРАМЕТРАМИ ФАБРИКИ, а не sed-подстановкой по литералу
+# значения (N5-T1): PKG_APP_NAME (значение artifacts[].app_name, по умолчанию $OM_APP_NAME),
+# PKG_APP_NAME_OMIT=1 (поле app_name не печатать вовсе), PKG_INSTALLER_TYPE,
+# PKG_CA_INSTALL_NAME (ca.install_name), PKG_CLI_INSTALL_NAME (artifacts[].install_name).
+# Значения передаются как есть — экранирование в JSON делает сама фабрика (json_escape).
 write_manifest() {
   local dir=$1
   local os=${PKG_OS:-$(host_os)}
@@ -173,8 +201,11 @@ write_manifest() {
   local hub=${PKG_HUB:-https://hub.test}
   local bin_name=opencode
   local ca_sha cli_sha cli_size desktop_block="" purge_block="" item first=1 list
+  local ca_install cli_install
 
   [ "$os" != "windows" ] || bin_name=opencode.exe
+  ca_install=$(json_escape "${PKG_CA_INSTALL_NAME-tander-ca-bundle.pem}")
+  cli_install=$(json_escape "${PKG_CLI_INSTALL_NAME-$bin_name}")
   ca_sha=$(sha256_file "$dir/certs/tander-ca-bundle.pem")
   cli_sha=$(sha256_file "$dir/bin/$bin_name")
   cli_size=$(wc -c <"$dir/bin/$bin_name" | tr -d ' ')
@@ -184,17 +215,20 @@ write_manifest() {
   fi
 
   if [ "${PKG_DESKTOP:-0}" = "1" ]; then
-    local d_sha d_size
+    local d_sha d_size app_field=""
     d_sha=$(sha256_file "$dir/desktop/OpenCode.dmg")
     d_size=$(wc -c <"$dir/desktop/OpenCode.dmg" | tr -d ' ')
+    if [ "${PKG_APP_NAME_OMIT:-0}" != "1" ]; then
+      app_field=",
+      \"app_name\": \"$(json_escape "${PKG_APP_NAME-$OM_APP_NAME}")\""
+    fi
     desktop_block=",
     {
       \"kind\": \"desktop\",
       \"file\": \"desktop/OpenCode.dmg\",
       \"sha256\": \"$d_sha\",
       \"size\": $d_size,
-      \"installer_type\": \"dmg\",
-      \"app_name\": \"OpenCode.app\"
+      \"installer_type\": \"${PKG_INSTALLER_TYPE:-dmg}\"$app_field
     }"
   fi
 
@@ -229,7 +263,7 @@ PURGE
   "ca": {
     "file": "certs/tander-ca-bundle.pem",
     "sha256": "$ca_sha",
-    "install_name": "tander-ca-bundle.pem"
+    "install_name": "$ca_install"
   },
   "artifacts": [
     {
@@ -237,7 +271,7 @@ PURGE
       "file": "bin/$bin_name",
       "sha256": "$cli_sha",
       "size": $cli_size,
-      "install_name": "$bin_name"
+      "install_name": "$cli_install"
     }$desktop_block
   ],
   "purge_paths": [

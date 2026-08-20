@@ -20,9 +20,11 @@ setup() {
   printf 'МАРКЕР ЖЕРТВЫ\n' >"$VICTIM/keep.txt"
 }
 
-# Подмена app_name в манифесте фикстурного пакета (в исходном значении — "OpenCode.app").
+# Подмена app_name: пакет пересобирается фабрикой с параметром PKG_APP_NAME (N5-T1).
+# sed-подстановки по литералу штатного имени здесь нет намеренно — после переименования
+# бандла она перестала бы срабатывать молча.
 set_app_name() {
-  manifest_edit "s|\"app_name\": \"OpenCode.app\"|\"app_name\": \"$1\"|"
+  PKG_DESKTOP=1 PKG_APP_NAME=$1 make_pkg
 }
 
 assert_victim_intact() {
@@ -150,7 +152,7 @@ assert_no_file_changes() {
 }
 
 @test "AC-135: app_name с обратным слэшем → код 2" {
-  set_app_name "..\\\\\\\\victim"
+  set_app_name '..\victim'
   snapshot_state before
   oc_run --no-launch
   assert_status 2
@@ -160,7 +162,7 @@ assert_no_file_changes() {
 }
 
 @test "AC-135: app_name с буквой диска C:\\ → код 2" {
-  set_app_name "C:\\\\\\\\victim"
+  set_app_name 'C:\victim'
   snapshot_state before
   oc_run --uninstall
   assert_status 2
@@ -169,12 +171,12 @@ assert_no_file_changes() {
   assert_no_file_changes
 }
 
-@test "AC-135: штатное app_name=OpenCode.app по-прежнему принимается (--dry-run --uninstall)" {
+@test "AC-135, AC-154: штатное app_name=\"OpenCode Magnit.app\" по-прежнему принимается (--dry-run --uninstall)" {
   snapshot_state before
   oc_run --dry-run --uninstall
   assert_status 0
   assert_output_contains "План удаления OpenCode 1.17.9-magnit.1"
-  assert_output_contains "/Applications/OpenCode.app"
+  assert_output_contains "/Applications/$OM_APP_NAME"
   assert_no_file_changes
 }
 
@@ -297,6 +299,7 @@ assert_no_file_changes() {
   done
   # Имя приложения строже: разделителей пути быть не может вовсе.
   is_safe_app_name "OpenCode.app" || return 1
+  is_safe_app_name "$OM_APP_NAME" || { printf 'Отвергнуто штатное имя: %s\n' "$OM_APP_NAME" >&2; return 1; }
   for v in "" "." ".." "./OpenCode.app" "OpenCode.app/" "sub/OpenCode.app" "../victim" "/Applications"; do
     if is_safe_app_name "$v"; then
       printf 'Принято недопустимое имя приложения: [%s]\n' "$v" >&2

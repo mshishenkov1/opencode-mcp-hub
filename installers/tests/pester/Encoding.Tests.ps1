@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #
 # installers/tests/pester/Encoding.Tests.ps1 — кодировки и переводы строк (N5-T6).
 #

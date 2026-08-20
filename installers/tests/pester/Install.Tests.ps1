@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #
 # installers/tests/pester/Install.Tests.ps1 — тесты install.ps1 без Windows-реестра (N5-T2).
 #
@@ -13,6 +13,7 @@
 # Write-UserPathEntry, Publish-EnvironmentChange, Invoke-DesktopInstaller) подменяются Mock.
 
 BeforeAll {
+    $script:PesterDir = $PSScriptRoot
     $script:InstallersRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' | Join-Path -ChildPath '..')).Path
     $script:InstallScript = Join-Path (Join-Path $script:InstallersRoot 'windows') 'install.ps1'
 
@@ -87,16 +88,25 @@ BeforeAll {
         return $Root
     }
 
+    # Временный каталог фикстуры. SupportsShouldProcess — требование PSScriptAnalyzer
+    # (PSUseShouldProcessForStateChangingFunctions) для функций с глаголом New-.
     function New-TempDir {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+        param()
         $path = Join-Path ([IO.Path]::GetTempPath()) ('opencode-pester-' + [Guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $path -Force
+        if ($PSCmdlet.ShouldProcess($path, 'Создать временный каталог фикстуры')) {
+            $null = New-Item -ItemType Directory -Path $path -Force
+        }
         return $path
     }
 
+    # Код отказа действия: 0 — успех. Вывод самого действия ПОДАВЛЯЕТСЯ ($null = ...): иначе при
+    # успехе (например, Read-Manifest вернул объект манифеста) функция отдала бы в конвейер два
+    # значения — объект и 0, и утверждение `| Should -Be 0` не сработало бы.
     function Get-FailureCode {
         param([scriptblock]$Action)
         try {
-            & $Action
+            $null = & $Action
         } catch {
             $data = $_.Exception.Data
             if ($null -ne $data -and $data.Contains('Code')) {
@@ -123,10 +133,22 @@ Describe 'AC-125: dot-source install.ps1 не выполняет действи�
         (Get-Content -LiteralPath $script:InstallScript -Raw) | Should -Match "InvocationName -ne '\.'"
     }
 
-    It 'AC-126: набор Pester не трогает реестр и User PATH' {
-        $text = Get-Content -LiteralPath $PSCommandPath -Raw
-        $text | Should -Not -Match 'HKEY_CURRENT_USER'
-        $text | Should -Not -Match 'SetEnvironmentVariable'
+    It 'AC-126: набор Pester не трогает реестр, User PATH и переменные окружения машины' {
+        # Проверяется ВЕСЬ набор, а не один файл. Строки самих утверждений исключаются: иначе
+        # тест срабатывал бы на собственном тексте. Путь берётся из $script:PesterDir
+        # ($PSScriptRoot, вычисленный в BeforeAll): $PSCommandPath внутри It в Pester 5
+        # указывает не на файл теста.
+        $files = @(Get-ChildItem -LiteralPath $script:PesterDir -Filter '*.Tests.ps1')
+        $files.Count | Should -BeGreaterThan 0
+        foreach ($file in $files) {
+            $lines = @(Get-Content -LiteralPath $file.FullName |
+                    Where-Object { $_ -notmatch 'Should -Not -Match' })
+            $text = ($lines -join "`n")
+            $text | Should -Not -Match '\[Environment\]::SetEnvironmentVariable' -Because "$($file.Name): запись переменных окружения машины"
+            $text | Should -Not -Match '(Set|New|Remove)-ItemProperty' -Because "$($file.Name): запись в реестр"
+            $text | Should -Not -Match 'Set-Item\s+-(Literal)?Path\s+.HK' -Because "$($file.Name): запись в реестр"
+            $text | Should -Not -Match 'reg(\.exe)?\s+(add|delete|import)' -Because "$($file.Name): запись в реестр через reg.exe"
+        }
     }
 }
 

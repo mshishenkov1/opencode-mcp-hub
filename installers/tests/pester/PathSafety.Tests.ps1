@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #
 # installers/tests/pester/PathSafety.Tests.ps1 — единая нормализация путей и строгая вложенность
 # purge_paths на Windows-ветке (N5-P3, N5-R2). Паритет с path_normalize / path_is_inside /
@@ -29,9 +29,15 @@ BeforeAll {
     # Dot-source: исполняемый вход не срабатывает (N5-T2).
     . $script:InstallScript
 
+    # Временный каталог фикстуры. SupportsShouldProcess — требование PSScriptAnalyzer
+    # (PSUseShouldProcessForStateChangingFunctions) для функций с глаголом New-.
     function New-TempDir {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+        param()
         $path = Join-Path ([IO.Path]::GetTempPath()) ('opencode-pester-' + [Guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Path $path -Force
+        if ($PSCmdlet.ShouldProcess($path, 'Создать временный каталог фикстуры')) {
+            $null = New-Item -ItemType Directory -Path $path -Force
+        }
         return $path
     }
 

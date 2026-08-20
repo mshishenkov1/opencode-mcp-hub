@@ -22,14 +22,15 @@ setup() {
   printf 'ЧУЖОЕ ПРИЛОЖЕНИЕ\n' >"$HOME/Applications/Other.marker"
 }
 
+# Подмена и удаление app_name — ПАРАМЕТРАМИ ФАБРИКИ фикстур (N5-T1), а не sed-подстановкой
+# по литералу штатного имени: после переименования бандла такая подстановка перестала бы
+# срабатывать молча (sed не меняет файл и не возвращает ошибку).
 set_app_name() {
-  manifest_edit "s|\"app_name\": \"OpenCode.app\"|\"app_name\": \"$1\"|"
+  PKG_DESKTOP=1 PKG_APP_NAME=$1 make_pkg
 }
 
-# Полное удаление поля app_name из desktop-артефакта (вместе с запятой предыдущей строки).
 drop_app_name() {
-  manifest_edit '/"app_name": "OpenCode.app"/d'
-  manifest_edit 's|\("installer_type": "[a-z]*"\),|\1|'
+  PKG_DESKTOP=1 PKG_APP_NAME_OMIT=1 make_pkg
 }
 
 snapshot_state() {
@@ -123,7 +124,7 @@ assert_rejected() {
 }
 
 @test "AC-138: app_name=\"\\t\" (табуляция) равносильно пустому → код 2" {
-  set_app_name "\\t"
+  set_app_name "$(printf '\t')"
   snapshot_state before
   oc_run --no-launch
   assert_status 2
@@ -178,14 +179,30 @@ assert_rejected() {
 
 # ------------------------------------------------------------------ штатное значение не сломано
 
-@test "AC-138: штатное app_name=OpenCode.app принимается: --dry-run и --check доходят до своих строк" {
+@test "AC-138, AC-154: штатное app_name=\"OpenCode Magnit.app\" принимается: --dry-run и --check доходят до своих строк" {
   oc_run --dry-run
   assert_status 0
-  assert_output_contains "/Applications/OpenCode.app"
+  if [ "$(host_platform)" = "macos" ]; then
+    assert_output_contains "/Applications/$OM_APP_NAME"
+  else
+    # Linux: dmg-артефакт не устанавливается, план печатает строку ручной установки (N5-I10).
+    # Строка «Установить Desktop» с каталогом /Applications на этой платформе невозможна.
+    assert_output_contains "Desktop: запустите установщик вручную"
+    refute_output_contains "/Applications/$OM_APP_NAME"
+  fi
   oc_run --check
   # Ничего не установлено → код 7 (расхождение), но манифест признан корректным.
   assert_status 7
   assert_output_contains "Манифест: корректен"
+}
+
+@test "AC-154: macOS-ветка плана печатает «<каталог>/OpenCode Magnit.app» одним путём (пробел не расщепляет)" {
+  # Ветка macOS проверяется и на Linux: --dry-run до hdiutil/ditto не доходит, а лончер
+  # macos/install.sh задаёт platform=macos. Так пробел в штатном имени покрыт на обеих площадках.
+  PKG_PLATFORM=macos PKG_DESKTOP=1 make_pkg
+  oc_run --dry-run
+  assert_status 0
+  assert_output_contains "/Applications/$OM_APP_NAME"
 }
 
 @test "AC-138: dmg без app_name отвергается ДО сверки целостности (код 2, а не 4)" {
@@ -200,8 +217,7 @@ assert_rejected() {
 }
 
 @test "AC-138: installer_type≠dmg без app_name манифест не ломает (обязательность только для dmg)" {
-  manifest_edit 's|"installer_type": "dmg"|"installer_type": "nsis"|'
-  drop_app_name
+  PKG_DESKTOP=1 PKG_INSTALLER_TYPE=nsis PKG_APP_NAME_OMIT=1 make_pkg
   oc_run --dry-run
   assert_status 0
 }
@@ -239,13 +255,19 @@ hdiutil() {
     prev=$a
   done
   if [ "${1:-}" = "attach" ] && [ -n "$mp" ]; then
-    mkdir -p "$mp/OpenCode.app" 2>/dev/null || true
+    # Имя бандла внутри образа — то же, что в манифесте (N5-T1): литерала имени здесь нет.
+    mkdir -p "$mp/$APP_NAME" 2>/dev/null || true
   fi
   return 0
 }
 if [ "$MODE" = "stub" ]; then
   use_sudo=0
-  run_priv() { printf 'run_priv %s\n' "$*" >>"$OPS_LOG"; return 0; }
+  # Каждый аргумент отдельной строкой: так видно, что путь с пробелом пришёл ОДНИМ аргументом.
+  run_priv() {
+    printf 'run_priv %s\n' "$*" >>"$OPS_LOG"
+    for a in "$@"; do printf 'ARG %s\n' "$a" >>"$OPS_LOG"; done
+    return 0
+  }
   ditto() { printf 'ditto %s\n' "$*" >>"$OPS_LOG"; return 0; }
 else
   use_sudo=1
@@ -304,12 +326,12 @@ assert_no_ops() {
   assert_no_forbidden_calls
 }
 
-@test "AC-138: install_desktop с app_name=\".\" и \"OpenCode.app/\" — код 2, ни одной операции" {
+@test "AC-138: install_desktop с app_name=\".\" и \"<имя>/\" — код 2, ни одной операции" {
   drive_install_desktop stub "."
   assert_status 2
   assert_output_contains "поле artifacts[].app_name"
   assert_no_ops
-  drive_install_desktop stub "OpenCode.app/"
+  drive_install_desktop stub "$OM_APP_NAME/"
   assert_status 2
   assert_no_ops
 }
@@ -322,13 +344,22 @@ assert_no_ops() {
   assert_no_forbidden_calls
 }
 
-@test "AC-138: install_desktop со штатным app_name копирует именно <dest>/OpenCode.app, а не <dest>" {
-  drive_install_desktop stub "OpenCode.app"
+@test "AC-138, AC-154: install_desktop со штатным app_name копирует именно <dest>/OpenCode Magnit.app, а не <dest>" {
+  drive_install_desktop stub "$OM_APP_NAME"
   assert_status 0
   local log
   log=$(ops_log)
   printf '%s\n' "$log" | grep -F -q "run_priv ditto" || { printf 'Нет копирования:\n%s\n' "$log" >&2; return 1; }
-  printf '%s\n' "$log" | grep -F -q "$DEST_DIR/OpenCode.app" || { printf 'Цель не <dest>/OpenCode.app:\n%s\n' "$log" >&2; return 1; }
+  printf '%s\n' "$log" | grep -F -q "$DEST_DIR/$OM_APP_NAME" || { printf 'Цель не <dest>/%s:\n%s\n' "$OM_APP_NAME" "$log" >&2; return 1; }
+  # Пробел в имени не расщепил аргумент: путь назначения — ровно один аргумент ditto.
+  printf '%s\n' "$log" | grep -F -x -q "ARG $DEST_DIR/$OM_APP_NAME" || {
+    printf 'Путь назначения не пришёл одним аргументом:\n%s\n' "$log" >&2
+    return 1
+  }
+  printf '%s\n' "$log" | grep -F -x -q "ARG $DEST_DIR/OpenCode" && {
+    printf 'Путь расщеплён по пробелу: аргумент <dest>/OpenCode\n%s\n' "$log" >&2
+    return 1
+  }
   # Целью разрушающей операции никогда не становится сам каталог назначения.
   if printf '%s\n' "$log" | grep -E -q "run_priv rm -rf $DEST_DIR/?$"; then
     printf 'rm -rf нацелен на сам каталог назначения:\n%s\n' "$log" >&2
@@ -346,7 +377,7 @@ assert_no_ops() {
   MF_desktop_app="."
   run find_installed_desktop
   [ "$status" -ne 0 ]
-  MF_desktop_app="OpenCode.app/"
+  MF_desktop_app="$OM_APP_NAME/"
   run find_installed_desktop
   [ "$status" -ne 0 ]
   # Каталог $HOME/Applications существует и после трёх вызовов цел.
@@ -371,9 +402,10 @@ assert_no_ops() {
       return 1
     fi
   done
-  # Контроль: штатное имя по-прежнему принимается.
-  is_safe_app_name "OpenCode.app"
-  [ "$(desktop_target_path "/Applications" "OpenCode.app")" = "/Applications/OpenCode.app" ]
+  # Контроль: штатное имя (с ВНУТРЕННИМ пробелом) по-прежнему принимается — N5-P3/N5-P4
+  # разрешают пробел в app_name, если он не ведущий и не завершающий.
+  is_safe_app_name "$OM_APP_NAME"
+  [ "$(desktop_target_path "/Applications" "$OM_APP_NAME")" = "/Applications/$OM_APP_NAME" ]
 }
 
 @test "AC-138: install_desktop с пробельным app_name при обойдённом manifest_load — код 2, ни одной операции" {
@@ -395,22 +427,22 @@ assert_no_ops() {
   [ "$status" -ne 0 ]
   run desktop_target_path "/Applications" ".."
   [ "$status" -ne 0 ]
-  run desktop_target_path "/Applications" "OpenCode.app/"
+  run desktop_target_path "/Applications" "$OM_APP_NAME/"
   [ "$status" -ne 0 ]
   run desktop_target_path "/Applications" "../victim"
   [ "$status" -ne 0 ]
-  [ "$(desktop_target_path "/Applications" "OpenCode.app")" = "/Applications/OpenCode.app" ]
-  [ "$(desktop_target_path "$HOME/Applications/" "OpenCode.app")" = "$HOME/Applications/OpenCode.app" ]
+  [ "$(desktop_target_path "/Applications" "$OM_APP_NAME")" = "/Applications/$OM_APP_NAME" ]
+  [ "$(desktop_target_path "$HOME/Applications/" "$OM_APP_NAME")" = "$HOME/Applications/$OM_APP_NAME" ]
 }
 
-@test "AC-138: install_desktop со штатным app_name — привилегированный вызов ровно один и нацелен внутрь каталога" {
+@test "AC-138, AC-154: install_desktop со штатным app_name — привилегированный вызов ровно один и нацелен внутрь каталога" {
   # run_priv настоящий (use_sudo=1): все привилегированные вызовы уходят в ловушку sudo и
-  # видны в forbidden.log. Ожидание: ditto в <dest>/OpenCode.app и ни одного rm по <dest>.
-  drive_install_desktop priv "OpenCode.app"
+  # видны в forbidden.log. Ожидание: ditto в <dest>/OpenCode Magnit.app и ни одного rm по <dest>.
+  drive_install_desktop priv "$OM_APP_NAME"
   local log
   log=$(forbidden_log)
   printf '%s\n' "$log" | grep -F -q "sudo ditto" || { printf 'Нет sudo ditto:\n%s\n' "$log" >&2; return 1; }
-  printf '%s\n' "$log" | grep -F -q "$DEST_DIR/OpenCode.app" || { printf 'Цель не <dest>/OpenCode.app:\n%s\n' "$log" >&2; return 1; }
+  printf '%s\n' "$log" | grep -F -x -q "ARG $DEST_DIR/$OM_APP_NAME" || { printf 'Цель не пришла одним аргументом <dest>/%s:\n%s\n' "$OM_APP_NAME" "$log" >&2; return 1; }
   if printf '%s\n' "$log" | grep -E -q "sudo rm -rf $DEST_DIR/?$"; then
     printf 'rm -rf нацелен на сам каталог назначения:\n%s\n' "$log" >&2
     return 1
