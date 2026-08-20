@@ -1,0 +1,37 @@
+{
+  "run_id": "i3-plus-h5-20260820",
+  "ts": "2026-08-20T09:09:39",
+  "all_passed": true,
+  "gates": {
+    "G1": {
+      "name": "Тесты",
+      "passed": true,
+      "detail": "все тесты зелёные, skip: 0"
+    },
+    "G2": {
+      "name": "Coverage-diff",
+      "passed": true,
+      "detail": "coverage-diff 92% >= 90%"
+    },
+    "G3": {
+      "name": "Mutation",
+      "passed": true,
+      "detail": "mutation score 74.4% (killed 6270, timeout 22, survived 2165, suspicious 0), порог 70%"
+    },
+    "G4": {
+      "name": "Статанализ",
+      "passed": true,
+      "detail": "линтер и типизация чистые"
+    },
+    "G5": {
+      "name": "Ревью",
+      "passed": true,
+      "detail": "review-i3-2.json: verdict=approve"
+    },
+    "G6": {
+      "name": "AC-трассировка",
+      "passed": true,
+      "detail": "     tests/test_proxy.py::test_closed_breaker_writes_state_once_and_deletes_nothing | AC-166   1       tests/test_proxy.py::test_requests_after_successful_probe_do_not_delete_probe_key | AC-167   1       tests/test_proxy.py::test_failed_probe_stores_threshold_state | AC-168   1       tests/test_proxy.py::test_reopened_window_matches_state_reached_by_accumulation |  | G6 OK: все 168 критериев покрыты тестами"
+    }
+  }
+}
