@@ -76,6 +76,10 @@ bats:
     name: "${REGISTRY_PREFIX}bats/bats:1.11.0"
     entrypoint: [""]
   interruptible: true
+  before_script:
+    # Образ bats — alpine без архиваторов: фикстуры набора собирают пакеты zip/tar
+    # и считают контрольные суммы, без этих утилит тесты падают с status 127.
+    - apk add --no-cache zip unzip tar coreutils python3
   script:
     - bats installers/tests/bats
 
