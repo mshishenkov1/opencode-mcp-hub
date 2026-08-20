@@ -10,7 +10,7 @@
   ],
   "expected": "Пользователь и ключ сохраняются одной транзакцией (spec R-L8), клиент получает постоянный ключ",
   "actual": "sqlalchemy.exc.IntegrityError: ForeignKeyViolationError: insert or update on table \"api_keys\" violates foreign key constraint \"api_keys_user_id_fkey\"; DETAIL: Key (user_id)=(shishenkov_ma) is not present in table \"users\". Вход не завершается, ключ не выдан",
-  "failing_test": "(нет — тесты идут на SQLite, где enforcement внешних ключей выключен по умолчанию; на PostgreSQL включён)",
+  "failing_test": "tests/test_login.py::test_first_login_of_new_user_saves_user_key_and_audit_without_fk_violation (добавлен 2026-08-20 на ветке pipeline/i3-hub-oauth-facade-proxy, коммит 5f5fa2b; проверено, что без flush() падает с FOREIGN KEY constraint failed). Ранее регрессии не было: тесты шли на SQLite с выключенной проверкой FK.",
   "stacktrace": "asyncpg.exceptions.ForeignKeyViolationError ... INSERT INTO api_keys (key_sha256, user_id, key_kind, key_alias, client, created_at, expires_at)",
   "suspected_area": "src/hub/login.py (завершение входа: upsert users + insert api_keys), src/hub/db.py (модели/транзакция). Возможные причины: upsert пользователя не выполняется или выполняется в отдельной транзакции/сессии; расхождение ключа (user_id vs email); порядок операций",
   "iteration": 1,
