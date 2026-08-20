@@ -1,0 +1,61 @@
+{
+  "verdict": "approve",
+  "iteration": "I-6",
+  "cycle": 3,
+  "scope": "git diff bb146fc...HEAD -- deploy loadtest (7633d26, b17798f, 24d5855, 5f08a60)",
+  "gates": {
+    "pytest -q": "649 passed, 1 deselected (exit 0)",
+    "ruff check src tests loadtest": "All checks passed",
+    "helm lint x 6 (оба чарта x default/pilot/prod)": "6 x «1 chart(s) linted, 0 chart(s) failed»",
+    "docker compose config -q (базовый / +windows / +loadtest)": "все три OK",
+    "deploy/smoke.sh -k https://localhost:8443 (живой стенд hubi3)": "10 OK / 0 FAIL / 6 SKIP, exit 0; стенд не тронут",
+    "helm template + скриптовая сверка secretKeyRef (6 рендеров)": "0 висящих обязательных ссылок во всех шести рендерах (required-refs 5/4/6/2/2/3, dangling 0). Единственные несопоставленные ссылки — четыре *_OAUTH_CLIENT_SECRET в hub/default и hub/pilot, все с optional: true (штатно, каталожный OAuth не настроен)",
+    "негативные/позитивные прогоны validateSecrets (11 штук)": "3 негативных отбиты {{ fail }} (Owner+preInstallHook=true, опечатка Orpahn, регистр owner); 8 валидных сочетаний рендерятся (Orphan/Merge/None, Owner+preInstallHook=false, Owner+migrations.enabled=false, secrets.create=false+existingSecret на default и pilot, опечатка при externalSecret.enabled=false — гейт не срабатывает вне ESO, верно)",
+    "deploy/backup.sh на живом стенде hubi3": "три прогона: дамп 31 729 байт, права 600 у .dump и env-*.bak (umask 077 + chmod), метка с секундами; повтор в ту же секунду прерван («копия уже существует», exit 1), прогон 9 секунд спустя создал вторую копию — ротация видит обе",
+    "loadtest/tools/check_no_prod.sh": "OK, exit 0; package-lock.json исключён из find, как заявлено в комментарии"
+  },
+  "previous_must_fix_status": [
+    {
+      "item": "ExternalSecret creationPolicy: Owner + hook-delete-policy: before-hook-creation уносил живой Secret при helm upgrade",
+      "status": "closed",
+      "evidence": "helm template hub -f values-prod.yaml: у ExternalSecret hub-opencode-mcp-hub аннотации hook pre-install,pre-upgrade / weight -10 / before-hook-creation и target.creationPolicy: Orphan — ownerReference на hub-opencode-mcp-hub-secrets не ставится, пересоздание CR не трогает живой Secret, поды и Job миграций (weight -5) читают последние доставленные значения; при недоступном Vault/ESO Secret со старыми значениями остаётся на месте. helm template tag -f tag-mcp/values-prod.yaml: creationPolicy: Owner при полном отсутствии hook-аннотаций у ExternalSecret tag-tag-mcp (в metadata только labels) — обычный ресурс релиза, upgrade его патчит, uninstall убирает вместе с целевым Secret; осознанное различие обосновано в комментарии шаблона и в README. Обратное сочетание закрыто шаблонным гейтом: Owner при непустом hub.secretHookAnnotations даёт {{ fail }}."
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "where": "deploy/helm/README.md (таблица ключей Secret), deploy/helm/opencode-mcp-hub/values-pilot.yaml, deploy/helm/opencode-mcp-hub/templates/secret.yaml (комментарий)",
+      "what": "Три места, добавленные в b17798f, обещают, что при пустом HUB_DATABASE_URL «Job миграций и Hub падают на старте с ConfigError». Фактически ConfigError не возникает: в settings.py database_url — обычный str с дефолтом sqlite+aiosqlite:///./hub.db, валидатора на непустоту нет, а пустая переменная окружения просто перекрывает дефолт пустой строкой. Проверено прогоном: HUB_DATABASE_URL='' → load_settings() отрабатывает штатно (database_url == ''), а падение приходит позже, из build_engine: sqlalchemy.exc.ArgumentError «Could not parse SQLAlchemy URL from given URL string». Суть фикса при этом достигнута и подтверждена рендерами: ключ в Secret есть всегда, secretKeyRef не висит, под не встаёт в CreateContainerConfigError, а падает быстро и заметно в логе. Неверно только названное имя исключения; попутно сообщение SQLAlchemy не называет переменную HUB_DATABASE_URL, так что «читаемым» оно является лишь отчасти.",
+      "fix": "Либо поправить три формулировки на фактическое поведение (ArgumentError из SQLAlchemy при построении движка), либо — предпочтительнее — добавить в settings.py валидатор непустоты database_url, тогда обещанный ConfigError с именем переменной станет правдой и оба текста сойдутся."
+    },
+    {
+      "severity": "minor",
+      "where": "loadtest/tools/seed.py (_mask, _check_no_prod)",
+      "what": "Маскирование из 5f08a60 закрывает заявленный случай: пароль с незакодированным «@» внутри не течёт (postgresql+asyncpg://hub:p@ss@w0rd@prod-db.corp.ru:5432/hub → hub:***@prod-db.corp.ru), URL без userinfo и с портом не искажаются (https://hub.corp.ru:8443/api остаётся собой) — проверено на девяти вариантах. Остаётся один незакрытый край: пароль с незакодированным «/». Регулярное выражение ограничено классом [^/\\s], поэтому не маскирует его, и там же ломается сам гейт: urlparse режет netloc по первому «/», так что postgresql+asyncpg://hub:pa/ss@prod.corp.ru:5432/hub даёт hostname «hub» — хост из ALLOWED_HOSTS, проверка пропускает боевой адрес и печатает пароль целиком. Свойство urlparse досталось в наследство от исходного _check_no_prod, не внесено этим коммитом; severity низкая — «/» в userinfo запрещён RFC 3986, и такой URL всё равно не подключится (asyncpg разберёт его так же).",
+      "fix": "Необязательно к этой итерации. Если закрывать — маскировать до последнего «@» в netloc без ограничения на «/» и валидировать URL строже, чем urlparse (например, отказывать, когда в userinfo встречается сырой «/» или «@»)."
+    }
+  ],
+  "checked_ok": [
+    "7633d26: externalSecret.creationPolicy вынесен в values (default Orphan в values.yaml, явный Orphan в values-prod.yaml), шаблон читает его через | default \"Orphan\", в tag-mcp Owner оставлен осознанно и объяснён.",
+    "hub.validateSecrets: проверка списка Orphan|Owner|Merge|None плюс запрет Owner при непустом hub.secretHookAnnotations. Гейт привязан к фактическому наличию hook-аннотаций, а не к одному флагу preInstallHook, поэтому Owner+preInstallHook=true+migrations.enabled=false проходит — и это правильно: без Job миграций hook на Secret/ExternalSecret не вешается.",
+    "validateSecrets включается первой строкой secret.yaml, до {{ if .Values.secrets.create }}, значит выполняется и при secrets.create=false, и при externalSecret.enabled=true.",
+    "b17798f: ключ HUB_DATABASE_URL присутствует в Secret во всех профилях hub (default, pilot — 3-4 ключа, prod — 9), асимметрия default/pilot устранена; исключение по external.postgres.existingSecret.name сохранено; NOTES.txt предупреждает о пустом ключе.",
+    "Веса hook'ов согласованы с документацией: Secret/ExternalSecret -10, Job миграций -5 с before-hook-creation,hook-succeeded.",
+    "24d5855: backup.sh — umask 077 до первой записи, chmod 600 у .dump и env-*.bak, секунды в метке, guard на существующий файл, trap на .part; ротация через sort -r остаётся хронологической с посекундной меткой. Подтверждено тремя прогонами на живом стенде.",
+    "24d5855: backup.ps1 — Protect-File снимает наследование ACL (SetAccessRuleProtection($true,$false)), вычищает явные правила и оставляет FullControl текущему пользователю; README-windows.md описывает оба механизма и разницу между ними честно, примеры имён файлов приведены к ГГГГММДД-ЧЧММСС. Прогон под pwsh не выполнялся — остаётся в бэклоге.",
+    "deploy/helm/README.md, раздел «Судьба Secret при upgrade и uninstall»: сверен с рендерами построчно. Верны все ключевые утверждения — пересоздание hook-ресурса на каждом upgrade, отсутствие ownerReference при Orphan, поведение при недоступном Vault, цена в виде ручной уборки при uninstall, а также довод, что Owner здесь не даёт ничего (hook-ресурс uninstall всё равно не удаляет). Объяснение различия с tag-mcp соответствует шаблонам.",
+    "check_no_prod.sh: исключение package-lock.json реально присутствует в find и совпадает с комментарием; конфигурационные .json из проверки не выпали."
+  ],
+  "notes": "Третий, короткий цикл: проверялись только закрытие must_fix из review-i6-2, четыре заявленных minor и быстрые гейты. Единственный must_fix закрыт и обоснован в коде и в документации. Оба новых minor — не блокирующие: первый чисто документационный (обещанный ConfigError на деле ArgumentError, при верном по существу поведении), второй — узкий край маскирования и унаследованное свойство urlparse. Реальное поведение hook-схемы и creationPolicy в кластере с установленным external-secrets по-прежнему не проверялось — helm template это доказать не может.",
+  "backlog": [
+    "Полный прогон S-07 (30 000 VU, ~5 000 вызовов/с) перед релизом.",
+    "Согласовать порог p95 для /oauth/token и внести в THRESHOLD_REFRESH_P95.",
+    "Свести семантику smoke.sh и smoke.ps1.",
+    "Метрики hub_circuit_breaker_state и gauge числа подключений по alias.",
+    "helm --dry-run/установка в настоящий namespace с установленным external-secrets — только там проверяется реальное поведение hook-схемы, creationPolicy: Orphan и переживание Secret'а при недоступном Vault.",
+    "Хотя бы один прогон backup.ps1 на Windows с pwsh 7.",
+    "Валидатор непустоты HUB_DATABASE_URL в settings.py — тогда документация про ConfigError станет верной (см. finding 1).",
+    "Ужесточить разбор URL в _check_no_prod: сырой «/» или «@» в userinfo обходит и маскирование, и проверку хоста (см. finding 2)."
+  ],
+  "dispute_resolutions": []
+}
