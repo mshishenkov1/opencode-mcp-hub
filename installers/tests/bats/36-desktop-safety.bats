@@ -356,10 +356,10 @@ assert_no_ops() {
     printf 'Путь назначения не пришёл одним аргументом:\n%s\n' "$log" >&2
     return 1
   }
-  printf '%s\n' "$log" | grep -F -x -q "ARG $DEST_DIR/OpenCode" && {
+  if printf '%s\n' "$log" | grep -F -x -q "ARG $DEST_DIR/OpenCode"; then
     printf 'Путь расщеплён по пробелу: аргумент <dest>/OpenCode\n%s\n' "$log" >&2
     return 1
-  }
+  fi
   # Целью разрушающей операции никогда не становится сам каталог назначения.
   if printf '%s\n' "$log" | grep -E -q "run_priv rm -rf $DEST_DIR/?$"; then
     printf 'rm -rf нацелен на сам каталог назначения:\n%s\n' "$log" >&2

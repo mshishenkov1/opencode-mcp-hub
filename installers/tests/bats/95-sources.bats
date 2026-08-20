@@ -237,6 +237,26 @@ setup() {
   assert_file_contains "$spec" "Windows- и macOS-раннеров там нет"
 }
 
+@test "AC-154: в installers/tests нет sed-подстановок по литералу старого имени бандла" {
+  # После переименования бандла подстановка sed по литералу '"app_name": "OpenCode.app"'
+  # перестала бы срабатывать МОЛЧА (sed не меняет файл и не возвращает ошибку), и тест начал бы
+  # проверять не то, что заявлено. Штатное имя задаётся ровно одним параметром фабрики фикстур
+  # (helpers.bash: OM_APP_NAME + PKG_APP_NAME), см. N5-T1.
+  # Строки самого этого теста и комментарии исключаются: иначе тест сработал бы на своём тексте.
+  local hits
+  hits=$(grep -rn -F '"app_name": "OpenCode.app"' "$INSTALLERS_ROOT/tests" |
+    grep -v -E ':[[:space:]]*#|grep ' || true)
+  [ -z "$hits" ] || { printf 'Найдены подстановки по литералу старого имени:\n%s\n' "$hits" >&2; return 1; }
+  hits=$(grep -rn -E 'sed .*app_name' "$INSTALLERS_ROOT/tests" |
+    grep -v -E ':[[:space:]]*#|grep ' || true)
+  [ -z "$hits" ] || { printf 'Найдены sed-выражения по полю app_name:\n%s\n' "$hits" >&2; return 1; }
+  # Единственная точка задания штатного имени в фикстурах bats.
+  assert_file_contains "$INSTALLERS_ROOT/tests/bats/helpers.bash" "OM_APP_NAME='OpenCode Magnit.app'"
+  local n
+  n=$(grep -F -c "OM_APP_NAME='" "$INSTALLERS_ROOT/tests/bats/helpers.bash" || printf '0')
+  [ "$n" = "1" ] || { printf 'Штатное имя задано в %s местах helpers.bash\n' "$n" >&2; return 1; }
+}
+
 @test "AC-130: shellcheck -s bash проходит на всех installers/**/*.sh без ошибок" {
   if ! command -v shellcheck >/dev/null 2>&1; then
     skip "shellcheck не установлен"

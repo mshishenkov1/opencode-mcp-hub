@@ -26,10 +26,10 @@ block_count() {
   # значения в блоке нет. Единственные допустимые двойные кавычки в блоке — вокруг "$PATH".
   local block
   block=$(sed -n '/# >>> opencode-magnit >>>/,/# <<< opencode-magnit <<</p' "$HOME/.zshrc")
-  printf '%s\n' "$block" | grep -F 'NODE_EXTRA_CA_CERTS' | grep -F -q '"' && {
+  if printf '%s\n' "$block" | grep -F 'NODE_EXTRA_CA_CERTS' | grep -F -q '"'; then
     printf 'В строке NODE_EXTRA_CA_CERTS блока есть двойные кавычки:\n%s\n' "$block" >&2
     return 1
-  }
+  fi
   return 0
 }
 
