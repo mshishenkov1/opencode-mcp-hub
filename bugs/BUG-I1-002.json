@@ -1,0 +1,21 @@
+{
+  "id": "BUG-I1-002",
+  "related_ac": "AC-44",
+  "severity": "critical",
+  "title": "Вход не завершается на клиенте: Hub отдаёт user.email=null, схема клиента требует строку — ready-ответ отбрасывается как hub_invalid_response",
+  "repro_steps": [
+    "Поднять стенд на PostgreSQL (deploy/docker-compose.yml + docker-compose.local-http.yml, проект hubi3)",
+    "Запустить корпоративную сборку Desktop (CORP_HUB_URL=http://localhost:8080)",
+    "Пройти вход через корпоративный SSO, выбрать команду",
+    "Наблюдать окно входа в приложении и логи Hub"
+  ],
+  "expected": "Клиент принимает ready-ответ, сохраняет ключ в auth-store (провайдер magnit_prod) и переходит в состояние «вошёл»",
+  "actual": "Hub отдаёт status=ready и постоянный ключ (login_completed в логах, строки в users/api_keys/audit_log созданы), но клиент отбрасывает ответ целиком: в окне «Вход через корпоративный SSO» — «Hub вернул неожиданный ответ / hub_invalid_response». Ключ в ~/.local/share/opencode/auth.json не появляется (провайдера magnit_prod нет), сессия входа на Hub уже удалена — выданный ключ теряется безвозвратно. Повторные входы дают тот же результат: api_keys растёт (id 15, 16), пользователь остаётся неаутентифицированным",
+  "failing_test": "(нет — в тестах ответ Hub всегда содержит email строкой; корпоративный LiteLLM email не отдаёт)",
+  "evidence": "Проверка декодирования схемой форка (packages/opencode/src/corp/schema.ts, CliPoll): {status:ready, key, key_kind:persistent, user:{user_id, email:null}, team_id} -> ОТКЛОНЕНО; то же с email отсутствующим -> ОТКЛОНЕНО; с email строкой -> принято. Причина: HubUser = Schema.Struct({user_id: Schema.String, email: Schema.String}) — email обязателен и не допускает null. Hub формирует тело как {\"user\": {\"user_id\": user_id, \"email\": session.get(\"email\")}} (src/hub/login.py, _issue_key), а корпоративный SSO email не возвращает — в users.email в живой базе NULL",
+  "suspected_area": "Контракт /cli/poll между Hub и форком: packages/opencode/src/corp/schema.ts (HubUser, CliPollReady, LoginReady, CorpStatus) в mshishenkov1/opencode и src/hub/login.py (_issue_key) в Hub. Требуется решение по спеке: email — необязательное поле (клиент принимает отсутствие и null), Hub при неизвестном email поле опускает",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "живая проверка входа на стенде 2026-08-20 (после фикса BUG-I1-001)",
+  "notes": "Побочный эффект: каждая неудачная попытка сжигает выданный ключ — в LiteLLM и в api_keys копятся мёртвые ключи (opencode-shishenkov_ma-20260820-1724, -1727). При исправлении предусмотреть, что ключ уже выдан, а клиент его потерял"
+}
