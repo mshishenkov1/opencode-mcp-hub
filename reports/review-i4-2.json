@@ -1,0 +1,88 @@
+{
+  "iteration": 4,
+  "cycle": 2,
+  "branch": "corp/i4-sso-connectors",
+  "head": "298ebeaebb",
+  "base": "main (upstream v1.17.9)",
+  "spec_revision": "1.1 (3b5aa0a9aa)",
+  "verdict": "approve",
+  "checked": {
+    "typecheck": "packages/core|opencode|tui|app — все зелёные (tsgo --noEmit / tsgo -b, exit 0)",
+    "tests": "packages/opencode `bun test src/corp` 174 pass / 631 expect (11 файлов); packages/tui 27 pass / 226 expect; packages/app 13 pass / 135 expect; `bun run corp/smoke.ts` — 39/39, «дымовая проверка пройдена», exit 0",
+    "lockfile": "`bun install --frozen-lockfile --dry-run` на ветке — exit 0. Проверено и обратное утверждение из corp/patches.md: после `git checkout main -- bun.lock` та же команда падает («lockfile had changes, but lockfile is frozen»), то есть вернуть строку upstream действительно нельзя. bun.lock принят, minor №6 первого цикла закрыт обоснованием.",
+    "mutations": "7 мутаций через bash с откатом `git checkout -- packages corp`, все пойманы: (M1) cardFor снова считает статус без карточки каталога → падают AC-116 и AC-59 orchestration.test.ts; (M2) connect не вызывает Config.updateGlobal → 6 падений (AC-57, AC-58, AC-59, AC-116, AC-62, AC-65); (M3) отказ Hub на DELETE прекращает/откатывает локальные шаги → падает AC-63; (M4) loginCancel не вызывает store.drop → падает AC-30; (M5) сервер не открывает browser_url → падает тест S-D8; (M6) ключ memo каталога снова только hub_url → падает тест S-V3 (второй рабочий каталог); (M7) снят предикат `disabled` с клавиш витрины TUI → 3 падения в tui/corp/dialog-actions.test.ts. Дерево после прогонов чистое (`git status` пуст).",
+    "orchestration_mocks": "Границы соблюдены: Hub — реальный HTTP-мок Bun.serve на 127.0.0.1, конфиг — настоящий Config.layer с записью в временный Global.Path.config, браузер — исполняемая заглушка open/xdg-open в PATH. Layer.mock применён к Auth.Service (файловое хранилище ключа) и MCP.Service (F13/F14/F17) — это границы, а не тестируемая логика: оркестрация handlers/corp.ts исполняется целиком, включая маршрутизацию, middleware и схемы ответов. Ожидания вычислены независимо (содержимое файла конфига, журнал вызовов MCP, журнал запросов Hub), тавтологий не найдено."
+  },
+  "must_fix_from_cycle_1": [
+    {
+      "finding": "major/must_fix №1 — cardFor считал статус с server: undefined (S-V1, S-V6)",
+      "status": "closed",
+      "evidence": "aaddbe8c50: serverFor теперь возвращает {server, stale}; cardFor(url, alias) перечитывает карточку каталога и передаёт в CorpStatus.compute те же источники, что и toCards (карточка + stale + локальный статус + localError + запись в конфиге). Мутация M1 (возврат к server: undefined) валит AC-116 и AC-59. Регресс-тест orchestration.test.ts «AC-116, S-V6 строка 5» проверяет ровно исходный симптом: connect после успешного OAuth отдаёт connected, а не unavailable."
+    },
+    {
+      "finding": "major/must_fix №2 — оркестрация connect/disconnect/permissions не покрыта автотестами (S-Q4)",
+      "status": "closed",
+      "evidence": "298ebeaebb: packages/opencode/src/corp/orchestration.test.ts — 19 интеграционных тестов на реальном стеке корп-роутов. Покрыты: порядок шагов S-V7 (add строго после updateGlobal, authenticate после них), facade/native-патчи конфига, отказ OAuth (запись остаётся, статус needs_auth), alias вне каталога и отказ Hub (конфиг не тронут, OAuth не запускался); S-V8 — порядок removeAuth → disconnect → updateGlobal → DELETE в Hub, отказ Hub не откатывает локальные шаги, идемпотентность повтора, работа без ключа; S-V9 — PUT в Hub, oauth.scope только для facade, reauth_required, отказ Hub и отсутствие ключа не меняют конфиг; S-V3 — memo по инстансам; S-V6 строка 2 — протухший кэш; S-A9/S-D8 — отмена входа и серверное открытие браузера. Мутации M2–M6 подтверждают, что тесты падают при осмысленной поломке."
+    },
+    {
+      "finding": "major/must_fix №3 — экран входа Desktop/web не открывал браузер (S-A6 шаг 2, S-D8, AC-24)",
+      "status": "closed",
+      "evidence": "c0eae229d6: POST /corp/login/start открывает browser_url серверной частью через пакет `open` (тем же механизмом, что MCP-OAuth, F15/S-D8); клиентское открытие в TUI убрано, чтобы браузер не открывался дважды; ссылка и код остаются на экране запасным путём; мёртвый ключ login.browserFailed удалён из обоих словарей. Спека 1.1 явно фиксирует, что S-A6/AC-24 не менялись и продолжают требовать автооткрытие — то есть закрыто реализацией, а не ослаблением требования. Тест S-D8 (заглушка браузера в PATH) проверяет, что открыт именно browser_url и что в аргументы не попал poll_secret; мутация M5 его валит."
+    }
+  ],
+  "minor_from_cycle_1": [
+    { "finding": "minor №1 — клавиши витрины TUI не фильтровались по card.actions", "status": "closed", "evidence": "78262bb7d9: предикат allows() + `disabled` на всех четырёх клавишах; dialog-actions.test.ts проверяет и сам предикат на матрице S-V6, и факт его подключения ко всем командам (мутация M7 валит 3 теста)" },
+    { "finding": "minor №2 — memo каталога на процесс", "status": "closed", "evidence": "630e1eec13: memoKey = directory + workspace + hub_url, dropMemo по тому же ключу; тест S-V3 и мутация M6" },
+    { "finding": "minor №3 — S-A9: сессия входа не освобождалась", "status": "closed", "evidence": "f6c4755b93 + 234edbb753: роут DELETE /corp/login/poll/:loginID (store.drop, идемпотентен), вызов из TUI и app при закрытии экрана, в том числе при закрытии во время старта; SDK и openapi перегенерированы; тест AC-30 и мутация M4" },
+    { "finding": "minor №4 — S-T2 suggested опирался на upstream connected()", "status": "closed", "evidence": "f40771dca4: сигнал hasCorpKey() в packages/tui/src/corp/state.ts, заполняется из GET /corp/status (поле authenticated) и обновляется после успешного входа; state.test.ts" },
+    { "finding": "minor №5 — reconnect не блокировался на протухшем каталоге", "status": "closed", "evidence": "6cf332aa75: фильтр blocked убирает и reconnect; покрыт status.test.ts (AC-44) и orchestration.test.ts (S-V6 строка 2); мутация M8/повторная проверка валит оба теста" },
+    { "finding": "minor №6 — bun.lock", "status": "accepted_with_justification", "evidence": "ff6671cf10 оставлен, причина внесена в corp/patches.md (ea37252d57): ветка github-зависимости ghostty-web уехала, старый пин не воспроизводится, `bun install --frozen-lockfile` на upstream-версии lock падает. Проверено обеими сторонами (см. checked.lockfile). Принято." },
+    { "finding": "minor №7 — win32-x64 собирался вместе со всеми целями", "status": "closed", "evidence": "cdf62dc441: corp/build.ts передаёт CORP_TARGETS в packages/opencode/script/build.ts; фильтр берёт по одному бинарнику на цель (без baseline и musl), без CORP_TARGETS поведение upstream не меняется; строка реестра обновлена (ea37252d57)" }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "where": "corp/docs/spec.md:333-338 (таблица S-A1); packages/opencode/src/server/routes/instance/httpapi/groups/corp.ts (CorpPaths.loginCancel)",
+      "what": "Реализованный роут `DELETE /corp/login/poll/:login_id` (закрытие minor №3, S-A9) отсутствует в таблице корп-роутов S-A1, хотя таблица объявлена инвентарём группы и по ней сверяются openapi.json и SDK. Предложение dev принимается: строку `| DELETE /corp/login/poll/:login_id | — | {cancelled} |` добавить в S-A1, в S-A2 дописать, что отмена удаляет запись из Map вместе с poll_secret. Правка документационная, поведение и тесты не меняются.",
+      "must_fix": false,
+      "assignee": "spec"
+    },
+    {
+      "severity": "minor",
+      "where": "corp/docs/spec.md:361-364 (S-A6 шаг 2), corp/docs/acceptance-criteria.yaml (AC-24, ручной сценарий М-7)",
+      "what": "S-A6 шаг 2 говорит «ссылка browser_url (открывается в браузере автоматически)», не называя, кто открывает. Реализация и S-D8 уже однозначны (серверная часть при POST /corp/login/start, ссылка на экране — запасной путь), но ручной тестировщик по AC-24 не может отличить «должен открыть клиент» от «должен открыть сервер». Предложение dev принимается: в S-A6 шаг 2 дописать «браузер открывает серверная часть при POST /corp/login/start (S-D8); ссылка и код остаются на экране, если открыть не удалось», AC-24 привести к той же формулировке. Требование не ослабляется.",
+      "must_fix": false,
+      "assignee": "spec"
+    },
+    {
+      "severity": "minor",
+      "where": "corp/patches.md — строки `packages/sdk/openapi.json`, `packages/sdk/js/src/v2/gen/sdk.gen.ts`, `packages/sdk/js/src/v2/gen/types.gen.ts`, `packages/tui/src/app.tsx`, `packages/app/src/i18n/{en,ru}.ts`",
+      "what": "Колонка «Коммит» реестра отстала от ветки: файлы правились и более поздними коммитами, которых в таблице нет — sdk/openapi.json (`01a954fd07`, `f6c4755b93`), sdk.gen.ts (`f6c4755b93`), types.gen.ts (`01a954fd07`, `f6c4755b93`), tui/app.tsx (`f40771dca4`), app/i18n/en.ts и ru.ts (`c0eae229d6`). Для `packages/opencode/script/build.ts` список коммитов дев ведёт правильно (три штуки) — значит, расхождение непоследовательное. Тест реестра сравнивает только множества файлов и такого не ловит; при upstream-rebase (S-B5) колонка коммитов — единственный способ найти правку.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/tui/src/corp/dialog-actions.test.ts:16-35 (extractAllows)",
+      "what": "Тест вырезает тело функции `allows` из исходника диалога по скобкам и исполняет через `new Function`. Приём честный (проверяется реальная реализация, а не её копия) и подключение предиката к клавишам проверено отдельным блоком тестов, но он обходит TypeScript и ломается при безобидном рефакторинге: превращение `allows` в стрелочную функцию или обращение внутри неё к сигналу компонента дадут падение теста с ReferenceError вместо осмысленного сообщения. Деградация безопасная (ложное падение, не ложный пропуск), поэтому не блокирует; при следующем касании файла разумнее вынести предикат в packages/tui/src/corp/ и импортировать его и диалогом, и тестом.",
+      "must_fix": false,
+      "assignee": "test"
+    }
+  ],
+  "dispute_resolutions": [],
+  "decisions": [
+    {
+      "question": "Предложения dev для spec-агента (роут отмены входа в таблицу S-A1; уточнение S-A6 про серверное открытие) — спек-цикл до merge или бэклог?",
+      "decision": "короткий спек-цикл 1.2 до merge, но не блокирующий ревью кода",
+      "reasoning": "Обе правки документационные: поведение уже реализовано и покрыто тестами (AC-30, S-D8), ни код, ни тесты, ни AC-пороги не затрагиваются, повторное ревью кода после них не требуется. Делать их до merge стоит по двум причинам: (1) таблица S-A1 объявлена инвентарём группы корп-роутов, по ней сверяются openapi.json и SDK — незадокументированный роут в merged-ветке ломает это соответствие с первого дня; (2) AC-24 проверяется вручную (М-7), и без уточнения S-A6 ручной прогон приёмки I-4 упрётся в ту же неоднозначность, из-за которой пункт был must_fix в первом цикле. Объём — две строки таблицы и один абзац, тем же образом, что ревизия 1.1: без переименования идентификаторов и без ослабления требований. В бэклог уходит только minor по corp/patches.md и вынос предиката allows (assignee dev/test), их можно закрыть после merge."
+    }
+  ],
+  "verified_ok": [
+    "Спека 1.1 (3b5aa0a9aa) не ослабляет требований: изменения — только формулировки AC-33/AC-35/AC-94 в сторону правил, на которые они ссылаются, плюс новые AC-122/AC-123, закрывающие ужесточающую половину каждого случая (нет ключа → код выхода 1; совпадение navigator.languages приоритетнее корп-умолчания). Идентификаторы не переименованы и не удалены, карта покрытия и negative_scenarios обновлены согласованно. Явно зафиксировано, что S-A6/AC-24 не менялись — must_fix №3 закрыт кодом, а не правкой спеки.",
+    "S-A11a (построчный контракт вывода corp status) совпадает с реализацией packages/opencode/src/cli/cmd/corp.ts:82-112 строка в строку, включая регистр и «(ok)»; требование «из одного источника» выполнено проверяемо: cli.test.ts:284-298 вычитывает шаблоны `grep -q \"…\" status.txt` прямо из .github/workflows/corp-ci.yml, требует, чтобы каждый был подстрокой контракта S-A11a, и тут же прогоняет команду и сверяет вывод с теми же шаблонами. Рецидив BUG-I4-001 (расхождение регистра) теперь падает в тестах, а не только в CI.",
+    "Оркестрация disconnect отдаёт литерал `status:\"not_connected\"` — это не подгонка: S-V1 задаёт для роута ровно `{alias, status:\"not_connected\"}`, а S-V8 требует, чтобы отказ Hub не превращал карточку обратно в connected.",
+    "Безопасность после дельты не деградировала: poll_secret по-прежнему не покидает corp/login.ts и заголовок hub.ts (тест S-D8 отдельно проверяет, что в аргументы браузера ушёл только browser_url и не ушёл секрет); loginCancel не раскрывает существование чужой сессии ничем, кроме булева `cancelled`, и идемпотентен; серверное открытие браузера идёт по browser_url из ответа Hub, адрес которого берётся из --hub/env/build-константы, а не из тела ответа.",
+    "Дельта не расширила поверхность правок upstream: единственный новый upstream-файл в ветке относительно первого цикла — `packages/opencode/script/build.ts` (уже был в реестре), остальные изменения легли в существующие строки таблицы либо в корп-файлы. Тест реестра правок зелёный.",
+    "Дерево после всех прогонов и мутаций чистое: `git status --short` пуст, HEAD = 298ebeaebb, ничего не коммичено."
+  ]
+}
