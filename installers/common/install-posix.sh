@@ -169,6 +169,7 @@ MSG_ERR_NO_WRITE_HINT='Запустите установщик от имени �
 MSG_ERR_NEED_ROOT="нужны права root: запустите под root или без --system (установка в \$HOME/.local/bin)"
 MSG_ERR_PURGE_UNSAFE='Небезопасный путь в purge_paths: %s (допустимы только пути внутри домашнего каталога)'
 MSG_ERR_PURGE_REJECTED='Список purge_paths отвергнут целиком, ничего не удалено'
+MSG_ERR_PATH_UNSAFE='Небезопасный путь (%s): %s'
 MSG_VERSION_LINE='opencode-magnit %s (%s-%s)'
 
 # =====================================================================================
@@ -491,6 +492,102 @@ is_sha256() {
   return 0
 }
 
+# =====================================================================================
+# Пути: единая нормализация перед любой файловой операцией (N5-P3, N5-P4, N5-R2)
+# =====================================================================================
+# Три уязвимости этого установщика подряд (обход каталога через app_name, пустое app_name,
+# "${HOME}//" в purge_paths) имели одну общую причину: проверка безопасности выполнялась над
+# сырой строкой, а файловая операция — над строкой, которую ядро нормализует само ("//" = "/",
+# "/./" = "/", завершающий "/" отбрасывается). Поэтому нормализация вынесена в одну функцию:
+# через неё обязан пройти КАЖДЫЙ путь до попадания в mkdir/cp/mv/rm/ditto, и все проверки
+# ведутся уже над её результатом, а не над исходным текстом.
+#
+# path_normalize <путь> [база]:
+#   - разворачивает ведущие "~" и "~/" в $HOME;
+#   - относительный путь достраивает от «базы»; без базы относительный путь отвергается,
+#     то есть результат всегда абсолютный;
+#   - схлопывает повторяющиеся "/", отбрасывает сегменты "." и завершающие "/";
+#   - отвергает любой сегмент ".." — лексический «подъём» здесь намеренно не выполняется:
+#     он маскирует намерение вызывающего и на симлинках расходится с поведением ядра;
+#   - печатает нормализованный абсолютный путь; код 1 — путь непригоден.
+path_normalize() {
+  local p=$1 base=${2:-} rest seg result='' tilde
+  [ -n "$p" ] || return 1
+  tilde=$(printf '\176')
+  case $p in
+    "$tilde") p=$HOME ;;
+    "$tilde/"*) p="$HOME/${p#"$tilde/"}" ;;
+  esac
+  case $p in
+    /*) : ;;
+    *)
+      [ -n "$base" ] || return 1
+      p="$base/$p"
+      ;;
+  esac
+  case $p in
+    /*) : ;;
+    *) return 1 ;;
+  esac
+  rest=${p#/}
+  while [ -n "$rest" ]; do
+    case $rest in
+      */*)
+        seg=${rest%%/*}
+        rest=${rest#*/}
+        ;;
+      *)
+        seg=$rest
+        rest=''
+        ;;
+    esac
+    case $seg in
+      ''|.) continue ;;
+      ..) return 1 ;;
+    esac
+    result="$result/$seg"
+  done
+  if [ -z "$result" ]; then
+    printf '/'
+  else
+    printf '%s' "$result"
+  fi
+}
+
+# Строгая вложенность: child обязан лежать НИЖЕ parent — не совпадать с ним и не быть его
+# родителем. Оба аргумента обязаны быть результатом path_normalize, иначе шаблон "$parent"/?*
+# снова засчитает второй разделитель за содержательный символ (именно так обходилась проверка
+# purge_paths).
+path_is_inside() {
+  local parent=$1 child=$2
+  [ -n "$parent" ] || return 1
+  [ -n "$child" ] || return 1
+  [ "$child" != "$parent" ] || return 1
+  case $parent in
+    /) case $child in /?*) return 0 ;; esac ;;
+    *) case $child in "$parent"/?*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+# Обязательный путь: результат кладётся в глобальную REPLY — die внутри $( ) завершил бы только
+# подоболочку и оставил вызывающего работать с непроверенным значением.
+path_require() {
+  local value=$1 what=$2 base=${3:-}
+  if ! REPLY=$(path_normalize "$value" "$base"); then
+    die "$EX_ARGS" "$MSG_ERR_PATH_UNSAFE" "$what" "$value"
+  fi
+}
+
+# Объект строго внутри уже нормализованного каталога: "<dir>/<name>" плюс проверка вложенности.
+path_require_child() {
+  local dir=$1 name=$2 what=$3
+  path_require "$dir/$name" "$what"
+  if ! path_is_inside "$dir" "$REPLY"; then
+    die "$EX_ARGS" "$MSG_ERR_PATH_UNSAFE" "$what" "$name"
+  fi
+}
+
 # Путь внутри пакета: относительный, с разделителем "/", без "..", без буквы диска (N5-P3).
 # Дополнительно отвергаются формы, бессмысленные как элемент внутри пакета и опасные при
 # подстановке в файловые операции: "." и "./x" (самоссылка) и завершающий "/" — иначе
@@ -748,20 +845,35 @@ verify_package() {
 # =====================================================================================
 # Раскладка путей (N5-I4, N5-I7)
 # =====================================================================================
+# Каждый путь раскладки проходит через path_normalize ДО первой файловой операции: формы,
+# которые ядро схлопнуло бы в родительский каталог (--prefix "~//", XDG_CONFIG_HOME="$HOME//"),
+# отвергаются здесь кодом 2, а не обнаруживаются постфактум по удалённому каталогу. Целевые
+# файлы дополнительно проверяются на строгую вложенность в свой каталог (defense in depth):
+# install_name из манифеста уже проверен is_safe_pkg_path, но подстановка в путь не должна
+# зависеть от того, что проверка выше сохранится в неизменном виде.
 compute_layout() {
-  local xdg_config
+  local xdg_config prefix_dir
   xdg_config=${XDG_CONFIG_HOME:-$HOME/.config}
-  config_dir="$xdg_config/opencode"
+  path_require "$xdg_config/opencode" "XDG_CONFIG_HOME"
+  config_dir=$REPLY
   if [ -n "$opt_prefix" ]; then
-    bin_dir="$opt_prefix/bin"
+    # Относительный --prefix достраивается от текущего каталога: дальше по коду путь только
+    # абсолютный и только нормализованный.
+    path_require "$opt_prefix" "--prefix" "$PWD"
+    prefix_dir=$REPLY
+    bin_dir="$prefix_dir/bin"
   elif [ "$opt_system" -eq 1 ]; then
     bin_dir="/usr/local/bin"
   else
     bin_dir="$HOME/.local/bin"
   fi
-  bin_target="$bin_dir/$MF_cli_name"
-  bin_backup="$bin_dir/$MF_cli_name.bak"
-  ca_target="$config_dir/$MF_ca_name"
+  path_require "$bin_dir" "каталог бинарника"
+  bin_dir=$REPLY
+  path_require_child "$bin_dir" "$MF_cli_name" "artifacts[].install_name"
+  bin_target=$REPLY
+  bin_backup="$bin_target.bak"
+  path_require_child "$config_dir" "$MF_ca_name" "ca.install_name"
+  ca_target=$REPLY
   profile_file=$(profile_path)
 }
 
@@ -1063,16 +1175,9 @@ desktop_dest_dir() {
 desktop_target_path() {
   local dest=$1 app=$2 target
   is_safe_app_name "$app" || return 1
-  dest=${dest%/}
-  [ -n "$dest" ] || return 1
-  target="$dest/$app"
-  case $target in
-    "$dest"/?*) : ;;
-    *) return 1 ;;
-  esac
-  case "$dest/" in
-    "$target"/*) return 1 ;;
-  esac
+  dest=$(path_normalize "$dest") || return 1
+  target=$(path_normalize "$dest/$app") || return 1
+  path_is_inside "$dest" "$target" || return 1
   printf '%s' "$target"
 }
 
@@ -1422,32 +1527,43 @@ expand_user_path() {
   printf '%s' "$p"
 }
 
+# Раскрытие шаблона манифеста + единая нормализация. Печатает абсолютный нормализованный путь;
+# код 1 — путь непригоден (пустой, относительный, с сегментом "..").
+purge_path_resolve() {
+  local raw=$1 expanded
+  expanded=$(expand_user_path "$raw")
+  path_normalize "$expanded"
+}
+
+# N5-R2: удалению подлежат только объекты СТРОГО внутри домашнего каталога — путь начинается с
+# "$HOME/", не равен самому "$HOME" и не выходит за его пределы. Решение принимается по
+# НОРМАЛИЗОВАННОМУ значению, поэтому "~/", "~//", "${HOME}//", "${HOME}///", "${HOME}/.",
+# "${HOME}/./", "${HOME}/sub/.." — всё, что ядро схлопнуло бы в сам домашний каталог, —
+# отвергается наравне с "~" и "/etc". Второй аргумент — результат purge_path_resolve (пустая
+# строка означает, что нормализация не состоялась, то есть путь непригоден).
 purge_path_is_safe() {
-  local raw=$1 expanded=$2
+  local raw=$1 normalized=$2 home_dir
   case $raw in
     *".."*) return 1 ;;
   esac
-  case $expanded in
+  [ -n "$normalized" ] || return 1
+  case $normalized in
     *".."*) return 1 ;;
   esac
-  [ -n "$expanded" ] || return 1
-  [ "$expanded" != "$HOME" ] || return 1
-  case $expanded in
-    "$HOME"/?*) return 0 ;;
-  esac
-  return 1
+  home_dir=$(path_normalize "$HOME") || return 1
+  path_is_inside "$home_dir" "$normalized"
 }
 
 # Список проверяется целиком до любого удаления: одна небезопасная запись отвергает список (N5-R2).
 validate_purge_paths() {
-  local count idx raw expanded bad=0
+  local count idx raw normalized bad=0
   count=$(mf_val "purge_paths.__len")
   [ -n "$count" ] || count=0
   idx=0
   while [ "$idx" -lt "$count" ]; do
     raw=$(mf_val "purge_paths.$idx")
-    expanded=$(expand_user_path "$raw")
-    if ! purge_path_is_safe "$raw" "$expanded"; then
+    normalized=$(purge_path_resolve "$raw") || normalized=''
+    if ! purge_path_is_safe "$raw" "$normalized"; then
       out "$MSG_ERR_PURGE_UNSAFE" "$raw" >&2
       bad=1
     fi
@@ -1458,8 +1574,11 @@ validate_purge_paths() {
   fi
 }
 
+# Вторая, независимая от validate_purge_paths линия защиты (defense in depth): ни один путь не
+# попадает в rm -rf без повторной проверки прямо на месте удаления. Если валидация окажется
+# обойдена или изменена, результатом будет отказ с кодом 2, а не удаление.
 purge_each() {
-  local mode=$1 count idx raw expanded
+  local mode=$1 count idx raw normalized
   count=$(mf_val "purge_paths.__len")
   [ -n "$count" ] || count=0
   if [ "$mode" = "plan" ]; then
@@ -1470,16 +1589,18 @@ purge_each() {
   idx=0
   while [ "$idx" -lt "$count" ]; do
     raw=$(mf_val "purge_paths.$idx")
-    expanded=$(expand_user_path "$raw")
-    if [ "$mode" = "plan" ]; then
-      out "$MSG_PURGE_ITEM" "$expanded"
-    else
-      out "$MSG_PURGE_ITEM" "$expanded"
-      if [ -e "$expanded" ]; then
-        rm -rf "$expanded"
-        say "$MSG_PURGE_REMOVED" "$expanded"
+    normalized=$(purge_path_resolve "$raw") || normalized=''
+    if ! purge_path_is_safe "$raw" "$normalized"; then
+      out "$MSG_ERR_PURGE_UNSAFE" "$raw" >&2
+      die "$EX_ARGS" "$MSG_ERR_PURGE_REJECTED"
+    fi
+    out "$MSG_PURGE_ITEM" "$normalized"
+    if [ "$mode" != "plan" ]; then
+      if [ -e "$normalized" ]; then
+        rm -rf "$normalized"
+        say "$MSG_PURGE_REMOVED" "$normalized"
       else
-        say "$MSG_PURGE_ABSENT" "$expanded"
+        say "$MSG_PURGE_ABSENT" "$normalized"
       fi
     fi
     idx=$((idx + 1))
