@@ -115,7 +115,7 @@ kubectl -n <ns> delete externalsecret <release>-opencode-mcp-hub \
 |---|---|---|---|
 | `HUB_SECRET_KEY` | да | `secrets.secretKey` | Hub не стартует (R-T2) |
 | `HUB_ENCRYPTION_KEY` | да | `secrets.encryptionKey` | Hub не стартует (R-T2) |
-| `HUB_DATABASE_URL` | да | `secrets.databaseUrl` | Job миграций и Hub не находят БД |
+| `HUB_DATABASE_URL` | да | `secrets.databaseUrl` | ключ создаётся пустым: Job миграций и Hub падают на старте с `ConfigError`, а не встают в `CreateContainerConfigError` |
 | `HUB_REDIS_URL` | при `replicaCount > 1` | `secrets.redisUrl` | KeyValueStore в памяти процесса, реплики не делят состояние (R-N5) |
 | `KEYCLOAK_CLIENT_SECRET` | при `hub.webAuth=keycloak` | `secrets.keycloakClientSecret` | Hub не стартует: `ConfigError` в `settings.py` |
 | `HUB_ADMIN_TOKEN` | нет | `secrets.adminToken` | `POST /admin/catalog/reload` выключен |

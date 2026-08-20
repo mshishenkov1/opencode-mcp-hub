@@ -28,6 +28,8 @@ external:
     #   --set secrets.databaseUrl='postgresql+asyncpg://hub:ПАРОЛЬ@postgres.mcp-hub-pilot.svc:5432/hub'
     # Если Postgres развёрнут оператором и уже отдаёт свой Secret с готовым URL,
     # укажите его здесь — тогда общий Secret ключ HUB_DATABASE_URL не содержит.
+    # Без --set ключ создаётся пустым: Hub и Job миграций падают с читаемым
+    # ConfigError на старте (предупреждение печатает и NOTES.txt).
     existingSecret:
       name: ""
       key: url
