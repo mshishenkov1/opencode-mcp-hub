@@ -1,0 +1,228 @@
+#!/usr/bin/env bats
+#
+# Пути из манифеста, попадающие в файловые операции: app_name, install_name (N5-P3, N5-P4).
+#
+# Регрессия на уязвимость обхода каталога: значение artifacts[].app_name подставляется в
+# rm -rf ("/Applications/$app_name", "$HOME/Applications/$app_name", "$dest/$app_name"), а при
+# --system — через sudo. Любое значение с "..", ведущим "/", обратным слэшем или буквой диска
+# обязано отвергаться на разборе манифеста (код 2) до единой файловой операции — на всех путях:
+# обычная установка, --uninstall, --dry-run --uninstall, --uninstall --purge.
+# Совместимость: bash 3.2 (N5-T5).
+
+setup() {
+  load helpers
+  setup_sandbox
+  PKG_DESKTOP=1 make_pkg
+  # Каталог-жертва вне корня установки: обход "../../victim" из $HOME/Applications ведёт сюда.
+  VICTIM="$SANDBOX/victim"
+  export VICTIM
+  mkdir -p "$VICTIM" "$HOME/Applications"
+  printf 'МАРКЕР ЖЕРТВЫ\n' >"$VICTIM/keep.txt"
+}
+
+# Подмена app_name в манифесте фикстурного пакета (в исходном значении — "OpenCode.app").
+set_app_name() {
+  manifest_edit "s|\"app_name\": \"OpenCode.app\"|\"app_name\": \"$1\"|"
+}
+
+assert_victim_intact() {
+  if [ ! -d "$VICTIM" ] || [ ! -f "$VICTIM/keep.txt" ]; then
+    printf 'Каталог-жертва удалён: %s\n' "$VICTIM" >&2
+    return 1
+  fi
+  assert_file_contains "$VICTIM/keep.txt" "МАРКЕР ЖЕРТВЫ"
+}
+
+# Снимки каталогов, которые установщик мог бы изменить.
+snapshot_state() {
+  local tag=$1
+  snapshot_dir "$HOME" "$BATS_TEST_TMPDIR/$tag.home"
+  snapshot_dir "$PREFIX_DIR" "$BATS_TEST_TMPDIR/$tag.prefix"
+  snapshot_dir "$VICTIM" "$BATS_TEST_TMPDIR/$tag.victim"
+}
+
+# Ни одной файловой операции: три каталога совпадают со снимком "before" побайтово.
+assert_no_file_changes() {
+  local tag
+  snapshot_state after
+  for tag in home prefix victim; do
+    if ! diff "$BATS_TEST_TMPDIR/before.$tag" "$BATS_TEST_TMPDIR/after.$tag" >&2; then
+      printf 'Установщик изменил каталог (%s), хотя манифест невалиден\n' "$tag" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# ------------------------------------------------------------------ app_name: обход каталога
+
+@test "AC-11, AC-135: app_name с ../.. при установке → код 2, каталог-жертва цел, ничего не создано" {
+  set_app_name "../../victim"
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  assert_output_contains "недопустимый путь: ../../victim"
+  assert_victim_intact
+  [ ! -e "$(bin_dir_path)/opencode" ]
+  [ ! -e "$(config_dir_path)/tander-ca-bundle.pem" ]
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+@test "AC-11, AC-135: --uninstall с app_name=../../victim → код 2, жертва цела, установленное не тронуто" {
+  oc_run --no-launch --no-desktop
+  assert_status 0
+  [ -x "$(bin_dir_path)/opencode" ]
+  set_app_name "../../victim"
+  snapshot_state before
+  oc_run --uninstall
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  assert_output_contains "недопустимый путь: ../../victim"
+  refute_output_contains "Desktop: удалён"
+  refute_output_contains "Готово: OpenCode удалён."
+  assert_victim_intact
+  [ -x "$(bin_dir_path)/opencode" ]
+  assert_file_contains "$HOME/.zshrc" "# >>> opencode-magnit >>>"
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+@test "AC-11, AC-135: --dry-run --uninstall с app_name=../../victim → код 2, плана нет, жертва цела" {
+  set_app_name "../../victim"
+  snapshot_state before
+  oc_run --dry-run --uninstall
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  refute_output_contains "План удаления OpenCode"
+  assert_victim_intact
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+@test "AC-11, AC-135: --uninstall --purge с app_name=../../victim → код 2, пользовательские данные целы" {
+  oc_run --no-launch --no-desktop
+  assert_status 0
+  mkdir -p "$HOME/.local/share/opencode"
+  printf '{"key":"MARKER"}\n' >"$HOME/.local/share/opencode/auth.json"
+  set_app_name "../../victim"
+  snapshot_state before
+  oc_run --uninstall --purge
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  refute_output_contains "Удаляются пользовательские данные:"
+  assert_victim_intact
+  [ -f "$HOME/.local/share/opencode/auth.json" ]
+  [ -d "$(config_dir_path)" ]
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+@test "AC-135: app_name с обходом из /Applications по абсолютному пути → код 2, жертва цела" {
+  if [ ! -d /Applications ]; then
+    skip "нет каталога /Applications (не macOS)"
+  fi
+  # Форма из отчёта о ревью: /Applications/../..<абсолютный путь> ведёт за пределы /Applications.
+  set_app_name "../..$VICTIM"
+  snapshot_state before
+  oc_run --uninstall
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  assert_output_contains "недопустимый путь: ../..$VICTIM"
+  assert_victim_intact
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+# ------------------------------------------------------------------ app_name: прочие формы пути
+
+@test "AC-135: app_name с ведущим слэшем → код 2 и при установке, и при удалении" {
+  set_app_name "/tmp/victim"
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "недопустимый путь: /tmp/victim"
+  oc_run --uninstall
+  assert_status 2
+  assert_output_contains "недопустимый путь: /tmp/victim"
+  assert_no_file_changes
+}
+
+@test "AC-135: app_name с обратным слэшем → код 2" {
+  set_app_name "..\\\\\\\\victim"
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  assert_output_contains "недопустимый путь"
+  assert_no_file_changes
+}
+
+@test "AC-135: app_name с буквой диска C:\\ → код 2" {
+  set_app_name "C:\\\\\\\\victim"
+  snapshot_state before
+  oc_run --uninstall
+  assert_status 2
+  assert_output_contains "поле artifacts.1.app_name"
+  assert_output_contains "недопустимый путь"
+  assert_no_file_changes
+}
+
+@test "AC-135: штатное app_name=OpenCode.app по-прежнему принимается (--dry-run --uninstall)" {
+  snapshot_state before
+  oc_run --dry-run --uninstall
+  assert_status 0
+  assert_output_contains "План удаления OpenCode 1.17.9-magnit.1"
+  assert_output_contains "/Applications/OpenCode.app"
+  assert_no_file_changes
+}
+
+# ------------------------------------------------------------------ install_name
+
+@test "AC-11, AC-135: ca.install_name=../x → код 2, CA вне каталога конфига не появляется" {
+  manifest_edit 's|"install_name": "tander-ca-bundle.pem"|"install_name": "../x"|'
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле ca.install_name"
+  assert_output_contains "недопустимый путь: ../x"
+  [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/x" ]
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+@test "AC-11, AC-135: artifacts[].install_name=../y → код 2, бинарник вне bin_dir не появляется" {
+  manifest_edit 's|"install_name": "opencode"|"install_name": "../y"|'
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле artifacts.0.install_name"
+  assert_output_contains "недопустимый путь: ../y"
+  [ ! -e "$PREFIX_DIR/y" ]
+  assert_no_file_changes
+  assert_no_forbidden_calls
+}
+
+@test "AC-11, AC-135: install_name с ведущим слэшем и с буквой диска → код 2" {
+  manifest_edit 's|"install_name": "opencode"|"install_name": "/tmp/opencode"|'
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "недопустимый путь: /tmp/opencode"
+  PKG_DESKTOP=1 make_pkg
+  manifest_edit 's|"install_name": "opencode"|"install_name": "C:\\\\opencode"|'
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "недопустимый путь"
+  [ ! -e "$PREFIX_DIR/bin/opencode" ]
+}
+
+@test "AC-11, AC-135: install_name и app_name проверяются до чтения файлов пакета" {
+  # Хеш CLI-артефакта заведомо неверный: если бы проверка путей шла после сверки целостности,
+  # код был бы 4. Ожидается 2 — разбор манифеста завершается раньше любых файловых операций.
+  manifest_edit 's|"install_name": "opencode"|"install_name": "../y"|'
+  manifest_edit 's|^      "sha256": "................................................................"|      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"|'
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "недопустимый путь: ../y"
+}
