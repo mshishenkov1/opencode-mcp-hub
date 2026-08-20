@@ -23,12 +23,15 @@ if [ $# -gt 0 ]; then
   FILES=("$@")
 else
   # Всё, кроме служебных каталогов прогона и самого этого скрипта
-  # (в нём перечислены запрещённые шаблоны).
+  # (в нём перечислены запрещённые шаблоны). Из проверки исключаются только
+  # артефакты прогона (summary-*.json, seed.json), но не конфигурация в JSON:
+  # каталог или настройки в .json обязаны проходить проверку наравне с YAML.
   while IFS= read -r file; do
     [ "$file" = "$SELF" ] && continue
     FILES+=("$file")
   done < <(find "$ROOT" -type f \
-    ! -path "*/.seed/*" ! -path "*/node_modules/*" ! -name "*.json" | sort)
+    ! -path "*/.seed/*" ! -path "*/node_modules/*" \
+    ! -name "summary-*.json" ! -name "seed.json" ! -name "package-lock.json" | sort)
 fi
 
 if [ ${#FILES[@]} -eq 0 ]; then

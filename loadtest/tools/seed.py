@@ -42,7 +42,11 @@ def _check_no_prod(settings: Any) -> None:
     for name, url in (
         ("HUB_PUBLIC_URL", settings.public_url),
         ("HUB_DATABASE_URL", settings.database_url),
+        ("HUB_REDIS_URL", settings.redis_url),
+        ("HUB_LITELLM_BASE_URL", settings.litellm_base_url),
     ):
+        if not url:
+            continue
         host = urlparse(url.replace("postgresql+asyncpg", "postgresql")).hostname
         if host and host not in ALLOWED_HOSTS:
             raise SystemExit(

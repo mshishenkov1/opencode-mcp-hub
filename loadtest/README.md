@@ -47,6 +47,8 @@ export HUB_PUBLIC_URL=http://localhost:8000
 export HUB_DATABASE_URL=postgresql+asyncpg://hub:hub@localhost:55432/hub
 export HUB_REDIS_URL=redis://localhost:56379/0
 export HUB_CATALOG_PATH=loadtest/catalog.loadtest.yaml
+# обязательная переменная Hub; в контуре она указывает на мок, а не на боевой LiteLLM
+export HUB_LITELLM_BASE_URL=http://localhost:8080
 export HUB_SECRET_KEY=zJcrbCiBSUaTSkQkK30tDMYDxeST8846fu9373dWE2I=
 export HUB_ENCRYPTION_KEY=j7PECAceMkzWqN9vzEcgX4QruWG54odGOB0oeT0q3Ws=
 export LOADTEST_UPSTREAM_URL=http://mock-upstream:8080/mcp
@@ -57,14 +59,21 @@ export LOADTEST_CLIENT_ID=loadtest-client LOADTEST_CLIENT_SECRET=loadtest-secret
 python loadtest/tools/seed.py --users 60 --out loadtest/.seed/seed.json
 
 # 4. Сценарии (SCALE=1 — полная нагрузка спеки, 0.1 — одна десятая)
-k6 run -e SCALE=0.1 -e HUB_BASE=http://localhost:8000 loadtest/k6/wellknown.js
+# --summary-export кладём в reports/: сырые итоги k6 должны лежать рядом с отчётом
+# о прогоне (loadtest/.seed/ в .gitignore и по артефактам ничего не проверить).
+RUN=$(date +%Y-%m-%d)
+mkdir -p reports/loadtest-$RUN
 
-k6 run --summary-export=loadtest/.seed/summary-mcp.json \
+k6 run --summary-export=reports/loadtest-$RUN/summary-wellknown.json \
+  -e SCALE=0.1 -e HUB_BASE=http://localhost:8000 loadtest/k6/wellknown.js
+
+k6 run --summary-export=reports/loadtest-$RUN/summary-mcp.json \
   -e SCALE=0.1 -e HUB_BASE=http://localhost:8000 -e MOCK_URL=http://localhost:8080 \
   loadtest/k6/mcp.js
-python loadtest/tools/overhead.py loadtest/.seed/summary-mcp.json
+python loadtest/tools/overhead.py reports/loadtest-$RUN/summary-mcp.json
 
-k6 run -e SCALE=0.1 -e HUB_BASE=http://localhost:8000 loadtest/k6/refresh_storm.js
+k6 run --summary-export=reports/loadtest-$RUN/summary-refresh.json \
+  -e SCALE=0.1 -e HUB_BASE=http://localhost:8000 loadtest/k6/refresh_storm.js
 
 # 5. Убрать контур вместе с данными
 docker compose -f loadtest/docker-compose.loadtest.yml -p hubload down -v
@@ -111,12 +120,14 @@ docker compose -f loadtest/docker-compose.loadtest.yml -p hubload down -v
    возврата — прогон запрещён. Скрипт годится как шаг CI перед `k6 run`.
 3. **Проверка во время запуска.** `assertLocal()` в `k6/lib/config.js` падает на этапе
    инициализации, если `HUB_BASE`/`MOCK_URL` указывают не на разрешённый хост;
-   `_check_no_prod()` в `tools/seed.py` делает то же для `HUB_PUBLIC_URL` и
-   `HUB_DATABASE_URL`.
+   `_check_no_prod()` в `tools/seed.py` делает то же для `HUB_PUBLIC_URL`,
+   `HUB_DATABASE_URL`, `HUB_REDIS_URL` и `HUB_LITELLM_BASE_URL`.
 
 Allow-list: `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, `hub`, `proxy`,
 `mock-upstream`, `postgres`, `redis`, `example.invalid`.
 
 ## Результаты
 
-Отчёт последнего прогона — `reports/loadtest-2026-08-20.md`.
+Отчёт последнего прогона — `reports/loadtest-2026-08-20.md`, сырые summary-JSON k6 —
+в каталоге `reports/loadtest-<дата>/` рядом с ним (`--summary-export`, см. шаг 4).
+Каталог `loadtest/.seed/` — рабочий, в git не попадает.
