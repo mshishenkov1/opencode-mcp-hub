@@ -807,10 +807,23 @@ profile_foreign_env_line() {
   local file=$1
   [ -f "$file" ] || return 1
   awk -v b="$OM_BLOCK_BEGIN" -v e="$OM_BLOCK_END" -v name="$OM_ENV_NAME" -v target="$ca_target" '
+    function ltrim(s) { sub(/^[ \t]+/, "", s); return s }
     $0 == b { inblk = 1; next }
     $0 == e { inblk = 0; next }
     inblk == 1 { next }
-    index($0, name) > 0 && index($0, target) == 0 { print NR; found = 1; exit }
+    {
+      # N5-I5: чужим считается именно ПРИСВАИВАНИЕ переменной вне нашего блока, а не любое
+      # упоминание. Строки-комментарии и текст с подстрокой NODE_EXTRA_CA_CERTS предупреждения
+      # не вызывают.
+      line = ltrim($0)
+      if (substr(line, 1, 1) == "#") { next }
+      is_assign = 0
+      if (index(line, name "=") == 1) { is_assign = 1 }                 # NAME=...
+      else if (index(line, "export " name "=") == 1) { is_assign = 1 }  # export NAME=...
+      else if (index(line, "setenv " name " ") == 1) { is_assign = 1 }  # csh setenv NAME ...
+      else if (line ~ ("^set([ \t]+-[a-zA-Z]+)*[ \t]+" name "([ \t]|$)")) { is_assign = 1 } # fish set -gx NAME
+      if (is_assign == 1 && index($0, target) == 0) { print NR; found = 1; exit }
+    }
     END { if (found != 1) { exit 1 } }
   ' "$file"
 }
