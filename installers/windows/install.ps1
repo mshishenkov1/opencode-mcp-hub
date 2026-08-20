@@ -89,6 +89,7 @@ $script:MsgDesktopInstalled = 'Desktop: установлен ({0})'
 $script:MsgDesktopManualAt = 'Desktop: запустите установщик вручную: {0}'
 $script:MsgDesktopError = 'Desktop: ошибка (код {0})'
 $script:MsgDesktopManualRemove = 'Desktop: удалите вручную через «Приложения и возможности»'
+$script:MsgDesktopParseFail = 'Desktop: строка деинсталляции разобрана неоднозначно ({0}), запуск отменён'
 
 $script:MsgCheckPkg = 'Пакет: opencode-magnit {0} ({1}-{2})'
 $script:MsgCheckManifest = 'Манифест: корректен'
@@ -942,7 +943,10 @@ function Get-DesktopUninstallEntry {
 }
 
 # Разбор строки деинсталляции реестра на исполняемый файл и аргументы (N5-R1).
-# UninstallString бывает вида "C:\...\uninstall.exe" /S либо MsiExec.exe /X{GUID}.
+# UninstallString бывает вида "C:\...\uninstall.exe" /S, MsiExec.exe /X{GUID} либо
+# C:\Program Files\App\unins000.exe /S — некавыченный путь с пробелами. В последнем случае
+# граница определяется по расширению исполняемого файла; если однозначной границы нет,
+# возвращается $null и деинсталлятор НЕ запускается (лучше «удалите вручную», чем чужой процесс).
 function ConvertFrom-UninstallString {
     param([Parameter(Mandatory = $true)][string]$Command)
     $trimmed = $Command.Trim()
@@ -957,15 +961,22 @@ function ConvertFrom-UninstallString {
             $path = $trimmed.Trim('"')
         }
     } else {
-        $space = $trimmed.IndexOf(' ')
-        if ($space -gt 0) {
-            $path = $trimmed.Substring(0, $space)
-            $rest = $trimmed.Substring($space + 1).Trim()
+        $exeMatch = [regex]::Match($trimmed, '^(.*?\.(?:exe|com|bat|cmd))(\s|$)', 'IgnoreCase')
+        if ($exeMatch.Success) {
+            $path = $exeMatch.Groups[1].Value
+            $rest = $trimmed.Substring($path.Length).Trim()
+        } elseif ($trimmed.IndexOf(' ') -gt 0) {
+            # Пробел есть, а границы пути нет: разбор неоднозначен.
+            return $null
         }
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $null
     }
     $arguments = @()
     if (-not [string]::IsNullOrEmpty($rest)) {
-        $arguments = @($rest -split '\s+')
+        # Аргумент может содержать пробел внутри кавычек: /D="C:\Program Files\App" — один аргумент.
+        $arguments = @([regex]::Matches($rest, '(?:"[^"]*"|[^\s"])+') | ForEach-Object { $_.Value })
     }
     return @{ Path = $path; Arguments = $arguments }
 }
@@ -1182,6 +1193,14 @@ function Invoke-Uninstall {
             Write-Say $script:MsgDesktopManualRemove
         } else {
             $parsed = ConvertFrom-UninstallString -Command $command
+            if ($null -eq $parsed) {
+                # Разбор неоднозначен — не запускаем ничего и не печатаем «удалён» (N5-R1).
+                Write-Say ($script:MsgDesktopParseFail -f $command)
+                Write-Say $script:MsgDesktopManualRemove
+                $command = ''
+            }
+        }
+        if (-not [string]::IsNullOrEmpty($command)) {
             $arguments = @($parsed.Arguments)
             if (-not $isQuiet) {
                 $silent = Get-Prop $desktop 'silent_args'
