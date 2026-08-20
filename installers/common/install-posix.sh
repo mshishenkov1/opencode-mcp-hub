@@ -611,6 +611,11 @@ is_safe_pkg_path() {
 # одно имя каталога — непустое, без разделителей пути и без самоссылок (N5-P4).
 is_safe_app_name() {
   local p=$1
+  # Пробельное значение равносильно пустому: "<dest>/   " — не объект внутри каталога назначения,
+  # а мусор, попадание которого в rm -rf/ditto недопустимо. Проверка стоит здесь, а не только в
+  # manifest_load, поэтому вторая линия защиты (desktop_target_path, find_installed_desktop) не
+  # слабее первой, а комментарий про паритет с Test-AppName (IsNullOrWhiteSpace) стал истинным.
+  [ -n "${p//[[:space:]]/}" ] || return 1
   is_safe_pkg_path "$p" || return 1
   case $p in
     */*) return 1 ;;
