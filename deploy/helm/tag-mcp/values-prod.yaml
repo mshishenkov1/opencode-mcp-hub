@@ -1,0 +1,65 @@
+# Профиль «продуктив» для ТЭГ-MCP: внешний Redis, секреты из хранилища, HPA, NetworkPolicy.
+replicaCount: 3
+
+tag:
+  publicUrl: https://tag-mcp.corp.tander.ru
+  mattermostUrl: https://tag.magnit.ru
+  httpAuth: oauth
+
+redis:
+  url: ""
+  existingSecret:
+    name: tag-mcp-redis
+    key: url
+
+secrets:
+  create: false
+  existingSecret: tag-mcp-secrets
+
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    name: corp-vault
+    kind: ClusterSecretStore
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: tag-mcp.corp.tander.ru
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    enabled: true
+    secretName: tag-mcp-corp-tls
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+serviceMonitor:
+  enabled: false      # включить, когда tag-mcp начнёт отдавать /metrics
+
+networkPolicy:
+  enabled: true

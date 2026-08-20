@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tagmcp.fullname" . }}
+  labels:
+    {{- include "tagmcp.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  # sessionAffinity: None — состояние OAuthProxy лежит в Redis, липкость не нужна (D6-07)
+  sessionAffinity: None
+  ports:
+    - name: {{ .Values.service.portName }}
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+  selector:
+    {{- include "tagmcp.selectorLabels" . | nindent 4 }}

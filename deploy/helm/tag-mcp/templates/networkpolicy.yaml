@@ -1,0 +1,57 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tagmcp.fullname" . }}
+  labels:
+    {{- include "tagmcp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "tagmcp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- with .Values.networkPolicy.ingressNamespaceSelectors }}
+    - from:
+        {{- range . }}
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+      ports:
+        - port: {{ $.Values.containerPort }}
+          protocol: TCP
+    {{- end }}
+    {{- with .Values.networkPolicy.monitoringNamespaceSelectors }}
+    - from:
+        {{- range . }}
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+      ports:
+        - port: {{ $.Values.containerPort }}
+          protocol: TCP
+    {{- end }}
+  egress:
+    {{- if .Values.networkPolicy.egress.dns.enabled }}
+    - ports:
+        - port: {{ .Values.networkPolicy.egress.dns.port }}
+          protocol: UDP
+        - port: {{ .Values.networkPolicy.egress.dns.port }}
+          protocol: TCP
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.rules }}
+    # {{ .name }}
+    - to:
+        {{- range .cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .ports }}
+        - port: {{ .port }}
+          protocol: {{ .protocol }}
+        {{- end }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,121 @@
+# Профиль «продуктив» (D6-06): внешние Postgres/Redis, HPA 4…20, PDB minAvailable 2,
+# секреты из хранилища через ExternalSecret, NetworkPolicy включена.
+#
+#   helm template hub deploy/helm/opencode-mcp-hub \
+#     -f deploy/helm/opencode-mcp-hub/values-prod.yaml \
+#     --set-file catalog.content=catalog.yaml
+
+replicaCount: 4
+
+hub:
+  publicUrl: https://hub.corp.tander.ru
+  logLevel: INFO
+  autoMigrate: false      # только Job-hook, чтобы схема менялась одним контролируемым шагом
+  trustProxy: true
+  webAuth: keycloak
+  consent: always
+  env:
+    HUB_RATE_LIMIT_MCP: "120"
+    HUB_RATE_LIMIT_REGISTER: "10"
+    HUB_RATE_LIMIT_TOKEN: "60"
+    HUB_MAX_SSE_PER_USER: "4"
+    HUB_UPSTREAM_TIMEOUT: "30.0"
+    HUB_UPSTREAM_SSE_IDLE_TIMEOUT: "300.0"
+    HUB_TOOLS_CACHE_TTL: "300"
+    HUB_CONNECTION_CACHE_TTL: "60"
+    HUB_CB_FAILURES: "5"
+    HUB_CB_RESET: "30"
+    HUB_TOKEN_REFRESH_ENABLED: "true"
+
+external:
+  postgres:
+    url: ""                       # значение не хранится в git
+    existingSecret:
+      name: opencode-mcp-hub-db
+      key: url
+  redis:
+    url: ""
+    existingSecret:
+      name: opencode-mcp-hub-redis
+      key: url
+
+secrets:
+  create: false
+  existingSecret: opencode-mcp-hub-secrets
+
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    name: corp-vault
+    kind: ClusterSecretStore
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 768Mi
+  limits:
+    memory: 2Gi
+
+uvicornWorkers: 4
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+  hosts:
+    - host: hub.corp.tander.ru
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    enabled: true
+    secretName: hub-corp-tls
+
+autoscaling:
+  enabled: true
+  minReplicas: 4
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  requestsPerSecond:
+    enabled: false          # включать после установки prometheus-adapter
+    metricName: hub_http_requests_per_second
+    averageValue: "150"
+  behavior:
+    scaleDown:
+      # SSE-потоки долгие: сворачиваемся медленно
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  scrapeTimeout: 10s
+
+networkPolicy:
+  enabled: true
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelectorFromChart: true
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelectorFromChart: true

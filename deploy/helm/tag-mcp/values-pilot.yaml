@@ -1,0 +1,31 @@
+# Профиль «пилот» для ТЭГ-MCP.
+replicaCount: 2
+
+tag:
+  publicUrl: https://tag-mcp-pilot.corp.tander.ru
+
+redis:
+  url: redis://redis-master.mcp-hub-pilot.svc:6379/1
+
+ingress:
+  hosts:
+    - host: tag-mcp-pilot.corp.tander.ru
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    enabled: true
+    secretName: tag-mcp-pilot-corp-tls
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: false
+
+networkPolicy:
+  enabled: false

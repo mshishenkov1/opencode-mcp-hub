@@ -1,0 +1,17 @@
+apiVersion: v2
+name: tag-mcp
+description: >-
+  ТЭГ-MCP (magnit-tag-mcp) — нативный OAuth MCP-сервер поверх корпоративного Mattermost (ТЭГ).
+  Состояние (сессии OAuthProxy) — во внешнем Redis, поэтому sticky-сессии на ingress не нужны.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/mshishenkov1/magnit-tag-mcp
+maintainers:
+  - name: Мирослав Шишенков
+    email: shishenkov.miroslav@gmail.com
+keywords:
+  - mcp
+  - mattermost
+  - oauth

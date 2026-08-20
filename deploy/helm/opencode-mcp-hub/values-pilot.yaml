@@ -1,0 +1,67 @@
+# Профиль «пилот» (D6-06): пилотная группа ≤ 100 человек.
+# Postgres/Redis допускаются в кластере (отдельные релизы bitnami или ручные манифесты) —
+# чарт лишь получает их адреса. HPA выключен, PDB minAvailable 1.
+#
+#   helm template hub deploy/helm/opencode-mcp-hub \
+#     -f deploy/helm/opencode-mcp-hub/values-pilot.yaml \
+#     --set-file catalog.content=catalog.yaml
+
+replicaCount: 2
+
+hub:
+  publicUrl: https://hub-pilot.corp.tander.ru
+  logLevel: INFO
+  autoMigrate: false
+  trustProxy: true
+  webAuth: litellm       # пилот идёт по CLI-SSO LiteLLM, Keycloak-клиент ещё не выдан
+  env:
+    HUB_RATE_LIMIT_MCP: "120"
+    HUB_RATE_LIMIT_REGISTER: "10"
+    HUB_TOKEN_REFRESH_ENABLED: "true"
+
+external:
+  postgres:
+    # in-cluster Postgres пилота
+    url: postgresql+asyncpg://hub:__from_secret__@postgres.mcp-hub-pilot.svc:5432/hub
+    existingSecret:
+      name: hub-postgres
+      key: url
+  redis:
+    url: redis://redis-master.mcp-hub-pilot.svc:6379/0
+
+secrets:
+  create: true
+  existingSecret: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    memory: 1Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: hub-pilot.corp.tander.ru
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    enabled: true
+    secretName: hub-pilot-corp-tls
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+
+networkPolicy:
+  enabled: false

@@ -1,0 +1,37 @@
+Hub {{ .Chart.AppVersion }} установлен как релиз «{{ .Release.Name }}» в namespace {{ .Release.Namespace }}.
+
+Внешний адрес: {{ .Values.hub.publicUrl }}
+Реплик: {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}…{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
+Каталог: {{ include "hub.catalogConfigMapName" . }} (ключ {{ .Values.catalog.key }})
+Секреты: {{ include "hub.secretName" . }}{{ if .Values.externalSecret.enabled }} (наполняется ExternalSecret){{ end }}
+Миграции: {{ if .Values.migrations.enabled }}Job {{ include "hub.fullname" . }}-migrate, hook pre-install/pre-upgrade{{ else }}выключены{{ end }}; HUB_DB_AUTO_MIGRATE={{ .Values.hub.autoMigrate }}
+
+Проверка после установки:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "hub.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hub.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -fsS http://127.0.0.1:8080/health
+  curl -fsS http://127.0.0.1:8080/ready
+  curl -fsS http://127.0.0.1:8080/.well-known/opencode | head
+  curl -fsS http://127.0.0.1:8080/metrics | grep -c '^hub_'
+
+Полный набор проверок снаружи — deploy/smoke.sh (тот же список, что и для стенда).
+
+{{- if not .Values.external.redis.url }}
+{{- if not .Values.external.redis.existingSecret.name }}
+
+ВНИМАНИЕ: HUB_REDIS_URL не задан. Hub поднимется, но KeyValueStore будет в памяти процесса:
+реплики не разделят denylist отозванных токенов, MCP-сессии, окна rate-limit, состояние
+circuit-breaker и кэш подключений (R-N5). Для replicaCount > 1 задайте external.redis.url.
+{{- end }}
+{{- end }}
+{{- if and .Values.secrets.create (not .Values.secrets.secretKey) }}
+
+ВНИМАНИЕ: secrets.secretKey и/или secrets.encryptionKey пусты — Hub не стартует (R-T2).
+Передайте их при установке: --set secrets.secretKey=... --set secrets.encryptionKey=...
+{{- end }}
+{{- if eq .Values.catalog.content "version: 1\nservers: []\n" }}
+
+ВНИМАНИЕ: установлен каталог-заглушка (servers: []). Подложите настоящий:
+  helm upgrade ... --set-file catalog.content=catalog.yaml
+{{- end }}

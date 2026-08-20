@@ -1,0 +1,299 @@
+# Значения по умолчанию для opencode-mcp-hub.
+# Профили: values-pilot.yaml (пилот) и values-prod.yaml (продуктив) — накладываются поверх.
+#   helm template hub deploy/helm/opencode-mcp-hub -f deploy/helm/opencode-mcp-hub/values-prod.yaml
+# Каталог MCP-серверов подкладывается файлом:
+#   --set-file catalog.content=catalog.yaml
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: registry.corp.tander.ru/ailab/opencode-mcp-hub
+  # пусто — берётся appVersion чарта
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# --- обязательные настройки Hub (R-K1, R-T1) --------------------------------
+hub:
+  # HUB_PUBLIC_URL — внешний адрес Hub, совпадает с host в ingress
+  publicUrl: https://hub.corp.tander.ru
+  logLevel: INFO
+  # HUB_DB_AUTO_MIGRATE. По умолчанию false: миграции применяет отдельный Job-hook
+  # (migrations.enabled). Advisory-блокировка в коде (R-M1) позволяет и true,
+  # но при выкатке волнами предсказуемее отдельный шаг.
+  autoMigrate: false
+  # HUB_TRUST_PROXY: за ingress/istio адрес соединения одинаков у всех клиентов,
+  # поэтому rate-limit по IP имеет смысл только с доверенным X-Forwarded-For (R-T1).
+  trustProxy: true
+  # HUB_WEB_AUTH: keycloak | litellm
+  webAuth: keycloak
+  # HUB_CONSENT: always | remember
+  consent: always
+  catalogPath: /etc/hub/catalog.yaml
+  litellm:
+    baseUrl: https://llmlite.ailab-copilot-prod.corp.tander.ru
+    model: MagnitCopilot
+  keycloak:
+    issuer: https://hi.tander.ru/auth/realms/Tander-SSO
+    clientId: opencode-mcp-hub
+    scopes: openid profile email
+  # Корпоративный CA: ConfigMap с ключом ca.crt монтируется в /etc/ssl/certs/corp-ca.pem
+  # и подставляется в SSL_CERT_FILE / REQUESTS_CA_BUNDLE.
+  caBundle:
+    enabled: true
+    existingConfigMap: corp-ca-bundle
+    key: ca.crt
+  # Любые прочие переменные окружения таблицы R-T1 (имя → значение).
+  # Пример: HUB_RATE_LIMIT_MCP: "120"
+  env:
+    HUB_OAUTH_ALLOWED_REDIRECTS: '["http://127.0.0.1:*","http://localhost:*"]'
+    HUB_RATE_LIMIT_MCP: "120"
+    HUB_MAX_SSE_PER_USER: "4"
+    HUB_UPSTREAM_TIMEOUT: "30.0"
+    HUB_TOKEN_REFRESH_ENABLED: "true"
+
+# --- внешние хранилища ------------------------------------------------------
+# Postgres и Redis в этом чарте не разворачиваются (subchart вне объёма I-6):
+#   external.postgres.url / external.redis.url — значение попадает в управляемый Secret;
+#   external.postgres.existingSecret — готовый Secret с ключом, значение в чарт не копируется.
+external:
+  postgres:
+    url: ""
+    existingSecret:
+      name: opencode-mcp-hub-db
+      key: url
+  redis:
+    url: ""
+    existingSecret:
+      name: ""
+      key: url
+
+# --- секреты ----------------------------------------------------------------
+secrets:
+  # create: true — чарт создаёт Secret из значений ниже (для пилота/теста).
+  # Для продуктива: create=false + existingSecret, либо externalSecret.enabled=true.
+  create: true
+  existingSecret: ""
+  # HUB_SECRET_KEY — подпись JWT Hub
+  secretKey: ""
+  # HUB_ENCRYPTION_KEY — ключ Fernet (44 символа urlsafe-base64) для токенов систем
+  encryptionKey: ""
+  # HUB_ADMIN_TOKEN — включает POST /admin/catalog/reload; пусто — эндпоинт выключен
+  adminToken: ""
+  keycloakClientSecret: ""
+  # Секреты OAuth-приложений целевых систем: имя переменной → значение
+  oauth: {}
+  #  GITLAB_OAUTH_CLIENT_SECRET: ""
+  #  JIRA_OAUTH_CLIENT_SECRET: ""
+
+# Заготовка ExternalSecret (external-secrets.io/v1beta1). Значения секретов
+# в git не попадают — чарт лишь описывает, какие ключи из какого хранилища тянуть.
+externalSecret:
+  enabled: false
+  apiVersion: external-secrets.io/v1beta1
+  refreshInterval: 1h
+  secretStoreRef:
+    name: corp-vault
+    kind: ClusterSecretStore
+  # Каждый элемент: secretKey — ключ в итоговом Secret, remoteKey/property — путь в хранилище
+  data:
+    - secretKey: HUB_SECRET_KEY
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: hub_secret_key
+    - secretKey: HUB_ENCRYPTION_KEY
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: hub_encryption_key
+    - secretKey: HUB_DATABASE_URL
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: database_url
+    - secretKey: HUB_REDIS_URL
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: redis_url
+
+# --- каталог ----------------------------------------------------------------
+catalog:
+  create: true
+  existingConfigMap: ""
+  key: catalog.yaml
+  # Подкладывается через --set-file catalog.content=catalog.yaml.
+  # Значение по умолчанию — пустой валидный каталог, чтобы helm lint/template проходили.
+  content: |
+    version: 1
+    servers: []
+
+# --- миграции (D6-05) -------------------------------------------------------
+migrations:
+  enabled: true
+  # Job вешается на pre-install/pre-upgrade; advisory-блокировка в коде (R-M1)
+  # защищает и от параллельного старта реплик.
+  hookWeight: "-5"
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+# --- деплой -----------------------------------------------------------------
+containerPort: 8000
+uvicornWorkers: 2
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    memory: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+probes:
+  readiness:
+    path: /ready
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    path: /health
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    enabled: true
+    path: /health
+    periodSeconds: 5
+    failureThreshold: 24
+
+# SSE-потоки живут долго: даём запас на дренаж
+terminationGracePeriodSeconds: 60
+preStopSleepSeconds: 5
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelectorFromChart: true
+
+extraVolumes: []
+extraVolumeMounts: []
+
+# --- сеть -------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+  # имя порта важно для istio: http- префикс включает L7-обработку
+  portName: http
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    # istio-ingress: аннотации подставляются профилем, здесь — типовой набор для nginx
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"      # SSE
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+  hosts:
+    - host: hub.corp.tander.ru
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    enabled: true
+    # Secret типа kubernetes.io/tls с корпоративным сертификатом (D-1)
+    secretName: hub-corp-tls
+# istio: включает Gateway+VirtualService вместо Ingress
+istio:
+  enabled: false
+  gateway: istio-system/corp-gateway
+  # аннотации/метки sidecar
+  sidecarInject: true
+
+# --- масштабирование --------------------------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # RPS-метрика через prometheus-adapter (S-01); имя метрики настраивается
+  requestsPerSecond:
+    enabled: false
+    metricName: hub_http_requests_per_second
+    averageValue: "150"
+  behavior: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+# --- наблюдаемость ----------------------------------------------------------
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# --- сетевые политики -------------------------------------------------------
+networkPolicy:
+  enabled: false
+  # Кто может обращаться к Hub (кроме ingress-контроллера)
+  ingressNamespaceSelectors:
+    - matchLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+  # Разрешать scrape из namespace мониторинга
+  monitoringNamespaceSelectors:
+    - matchLabels:
+        kubernetes.io/metadata.name: monitoring
+  # Исходящий трафик: DNS + перечисленные назначения.
+  # Каждый элемент — {cidrs: [...], ports: [{port, protocol}]}
+  egress:
+    dns:
+      enabled: true
+      port: 53
+    rules:
+      - name: postgres-redis
+        cidrs: ["10.0.0.0/8"]
+        ports:
+          - { port: 5432, protocol: TCP }
+          - { port: 6379, protocol: TCP }
+      - name: litellm-and-mcp
+        # LiteLLM, MCP AI Lab, целевые системы (GitLab, Jira/Confluence, Mattermost)
+        cidrs: ["10.0.0.0/8", "172.16.0.0/12"]
+        ports:
+          - { port: 443, protocol: TCP }

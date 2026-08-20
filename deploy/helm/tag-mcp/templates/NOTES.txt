@@ -1,0 +1,20 @@
+ТЭГ-MCP установлен как релиз «{{ .Release.Name }}» в namespace {{ .Release.Namespace }}.
+
+Внешний адрес: {{ .Values.tag.publicUrl }}
+Mattermost:    {{ .Values.tag.mattermostUrl }} (MM_HTTP_AUTH={{ .Values.tag.httpAuth }})
+Реплик: {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}…{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }} (sticky-сессии не требуются: состояние в Redis)
+Секреты: {{ include "tagmcp.secretName" . }}{{ if .Values.externalSecret.enabled }} (наполняется ExternalSecret){{ end }}
+
+Проверка:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "tagmcp.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "tagmcp.fullname" . }} 8081:{{ .Values.service.port }}
+  curl -fsS http://127.0.0.1:8081/health
+  curl -fsS http://127.0.0.1:8081/.well-known/oauth-protected-resource
+
+Каталог Hub должен указывать на этот адрес: TAG_MCP_URL={{ .Values.tag.publicUrl }}/mcp
+{{- if and .Values.secrets.create (not .Values.secrets.mmOauthClientId) }}
+
+ВНИМАНИЕ: MM_OAUTH_CLIENT_ID/MM_OAUTH_CLIENT_SECRET пусты — OAuth-приложение Mattermost
+ещё не выдано. Сервер поднимется, но авторизация пользователей работать не будет.
+{{- end }}

@@ -1,0 +1,31 @@
+{{- if and .Values.ingress.enabled .Values.istio.enabled }}
+{{- /*
+Вариант под istio: вместо Ingress — VirtualService на общий корпоративный Gateway.
+TLS терминирует Gateway (сертификат D-1), поэтому здесь только маршрутизация.
+Таймаут не задаём: SSE-потоки MCP-proxy живут до HUB_UPSTREAM_SSE_IDLE_TIMEOUT.
+*/ -}}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ include "hub.fullname" . }}
+  labels:
+    {{- include "hub.labels" . | nindent 4 }}
+spec:
+  hosts:
+    {{- range .Values.ingress.hosts }}
+    - {{ .host | quote }}
+    {{- end }}
+  gateways:
+    - {{ .Values.istio.gateway }}
+  http:
+    - match:
+        {{- range (first .Values.ingress.hosts).paths }}
+        - uri:
+            prefix: {{ .path | quote }}
+        {{- end }}
+      route:
+        - destination:
+            host: {{ include "hub.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

@@ -1,0 +1,14 @@
+{{- if and .Values.catalog.create (not .Values.catalog.existingConfigMap) }}
+{{- if not (trim .Values.catalog.content) }}
+{{- fail "catalog.content пуст: подложите каталог через --set-file catalog.content=catalog.yaml или укажите catalog.existingConfigMap" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hub.catalogConfigMapName" . }}
+  labels:
+    {{- include "hub.labels" . | nindent 4 }}
+data:
+  {{ .Values.catalog.key }}: |
+{{ .Values.catalog.content | indent 4 }}
+{{- end }}

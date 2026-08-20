@@ -1,0 +1,20 @@
+apiVersion: v2
+name: opencode-mcp-hub
+description: >-
+  Hub: каталог корпоративных MCP-серверов, OAuth-фасад, MCP-proxy и вход через корпоративный SSO
+  для OpenCode. Postgres и Redis — внешние (URL и секреты из values).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/mshishenkov1/opencode-mcp-hub
+maintainers:
+  - name: Мирослав Шишенков
+    email: shishenkov.miroslav@gmail.com
+keywords:
+  - mcp
+  - opencode
+  - oauth
+annotations:
+  # Профили: values-pilot.yaml (пилот ≤ 100 человек) и values-prod.yaml (продуктив).
+  category: Development
