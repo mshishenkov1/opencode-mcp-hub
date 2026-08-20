@@ -74,6 +74,7 @@ class ProxyContext:
     payload: Any = None
     request_id: Any = None
     jsonrpc: bool = False
+    breaker_was_open: bool = False
     started: float = field(default_factory=time.perf_counter)
 
     @property
@@ -258,10 +259,13 @@ async def _prepare(request: Request, alias: str, *, read_body: bool) -> ProxyCon
 
 async def _check_breaker(ctx: ProxyContext) -> None:
     state = ctx.request.app.state
-    retry_after = await state.breaker.check(ctx.alias)
-    if retry_after is None:
+    decision = await state.breaker.check(ctx.alias)
+    if decision.retry_after is None:
+        # Признак «выключатель был открыт» несёт запрос-проба: только он снимает право на пробу
+        # по успешному завершению (H5-3), в закрытом состоянии ключа пробы нет.
+        ctx.breaker_was_open = decision.was_open
         return
-    seconds = max(1, math.ceil(retry_after))
+    seconds = max(1, math.ceil(decision.retry_after))
     state.metrics.counter(
         "hub_upstream_errors_total",
         "Ошибки upstream MCP.",
@@ -445,7 +449,7 @@ async def _send(
             await response.aclose()
             await state.breaker.record_failure(ctx.alias)
             raise _upstream_error(ctx, "http_5xx")
-        await state.breaker.record_success(ctx.alias)
+        await state.breaker.record_success(ctx.alias, was_open=ctx.breaker_was_open)
         if session is not None:
             await state.sessions.touch(session)
         return response

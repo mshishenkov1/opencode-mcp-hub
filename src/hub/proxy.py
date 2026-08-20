@@ -158,6 +158,18 @@ def filter_tools_payload(payload: Any, tools: ToolFilter) -> Any:
     return payload
 
 
+@dataclass(frozen=True, slots=True)
+class BreakerDecision:
+    """Решение выключателя по одному запросу (R-P10).
+
+    ``retry_after is None`` — запрос идёт на upstream. ``was_open`` — выключатель был открыт или
+    в half-open, то есть ключ пробы существует и по завершении запроса его нужно снять (H5-3).
+    """
+
+    retry_after: float | None
+    was_open: bool
+
+
 class CircuitBreaker:
     """Выключатель на alias, состояние — в KV (R-P10).
 
@@ -204,32 +216,40 @@ class CircuitBreaker:
             return {"failures": 0, "open_until": 0.0}
         return record
 
-    async def check(self, alias: str) -> float | None:
-        """``None`` — можно идти на upstream; иначе секунды до следующей попытки.
+    async def check(self, alias: str) -> BreakerDecision:
+        """``retry_after is None`` — можно идти на upstream; иначе секунды до следующей попытки.
 
-        В half-open ``None`` получает только тот запрос, который захватил право на пробу.
+        В half-open проход получает только тот запрос, который захватил право на пробу; для него
+        ``was_open`` истинно, и по завершении пробы вызывающий код передаёт признак в
+        ``record_success`` (H5-3), чтобы в закрытом состоянии не ходить в KV за удалением.
         """
         record = await self.state(alias)
         open_until = float(record.get("open_until") or 0.0)
         if open_until <= 0.0:
-            return None
+            return BreakerDecision(retry_after=None, was_open=False)
         now = self.clock.time()
         if open_until > now:
-            return open_until - now
+            return BreakerDecision(retry_after=open_until - now, was_open=True)
         probe_ttl = self._probe_ttl()
         claimed = await self.kv.set_if_absent(
             self._probe_key(alias), {"until": now + probe_ttl}, ttl=probe_ttl
         )
         if claimed:
-            return None
+            return BreakerDecision(retry_after=None, was_open=True)
         # Пробный запрос уже выполняет кто-то другой — быстрый отказ до его завершения.
         held = await self.kv.get(self._probe_key(alias))
         until = float(held.get("until") or 0.0) if isinstance(held, dict) else 0.0
-        return max(until - now, 1.0)
+        return BreakerDecision(retry_after=max(until - now, 1.0), was_open=True)
 
-    async def record_success(self, alias: str) -> None:
-        """Успешный ответ обнуляет счётчик ошибок и закрывает выключатель (R-P10)."""
-        await self.kv.delete(self._probe_key(alias))
+    async def record_success(self, alias: str, *, was_open: bool = False) -> None:
+        """Успешный ответ обнуляет счётчик ошибок и закрывает выключатель (R-P10).
+
+        Ключ пробы удаляется только при ``was_open`` — в закрытом состоянии его не существует
+        никогда, и безусловный ``delete`` был лишним обращением к KV на каждый проксированный
+        запрос (H5-3). Признак берётся из записи ``cb:<alias>``, уже прочитанной в ``check()``.
+        """
+        if was_open:
+            await self.kv.delete(self._probe_key(alias))
         await self.kv.set(
             self._key(alias),
             {"failures": 0, "open_until": 0.0},
@@ -550,6 +570,7 @@ __all__ = [
     "SSE_CONTENT_TYPE",
     "SSE_PREFIX",
     "TOOLS_CACHE_PREFIX",
+    "BreakerDecision",
     "CircuitBreaker",
     "McpSession",
     "ProxyError",
