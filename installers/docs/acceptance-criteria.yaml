@@ -8,11 +8,16 @@
 #   manual      — требует Windows-стенда (D-9), macOS с Desktop-артефактом или реального GUI-сеанса
 #   ci          — проверяется заданием конвейера (lint, наличие файлов, прогон release.sh)
 #
-# Критерии AC-01…AC-134 относятся к установщикам (правила N5-*).
+# Критерии AC-01…AC-137 относятся к установщикам (правила N5-*).
 # Критерии HAC-01…HAC-12 — отдельный раздел hub_backlog_criteria: бэклог Hub (правила H5-*),
 # реализуется в репозитории Hub, ветка pipeline/i3-hub-oauth-facade-proxy (I-3+), НЕ в installers/.
+#
+# Ревизия 1.1 (2026-08-20), по reports/review-i5-1.json: добавлены AC-135 (небезопасный
+# artifacts[].app_name / install_name → код 2 без единой файловой операции, в т.ч. на --uninstall
+# и --dry-run --uninstall), AC-136 (три ветки Invoke-Uninstall на Windows) и AC-137 (провал
+# деинсталлятора Desktop → код выхода 1). Изменённые правила спецификации — spec.md §0.
 
-version: 1.0
+version: 1.1
 spec: installers/docs/spec.md
 criteria:
 
@@ -1089,19 +1094,64 @@ criteria:
     when: проверены первые байты и переводы строк
     then: BOM отсутствует, первая строка начинается с `#!`, символов CR в файлах нет
 
+  # ------------------------------------------------------- ревизия 1.1: правки по review-i5-1.json
+
+  - id: AC-135
+    rule: [N5-P4, N5-P3, N5-R1]
+    type: integration
+    given: >
+      каталог-жертва вне зоны установки (например <tmp>/victim) с файлом внутри и пакет,
+      в манифесте которого artifacts[].app_name равен "../../<абсолютный путь>/victim"
+      (в отдельных прогонах — с ведущим "/", с обратным слэшем "\\", с буквой диска "C:\\x")
+    when: >
+      установщик запущен трижды с одним и тем же манифестом — без флагов, с --uninstall
+      и с --dry-run --uninstall
+    then: >
+      во всех прогонах и во всех четырёх вариантах значения: сообщение называет поле
+      artifacts.<i>.app_name, код выхода 2; каталог-жертва и его содержимое на месте;
+      снимок фейкового $HOME до и после совпадает побайтово — ни одной файловой операции
+      не выполнено; в выводе нет строки «Desktop: удалён». Тот же результат для небезопасных
+      значений ca.install_name и artifacts[].install_name
+
+  - id: AC-136
+    rule: [N5-R1]
+    type: ci
+    given: >
+      Pester-прогон Invoke-Uninstall с мокнутыми Get-DesktopUninstallEntry и
+      Invoke-UninstallProcess, манифест содержит desktop с silent_args ["/S"]
+    when: >
+      разобраны три случая записи деинсталляции: (а) непустая QuietUninstallString,
+      (б) пустая QuietUninstallString и непустая UninstallString, (в) записи в реестре нет
+    then: >
+      (а) запущена команда из QuietUninstallString без добавления silent_args;
+      (б) запущена команда из UninstallString с добавленными silent_args;
+      в обоих случаях установщик дождался завершения процесса и при коде 0 напечатал
+      «Desktop: удалён (<DisplayTarget>)»; (в) процесс не запускался, напечатано
+      «Desktop: удалите вручную через «Приложения и возможности»», код выхода 0
+
+  - id: AC-137
+    rule: [N5-R1, N5-I1]
+    type: ci
+    given: установленный пакет с Desktop и мок Invoke-UninstallProcess, возвращающий код 3
+    when: выполнен install.ps1 -Uninstall
+    then: >
+      напечатано «Desktop: ошибка (код 3)» и нет строки «Desktop: удалён»; строки об удалении
+      CLI, записи PATH, переменной NODE_EXTRA_CA_CERTS и CA присутствуют — эти шаги не
+      откатываются; итоговый код выхода 1
+
 # ------------------------------------------------------------------------------------------------
 # Покрытие правил критериями (каждое правило N5-* — минимум один AC)
 # ------------------------------------------------------------------------------------------------
 coverage:
   N5-P1: [AC-01]
   N5-P2: [AC-02, AC-03]
-  N5-P3: [AC-04, AC-05, AC-11]
-  N5-P4: [AC-05, AC-06, AC-07, AC-08, AC-09, AC-10, AC-11, AC-12]
+  N5-P3: [AC-04, AC-05, AC-11, AC-135]
+  N5-P4: [AC-05, AC-06, AC-07, AC-08, AC-09, AC-10, AC-11, AC-12, AC-135]
   N5-P5: [AC-13, AC-14, AC-15, AC-16, AC-17, AC-98]
   N5-P6: [AC-18, AC-19]
   N5-P7: [AC-20, AC-21]
   N5-P8: [AC-22]
-  N5-I1: [AC-17, AC-23, AC-24, AC-25, AC-26, AC-27, AC-28, AC-29, AC-30, AC-55, AC-69, AC-77]
+  N5-I1: [AC-17, AC-23, AC-24, AC-25, AC-26, AC-27, AC-28, AC-29, AC-30, AC-55, AC-69, AC-77, AC-137]
   N5-I2: [AC-31, AC-32]
   N5-I3: [AC-33, AC-34, AC-35, AC-36]
   N5-I4: [AC-37, AC-38, AC-39, AC-40]
@@ -1117,7 +1167,7 @@ coverage:
   N5-U2: [AC-57, AC-80, AC-81, AC-82]
   N5-U3: [AC-38, AC-64, AC-83]
   N5-U4: [AC-84, AC-102]
-  N5-R1: [AC-85, AC-86, AC-87, AC-88]
+  N5-R1: [AC-85, AC-86, AC-87, AC-88, AC-135, AC-136, AC-137]
   N5-R2: [AC-89, AC-90, AC-91, AC-92]
   N5-R3: [AC-93, AC-94]
   N5-R4: [AC-95]
@@ -1142,7 +1192,7 @@ coverage:
 
 negative_scenarios:
   bad_hash: [AC-13, AC-14, AC-17, AC-98]
-  broken_manifest: [AC-05, AC-06, AC-07, AC-08, AC-09, AC-10, AC-11, AC-12]
+  broken_manifest: [AC-05, AC-06, AC-07, AC-08, AC-09, AC-10, AC-11, AC-12, AC-135]
   wrong_os_or_arch: [AC-33, AC-34, AC-35, AC-36]
   missing_permissions: [AC-53, AC-54, AC-63, AC-109]
   busy_binary_windows: [AC-58, AC-61]
@@ -1150,8 +1200,8 @@ negative_scenarios:
   no_network: [AC-18, AC-19, AC-118, AC-120]
   bad_arguments: [AC-17, AC-25, AC-26, AC-27, AC-28, AC-95]
   missing_tooling: [AC-15]
-  desktop_failure: [AC-66, AC-67, AC-68, AC-69]
-  unsafe_paths: [AC-11, AC-90, AC-91]
+  desktop_failure: [AC-66, AC-67, AC-68, AC-69, AC-136, AC-137]
+  unsafe_paths: [AC-11, AC-90, AC-91, AC-135]
   user_data_preserved: [AC-70, AC-71, AC-73, AC-82, AC-86, AC-87, AC-88]
   missing_artifact: [AC-114, AC-119]
   nothing_installed: [AC-93, AC-101, AC-107]
