@@ -61,6 +61,51 @@ helm template tag deploy/helm/tag-mcp -f deploy/helm/tag-mcp/values-prod.yaml
 
 Одновременно `secrets.create=true` и `externalSecret.enabled=true` — ошибка шаблона.
 
+### Судьба Secret при upgrade и uninstall
+
+`secrets.preInstallHook=true` (по умолчанию) вешает на Secret и на ExternalSecret hook
+`pre-install,pre-upgrade` с `hook-delete-policy: before-hook-creation` — иначе Job
+миграций (тоже hook, weight `-5`) стартовал бы раньше источника секретов. Побочный
+эффект: **Helm удаляет и заново создаёт сам ресурс-hook на каждом `helm upgrade`**.
+
+Для обычного Secret (`secrets.create=true`, пилот) это безопасно: удаление и создание
+делает сам Helm в рамках одной операции, значения он берёт из values, окно — миллисекунды.
+
+Для ExternalSecret это принципиально: наполнение идёт асинхронно, оператором. Поэтому
+целевой Secret объявлен **`target.creationPolicy: Orphan`** (`externalSecret.creationPolicy`):
+
+* оператор создаёт и обновляет Secret `<release>-secrets`, но `ownerReference` на него
+  не ставит, поэтому пересоздание ExternalSecret **не трогает живой Secret**;
+* Job миграций и поды Hub всё это время читают последние доставленные значения;
+* **если Vault или ESO недоступны**, `helm upgrade` не остаётся без секретов: Secret со
+  старыми значениями на месте, поды стартуют и переживают scale-up HPA; не доедут только
+  новые значения — расхождение видно в статусе ExternalSecret
+  (`kubectl describe externalsecret <release>`, condition `SecretSynced`).
+
+`creationPolicy: Owner` в этой схеме запрещён: `ownerReference` означает, что сборщик
+мусора удалит Secret вместе с ExternalSecret — то есть на каждом upgrade. Сочетание
+`creationPolicy: Owner` + `secrets.preInstallHook=true` отбивается `{{ fail }}` в
+`hub.validateSecrets`. Ставить `Owner` осмысленно только вместе с
+`--set secrets.preInstallHook=false` (тогда ExternalSecret — обычный ресурс релиза,
+Helm его патчит, а Secret заводится до установки или Job миграций выключается).
+
+Цена выбора — **`helm uninstall` не убирает ни ExternalSecret, ни Secret**: первый не
+входит в манифест релиза (hook-ресурс без `hook-delete-policy: hook-succeeded`), второй
+никому не принадлежит. Снимать вручную:
+
+```bash
+kubectl -n <ns> delete externalsecret <release>-opencode-mcp-hub \
+                      secret         <release>-opencode-mcp-hub-secrets
+```
+
+Заметьте: с `Owner` от этой уборки всё равно не избавиться — hook-ресурс `uninstall`
+не удаляет, значит и владелец Secret'а остался бы в namespace. То есть `Owner` не даёт
+здесь ничего, кроме разрушительного удаления Secret на upgrade.
+
+В чарте `tag-mcp` hook'ов нет (нет и Job миграций), его ExternalSecret — обычный ресурс
+релиза, поэтому там оставлен `creationPolicy: Owner`: upgrade его патчит, а `uninstall`
+убирает вместе с целевым Secret.
+
 ### Ключи Secret `<release>-secrets` (чарт `opencode-mcp-hub`)
 
 Имена ключей задаются в `secrets.keys` (по умолчанию совпадают с именами переменных
@@ -82,7 +127,9 @@ helm template tag deploy/helm/tag-mcp -f deploy/helm/tag-mcp/values-prod.yaml
   `HUB_ENCRYPTION_KEY` или `HUB_DATABASE_URL` (последний — если не задан
   `external.postgres.existingSecret`);
 * `hub.webAuth=keycloak`, а источника `KEYCLOAK_CLIENT_SECRET` нет вовсе
-  (при ESO — ключ отсутствует в `data`).
+  (при ESO — ключ отсутствует в `data`);
+* `externalSecret.creationPolicy` не из списка `Orphan|Owner|Merge|None` либо равен
+  `Owner` при включённом `secrets.preInstallHook` (см. ниже).
 
 Остальное отбивается предупреждениями `NOTES.txt` при установке.
 
@@ -148,8 +195,8 @@ Deployment (`HUB_DATABASE_URL`), — миграция гарантированн
 
 Job — hook, то есть создаётся раньше обычных ресурсов релиза. Чтобы Secret к этому
 моменту существовал, `secrets.preInstallHook=true` (по умолчанию) вешает тот же hook
-с весом `-10` на Secret и на ExternalSecret. Плата: hook-ресурс не входит в манифест
-релиза, поэтому `helm uninstall` его не удаляет — Secret снимается вручную.
+с весом `-10` на Secret и на ExternalSecret. Что при этом происходит с секретами на
+`helm upgrade` и `helm uninstall` — раздел «Судьба Secret при upgrade и uninstall».
 Отключить: `--set secrets.preInstallHook=false` (тогда при `migrations.enabled=true`
 Secret нужно завести до установки).
 

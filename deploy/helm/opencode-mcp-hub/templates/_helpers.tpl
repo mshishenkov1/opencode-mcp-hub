@@ -79,6 +79,13 @@ CrashLoopBackOff'ом пода.
 {{- define "hub.validateSecrets" -}}
 {{- $keys := .Values.secrets.keys -}}
 {{- if .Values.externalSecret.enabled }}
+{{- $policy := .Values.externalSecret.creationPolicy | default "Orphan" }}
+{{- if not (has $policy (list "Orphan" "Owner" "Merge" "None")) }}
+{{- fail (printf "externalSecret.creationPolicy=%s: допустимы Orphan (по умолчанию), Owner, Merge, None" $policy) }}
+{{- end }}
+{{- if and (eq $policy "Owner") (include "hub.secretHookAnnotations" .) }}
+{{- fail (printf "externalSecret.creationPolicy=Owner вместе с secrets.preInstallHook=true: hook-delete-policy before-hook-creation удаляет ExternalSecret перед каждым helm upgrade, а ownerReference уводит за ним живой Secret %s — Job миграций и новые поды встают с CreateContainerConfigError, а при недоступном Vault контур остаётся без секретов. Оставьте externalSecret.creationPolicy=Orphan либо выключите secrets.preInstallHook" (include "hub.secretName" .)) }}
+{{- end }}
 {{- if and (not .Values.external.postgres.existingSecret.name) (not (include "hub.esoHasKey" (dict "ctx" . "key" $keys.databaseUrl))) }}
 {{- fail (printf "externalSecret.enabled=true, но ключа %s нет ни в externalSecret.data, ни в external.postgres.existingSecret: Hub и Job миграций останутся без адреса БД" $keys.databaseUrl) }}
 {{- end }}
@@ -272,7 +279,9 @@ secrets.preInstallHook вешает на Secret/ExternalSecret тот же hook 
 {{/*
 Аннотации hook'а для Secret/ExternalSecret: ресурс должен существовать раньше
 Job'а миграций (hook-weight -5). before-hook-creation нужен, чтобы upgrade не
-падал на «уже существует».
+падал на «уже существует»; для ExternalSecret это значит удаление CR на каждом
+upgrade, поэтому целевой Secret обязан быть Orphan (см. externalsecret.yaml).
+Пустая строка = hook не нужен, ей же пользуется hub.validateSecrets.
 */}}
 {{- define "hub.secretHookAnnotations" -}}
 {{- if and .Values.secrets.preInstallHook .Values.migrations.enabled -}}

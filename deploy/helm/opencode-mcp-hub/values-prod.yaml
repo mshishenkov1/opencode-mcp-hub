@@ -52,6 +52,10 @@ secrets:
 
 externalSecret:
   enabled: true
+  # Orphan обязателен, пока secrets.preInstallHook=true: Helm пересоздаёт ExternalSecret
+  # на каждом upgrade, и при Owner вместе с ним удалялся бы живой Secret релиза.
+  # См. deploy/helm/README.md, раздел «Секреты → судьба Secret при upgrade и uninstall».
+  creationPolicy: Orphan
   secretStoreRef:
     name: corp-vault
     kind: ClusterSecretStore

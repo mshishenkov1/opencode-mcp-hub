@@ -126,7 +126,10 @@ secrets:
   # Secret нужен Job'у миграций, а тот — hook pre-install/pre-upgrade и создаётся
   # раньше обычных ресурсов релиза. preInstallHook=true вешает на Secret
   # (и на ExternalSecret) тот же hook с весом -10, чтобы к запуску Job он уже был.
-  # Плата: hook-ресурс не входит в манифест релиза, `helm uninstall` его не удаляет.
+  # Плата: hook-ресурс не входит в манифест релиза, `helm uninstall` его не удаляет,
+  # а before-hook-creation пересоздаёт его на каждом upgrade — поэтому при
+  # externalSecret.enabled=true целевой Secret обязан быть Orphan
+  # (externalSecret.creationPolicy), иначе upgrade уносит живой Secret.
   preInstallHook: true
 
 # --- OAuth-приложения целевых систем каталога (D6-07) -----------------------
@@ -169,6 +172,15 @@ externalSecret:
   enabled: false
   apiVersion: external-secrets.io/v1beta1
   refreshInterval: 1h
+  # Судьба целевого Secret при удалении ExternalSecret (target.creationPolicy):
+  #   Orphan (по умолчанию) — оператор создаёт и обновляет Secret, но ownerReference
+  #     на него НЕ ставит. Secret переживает пересоздание ExternalSecret, которое
+  #     Helm делает на каждом upgrade при secrets.preInstallHook=true, и остаётся на
+  #     месте, даже если Vault/ESO в этот момент недоступны. Плата: `helm uninstall`
+  #     такой Secret не удаляет — снимать вручную (см. deploy/helm/README.md).
+  #   Owner — Secret принадлежит ExternalSecret и удаляется вместе с ним. Допустимо
+  #     ТОЛЬКО при secrets.preInstallHook=false; иначе шаблон отбивает {{ fail }}.
+  creationPolicy: Orphan
   secretStoreRef:
     name: corp-vault
     kind: ClusterSecretStore
