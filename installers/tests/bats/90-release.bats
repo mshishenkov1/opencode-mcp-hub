@@ -228,3 +228,151 @@ setup() {
   assert_file_contains "$readme" "SHA256SUMS"
   [ "$(count_lines_with "$readme" "bash install.sh")" = "1" ]
 }
+
+# ------------------------------------------------------------------ формат --version (N5-B1)
+#
+# Версия попадает в манифест, в имена архивов и в каталог пакета, поэтому обязана проходить ту же
+# схему, что и manifest.json: ^[0-9]+\.[0-9]+\.[0-9]+-magnit\.[0-9]+$. Иначе собрался бы пакет,
+# не проходящий собственную схему. Отказ — до создания каталога --out.
+
+# Одна невалидная версия: код 2, названа причина, каталог --out не создан, артефакты не тронуты.
+assert_version_rejected() {
+  local bad=$1 before after
+  rm -rf "$OUT"
+  before=$(cd "$ART" && find . -print | LC_ALL=C sort)
+  release_run --artifacts "$ART" --version "$bad" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets linux-x64
+  assert_status 2
+  assert_output_contains "Недопустимый формат --version: $bad"
+  if [ -d "$OUT" ]; then
+    printf 'Каталог --out создан, хотя версия отвергнута: %s\n' "$OUT" >&2
+    return 1
+  fi
+  after=$(cd "$ART" && find . -print | LC_ALL=C sort)
+  [ "$before" = "$after" ] || { printf 'Каталог артефактов изменён\n' >&2; return 1; }
+  return 0
+}
+
+@test "AC-111, AC-142: --version без суффикса -magnit.N → код 2 и каталог --out не создан" {
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_version_rejected "1.17.9"
+}
+
+@test "AC-111, AC-142: --version с ведущим v и без номера ревизии → код 2 в обоих случаях" {
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_version_rejected "v1.17.9-magnit.1"
+  assert_version_rejected "1.17.9-magnit"
+}
+
+@test "AC-111, AC-142: прочие формы --version (неполная, буква в ревизии, пустой upstream) → код 2" {
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_version_rejected "1.17-magnit.1"
+  assert_version_rejected "1.17.9-magnit.1a"
+  assert_version_rejected "-magnit.1"
+  assert_version_rejected "1.17.9-MAGNIT.1"
+}
+
+@test "AC-111, AC-142: --version с посторонними символами (пробел, слэш, кавычка) → код 2, ничего не собрано" {
+  make_artifacts "$ART" "$VER" linux-x64
+  assert_version_rejected "1.17.9-magnit.1 extra"
+  assert_version_rejected "../1.17.9-magnit.1"
+  assert_version_rejected '1.17.9-magnit.1"'
+}
+
+@test "AC-111, AC-142: валидная --version по-прежнему принимается (контроль на пропуск проверки)" {
+  make_artifacts "$ART" "$VER" linux-x64
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets linux-x64
+  assert_status 0
+  [ -f "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" ]
+}
+
+# ------------------------------------------------------------------ экранирование JSON (N5-B1)
+#
+# Строковые значения, попадающие в манифест из аргументов сборки, экранируются: иначе кавычка или
+# обратный слэш в --hub-url дали бы синтаксически битый manifest.json. Проверка — строгим
+# парсером (python3 json.load), а не глазами: самодельный awk-парсер установщика лоялен к
+# нарушениям синтаксиса и такую поломку скрыл бы.
+
+# Распаковывает собранный пакет цели linux-x64 и печатает путь к его manifest.json.
+unpack_manifest() {
+  rm -rf "$SANDBOX/unpack"
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  printf '%s' "$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/common/manifest.json"
+}
+
+# Значение ключа верхнего уровня строгим парсером JSON.
+json_value() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"
+}
+
+require_python3() {
+  command -v python3 >/dev/null 2>&1 || skip "нет python3 для строгой проверки JSON"
+}
+
+@test "AC-142: --hub-url с кавычкой и обратным слэшем → манифест — валидный JSON, значение не искажено" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  local hub='https://hub.test/a"b\c/d'
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url "$hub" --out "$OUT" --targets linux-x64
+  assert_status 0
+  local mf
+  mf=$(unpack_manifest)
+  run python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mf"
+  assert_status 0
+  [ "$(json_value "$mf" hub_url)" = "$hub" ]
+  # В файле кавычка и слэш записаны экранированными, а не как есть.
+  assert_file_contains "$mf" '\"'
+  assert_file_contains "$mf" '\\'
+}
+
+@test "AC-142: экранированный hub_url читается установщиком без искажения" {
+  require_python3
+  make_artifacts "$ART" "$VER" "$HOST_TARGET"
+  local hub='https://hub.test/a"b\c/d'
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url "$hub" --out "$OUT" --targets "$HOST_TARGET"
+  assert_status 0
+  rm -rf "$SANDBOX/unpack"
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-$HOST_TARGET-$VER.tar.gz" -C "$SANDBOX/unpack"
+  local root="$SANDBOX/unpack/opencode-magnit-$HOST_TARGET-$VER"
+  run bash "$root/install.sh" --prefix "$PREFIX_DIR" --check
+  # Ничего не установлено → код 7, но манифест разобран и Hub напечатан как есть.
+  assert_status 7
+  assert_output_contains "Манифест: корректен"
+  assert_output_contains "Hub: $hub"
+}
+
+@test "AC-142: --hub-url с переводом строки → манифест остаётся валидным JSON" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  local hub
+  hub=$(printf 'https://hub.test/a\nb')
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url "$hub" --out "$OUT" --targets linux-x64
+  assert_status 0
+  local mf
+  mf=$(unpack_manifest)
+  run python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mf"
+  if [ "$status" -ne 0 ]; then
+    printf 'manifest.json не является валидным JSON:\n%s\n' "$output" >&2
+    return 1
+  fi
+}
+
+@test "AC-142: собранный манифест по умолчанию — валидный JSON (контроль на тождественный json_escape)" {
+  require_python3
+  make_artifacts "$ART" "$VER" linux-x64
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url 'https://hub.test' --out "$OUT" --targets linux-x64
+  assert_status 0
+  local mf
+  mf=$(unpack_manifest)
+  run python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mf"
+  assert_status 0
+  [ "$(json_value "$mf" hub_url)" = "https://hub.test" ]
+  [ "$(json_value "$mf" version)" = "$VER" ]
+}
