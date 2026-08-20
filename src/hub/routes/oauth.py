@@ -219,6 +219,15 @@ async def _start_provider_oauth(
     tx["provider_verifier"] = verifier
     tx["step"] = "provider"
     try:
+        provider = broker.provider(entry)
+        # R-U1/R-U4: способом, помеченным available: false, подключиться нельзя.
+        if not provider.available:
+            return html_error(
+                state.templates,
+                error="auth_method_unavailable",
+                message=provider.unavailable_reason or "Этот способ подключения сейчас недоступен",
+                status_code=409,
+            )
         url = broker.authorize_url(
             entry, preset=tx["preset"], state=provider_state, code_verifier=verifier
         )
@@ -625,6 +634,13 @@ async def provider_callback(alias: str, request: Request) -> Response:
             status_code=502,
             retry_url=f"/oauth/connect/{alias}",
         )
+    # R-U8/решение 70: способ подключения фиксируется и для OAuth-подключений.
+    auth_method_id = entry.model.auth.id if entry.model.auth is not None else None
+    if auth_method_id is None:
+        try:
+            auth_method_id = state.broker.provider(entry).id
+        except ServerUnconfigured:  # pragma: no cover - обмен кода уже прошёл через провайдера
+            auth_method_id = None
     connection = await state.broker.upsert_connection(
         user_id=tx["user_id"],
         alias=alias,
@@ -633,13 +649,18 @@ async def provider_callback(alias: str, request: Request) -> Response:
         groups=list(tx.get("groups") or []),
         clear_reason=True,
         provider_account=tokens.account,
+        auth_method=auth_method_id,
     )
     await state.broker.save_tokens(connection, tokens)
     await state.db.audit(
         "connection_connected",
         user_id=tx["user_id"],
         alias=alias,
-        details={"preset": tx["preset"], "groups": list(tx.get("groups") or [])},
+        details={
+            "auth_method": auth_method_id,
+            "preset": tx["preset"],
+            "groups": list(tx.get("groups") or []),
+        },
         ts=state.clock.now(),
     )
     if tx.get("mode") == MODE_CONNECT:

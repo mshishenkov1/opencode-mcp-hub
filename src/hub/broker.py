@@ -18,12 +18,13 @@ from urllib.parse import urlencode
 import httpx
 from sqlalchemy import select
 
-from hub.catalog import AuthOAuth2, Catalog, ServerEntry
+from hub.catalog import AuthOAuth2, AuthUserToken, Catalog, ServerEntry
 from hub.clock import Clock
 from hub.crypto import TokenCipher, code_challenge_s256
 from hub.db import Connection, Database, UpstreamToken, to_naive_utc, utcnow
 from hub.kv import KeyValueStore
 from hub.metrics import Metrics
+from hub.proxy import resolve_header_value
 from hub.settings import Settings
 
 logger = logging.getLogger("hub.broker")
@@ -41,6 +42,10 @@ STATUS_NOT_CONNECTED = "not_connected"
 REASON_NO_REFRESH = "Токен доступа истёк, обновление невозможно — нужна повторная авторизация"
 REASON_REFRESH_FAILED = "Целевая система отклонила обновление токена — нужна повторная авторизация"
 REASON_SCOPE_UPGRADE = "Нужно заново разрешить доступ в целевой системе: запрошены более широкие права"
+# R-U6: у пользовательского токена нет refresh — единственный признак негодности 401 от upstream.
+REASON_TOKEN_REJECTED = (
+    "Токен целевой системы больше не действует — подключитесь заново, указав новый токен"
+)
 
 
 class BrokerError(Exception):
@@ -57,6 +62,14 @@ class UpstreamAuthFailed(BrokerError):
     def __init__(self, message: str, *, invalid_grant: bool = False) -> None:
         super().__init__(message)
         self.invalid_grant = invalid_grant
+
+
+class UserTokenRejected(BrokerError):
+    """Целевая система не приняла пользовательский токен: 401/403 на проверке (R-U3)."""
+
+
+class UpstreamUnavailable(BrokerError):
+    """Целевая система недоступна на проверке токена: 5xx, сеть, таймаут, не-JSON (R-U3)."""
 
 
 class NeedsReauth(BrokerError):
@@ -137,9 +150,14 @@ class TokenBroker:
 
     def provider(self, entry: ServerEntry) -> AuthOAuth2:
         auth = entry.model.auth
-        if auth is None:  # pragma: no cover - схема каталога это гарантирует для facade
-            raise ServerUnconfigured(f"сервер {entry.alias}: не задан блок auth")
-        return auth
+        if auth is not None:
+            return auth
+        # R-U1: сервер может объявлять способы списком — берём первый доступный OAuth-способ.
+        methods = [m for m in entry.auth_methods if isinstance(m, AuthOAuth2)]
+        oauth = next((m for m in methods if m.available), None) or next(iter(methods), None)
+        if oauth is None:
+            raise ServerUnconfigured(f"сервер {entry.alias}: не задан способ подключения oauth2")
+        return oauth
 
     def client_secret(self, entry: ServerEntry) -> str:
         auth = self.provider(entry)
@@ -219,8 +237,14 @@ class TokenBroker:
             entry, {"grant_type": "refresh_token", "refresh_token": refresh_token}
         )
 
-    async def revoke(self, entry: ServerEntry, token: str) -> None:
-        """Best-effort отзыв токена в целевой системе (R-B8): ошибка не блокирует отключение."""
+    async def revoke(self, entry: ServerEntry, token: str, *, auth_method: str | None = None) -> None:
+        """Best-effort отзыв токена в целевой системе (R-B8): ошибка не блокирует отключение.
+
+        Для подключений ``user_token`` отзыв не выполняется никогда (R-U5, решение 66): личный
+        токен пользователя нельзя отзывать за него и нельзя отправлять на OAuth-эндпоинт отзыва.
+        """
+        if entry.uses_user_token(auth_method):
+            return
         auth = self.provider(entry)
         if not auth.revoke_url:
             return
@@ -235,6 +259,72 @@ class TokenBroker:
             )
         except (httpx.HTTPError, BrokerError) as exc:
             logger.info("upstream_revoke_failed", extra={"alias": entry.alias, "reason": str(exc)})
+
+    # --- пользовательский токен (R-U3, R-U4) --------------------------------
+
+    async def verify_user_token(
+        self, entry: ServerEntry, method: AuthUserToken, token: str
+    ) -> str | None:
+        """Проверить токен запросом к целевой системе; вернуть ``provider_account`` (R-U3).
+
+        Токен не логируется ни в каком виде: в журнал попадают alias, id способа и HTTP-код.
+        """
+        verify = method.verify
+        environ = self._catalog_env()
+        headers = {
+            name: resolve_header_value(value, environ, token)
+            for name, value in verify.headers.items()
+        }
+        try:
+            response = await self._http().request(
+                verify.method, verify.url, headers=headers, timeout=self.settings.upstream_timeout
+            )
+        except httpx.HTTPError as exc:
+            logger.info(
+                "user_token_verify_unavailable",
+                extra={"alias": entry.alias, "auth_method": method.id, "reason": type(exc).__name__},
+            )
+            raise UpstreamUnavailable("целевая система недоступна") from exc
+        status = response.status_code
+        logger.info(
+            "user_token_verified",
+            extra={"alias": entry.alias, "auth_method": method.id, "status": status},
+        )
+        expected = verify.expect_status
+        accepted = status == expected if expected is not None else 200 <= status < 300
+        if not accepted:
+            if status in (401, 403):
+                raise UserTokenRejected("целевая система не приняла токен")
+            raise UpstreamUnavailable(f"целевая система ответила {status}")
+        if not verify.account_field:
+            return None
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise UpstreamUnavailable("целевая система вернула не JSON") from exc
+        if not isinstance(payload, dict):
+            raise UpstreamUnavailable("целевая система вернула не JSON-объект")
+        value = payload.get(verify.account_field)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        return None
+
+    async def save_user_token(
+        self, connection: Connection, token: str, *, token_type: str = "Bearer"
+    ) -> None:
+        """Сохранить пользовательский токен (R-U4): без refresh-токена и без срока действия."""
+        await self.save_tokens(
+            connection,
+            UpstreamTokens(
+                access_token=token,
+                refresh_token=None,
+                expires_in=None,
+                token_type=token_type,
+                scopes=[],
+            ),
+        )
 
     # --- подключения и кэш (R-O12, R-B3) ------------------------------------
 
@@ -289,6 +379,8 @@ class TokenBroker:
             # чтобы горячий путь /mcp/{alias} не ходил в БД (R-O12).
             "access_token_enc": access_token_enc,
             "needs_reauth_reason": conn.needs_reauth_reason,
+            # R-U6: способ подключения определяет ветку обработки 401 от целевой системы.
+            "auth_method": conn.auth_method,
         }
         await self.kv.set(
             self.cache_key(user_id, alias), state, ttl=self.settings.connection_cache_ttl
@@ -306,6 +398,8 @@ class TokenBroker:
         needs_reauth_reason: str | None = None,
         clear_reason: bool = False,
         provider_account: str | None = None,
+        auth_method: str | None = None,
+        clear_auth_method: bool = False,
     ) -> Connection:
         """Создать/обновить подключение с инкрементом ``revision`` и сбросом кэша (R-M3)."""
         await self.db.init()
@@ -342,6 +436,10 @@ class TokenBroker:
                 conn.needs_reauth_reason = None
             if provider_account:
                 conn.provider_account = provider_account
+            if auth_method is not None:
+                conn.auth_method = auth_method
+            elif clear_auth_method:
+                conn.auth_method = None
             conn.revision = int(conn.revision or 0) + 1
             conn.updated_at = now
             await session.flush()
@@ -665,6 +763,7 @@ __all__ = [
     "REASON_NO_REFRESH",
     "REASON_REFRESH_FAILED",
     "REASON_SCOPE_UPGRADE",
+    "REASON_TOKEN_REJECTED",
     "REFRESH_LOCK_PREFIX",
     "STATUS_CONNECTED",
     "STATUS_NEEDS_REAUTH",
@@ -676,5 +775,7 @@ __all__ = [
     "TokenRefresher",
     "UpstreamAuthFailed",
     "UpstreamTokens",
+    "UpstreamUnavailable",
+    "UserTokenRejected",
     "token_valid",
 ]

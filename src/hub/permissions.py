@@ -156,8 +156,14 @@ def tool_filter(entry: ServerEntry, preset: str, groups: list[str]) -> ToolFilte
     )
 
 
-def preset_requires_reauth(current: str | None, requested: str) -> bool:
-    """``readonly → readwrite`` требует повторной авторизации в целевой системе (R-B7)."""
+def preset_requires_reauth(current: str | None, requested: str, *, user_token: bool = False) -> bool:
+    """``readonly → readwrite`` требует повторной авторизации в целевой системе (R-B7).
+
+    Для подключений способом ``user_token`` — никогда: scope целевой системы в этом способе
+    не участвует, расширение прав применяется сразу (R-U7, решение 68).
+    """
+    if user_token:
+        return False
     return requested == "readwrite" and (current or "readonly") != "readwrite"
 
 

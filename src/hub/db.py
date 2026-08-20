@@ -86,6 +86,8 @@ class Connection(Base):
     last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     provider_account: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # --- I-4 (R-U4, решение 70): id способа подключения из auth_methods каталога ---
+    auth_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AuditLog(Base):

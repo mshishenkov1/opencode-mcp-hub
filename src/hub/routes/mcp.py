@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from hub.broker import (
     REASON_REFRESH_FAILED,
+    REASON_TOKEN_REJECTED,
     STATUS_CONNECTED,
     STATUS_NEEDS_REAUTH,
     NeedsReauth,
@@ -421,16 +422,21 @@ async def _send(
         )
         response = await _open_upstream(ctx, method, headers, content)
         status = response.status_code
-        if status == 401 and not token_refreshed:
+        # R-U6: у подключения user_token обновлять нечего — 401 сразу переводит в needs_reauth,
+        # без force_refresh и без повтора запроса.
+        user_token = ctx.entry.uses_user_token(ctx.state_record.get("auth_method"))
+        if status == 401 and not token_refreshed and not user_token:
             await response.aclose()
             token_refreshed = True
             access_token = await _access_token(ctx, force_refresh=True)
             continue
-        if status == 401 and token_refreshed:
+        if status == 401:
             await response.aclose()
             connection = await state.broker.load_connection(ctx.user_id, ctx.alias)
             if connection is not None:
-                await state.broker.mark_needs_reauth(connection, REASON_REFRESH_FAILED)
+                await state.broker.mark_needs_reauth(
+                    connection, REASON_TOKEN_REJECTED if user_token else REASON_REFRESH_FAILED
+                )
             raise ProxyError(
                 status_code=200,
                 code=CODE_CONNECTION,
