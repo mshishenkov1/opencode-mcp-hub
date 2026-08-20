@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -432,7 +433,7 @@ def test_head_revision_is_i3() -> None:
     chain = [rev.revision for rev in script.walk_revisions()][::-1]
     assert chain == ["0001_i1_base", "0002_i3_oauth", "0003_i4_user_token"]
     assert chain[0] == BASE_REVISION and chain[-1] == head_revision()
-    for previous, current in zip(chain, chain[1:], strict=False):
+    for previous, current in itertools.pairwise(chain):
         assert script.get_revision(current).down_revision == previous
 
 
