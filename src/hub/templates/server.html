@@ -10,7 +10,70 @@
   <p>Адрес для MCP-клиента: <code>{{ server.mcp_url }}</code></p>
   <p>Статус подключения: <span class="status">{{ status_title }}</span></p>
   {% if needs_reauth_reason %}<p class="muted">{{ needs_reauth_reason }}</p>{% endif %}
+  {% if connected_method and connection_status == 'connected' %}
+  <p>Способ подключения: <span class="auth-method">{{ connected_method.title }}</span></p>
+  {% if account %}<p>Учётная запись: <span class="account">{{ account }}</span></p>{% endif %}
+  {% endif %}
 </div>
+{% if auth_methods %}
+<div class="card" id="connect">
+  <h2>Подключение</h2>
+  {% if connection_status == 'needs_reauth' and token_method %}
+  <p class="muted">Токен больше не действует — введите новый токен.</p>
+  {% endif %}
+  {% if token_method %}
+  <form id="connect-token" hx-post="/api/me/connections/{{ server.alias }}/token"
+        hx-ext="json-enc" hx-target="#connect-result" hx-swap="innerHTML" autocomplete="off">
+    {% if auth_methods|length > 1 %}
+    <fieldset id="auth-methods">
+      <legend>Способ подключения</legend>
+      {% for method in auth_methods %}
+      <label{% if not method.available %} class="muted"{% endif %}>
+        <input type="radio" name="method" value="{{ method.id }}"
+               {% if not method.available %}disabled{% endif %}
+               {% if method.id == default_method_id %}checked{% endif %}>
+        {{ method.title }}
+        {% if not method.available and method.unavailable_reason %}
+        — <span class="unavailable">{{ method.unavailable_reason }}</span>
+        {% endif %}
+      </label>
+      {% endfor %}
+    </fieldset>
+    {% endif %}{# способ ровно один — выбор не показывается, Hub определяет его сам (R-U8) #}
+    <label for="token-value">{{ token_method.field.label }}</label>
+    <input id="token-value" name="token" value="" autocomplete="off"
+           type="{% if token_method.field.secret %}password{% else %}text{% endif %}"
+           minlength="{{ token_method.field.min_length }}"
+           maxlength="{{ token_method.field.max_length }}"
+           {% if token_method.field.placeholder %}placeholder="{{ token_method.field.placeholder }}"{% endif %}
+           required>
+    {% if token_method.field.hint %}<p class="muted hint">{{ token_method.field.hint }}</p>{% endif %}
+    {% if token_method.field.docs_url %}
+    <p><a href="{{ token_method.field.docs_url }}">Где взять токен</a></p>
+    {% endif %}
+    <div class="actions">
+      <button class="primary" type="submit">
+        {% if connection_status == 'connected' %}Заменить токен{% else %}Подключить{% endif %}
+      </button>
+      {% if connection_status != 'not_connected' %}
+      <button type="button" hx-delete="/api/me/connections/{{ server.alias }}"
+              hx-target="#connect-result" hx-swap="innerHTML">Отключить</button>
+      {% endif %}
+    </div>
+  </form>
+  <div id="connect-result" class="muted"></div>
+  {% elif oauth_method %}
+  <div class="actions">
+    <a class="btn" href="/oauth/connect/{{ server.alias }}">Подключить</a>
+  </div>
+  {% endif %}
+  {% if not token_method %}
+  {% for method in auth_methods if not method.available %}
+  <p class="muted">{{ method.title }} — <span class="unavailable">{{ method.unavailable_reason }}</span></p>
+  {% endfor %}
+  {% endif %}
+</div>
+{% endif %}
 <div class="card">
   <h2>Права доступа</h2>
   <form id="permissions" hx-put="/api/me/connections/{{ server.alias }}/permissions"

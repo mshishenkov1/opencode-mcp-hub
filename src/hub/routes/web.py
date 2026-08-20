@@ -301,6 +301,11 @@ async def ui_connections(request: Request) -> Response:
     items = []
     for entry in state.catalog.visible_for(groups):
         conn = connections.get(entry.alias)
+        method = (
+            entry.auth_method(conn.auth_method)
+            if conn is not None and conn.status in ("connected", "needs_reauth")
+            else None
+        )
         items.append(
             {
                 "alias": entry.alias,
@@ -310,6 +315,8 @@ async def ui_connections(request: Request) -> Response:
                 "status_title": status_title(conn.status if conn else None),
                 "preset_title": preset_title(conn.preset if conn else None),
                 "group_titles": group_titles(entry, list(conn.groups or [])) if conn else [],
+                # R-U8: «Мои подключения» дополнительно показывают способ подключения.
+                "auth_method_title": method.title if method is not None else None,
             }
         )
     return state.templates.page("connections.html", items=items, user_id=info.user_id)
@@ -339,6 +346,20 @@ async def ui_server(alias: str, request: Request) -> Response:
     always, selectable = group_definitions(entry)
     view = entry.public_view(state.settings.public_url)
     view.pop("permission_model", None)
+    # R-U8: способы подключения без секретов; поле ввода никогда не предзаполняется.
+    methods = entry.public_auth_methods()
+    status = conn.status if conn else "not_connected"
+    connected_id = conn.auth_method if conn else None
+    connected_method = next((m for m in methods if m["id"] == connected_id), None)
+    token_method = next(
+        (m for m in methods if m["type"] == "user_token" and m["available"]), None
+    )
+    oauth_method = next((m for m in methods if m["type"] == "oauth2" and m["available"]), None)
+    default_method_id = (
+        connected_id
+        if connected_method is not None and connected_method["available"]
+        else (token_method or oauth_method or {}).get("id")
+    )
     return state.templates.page(
         "server.html",
         server=view,
@@ -348,4 +369,11 @@ async def ui_server(alias: str, request: Request) -> Response:
         selected=set(conn.groups or []) if conn else set(),
         always_groups=always,
         groups=selectable,
+        connection_status=status,
+        auth_methods=methods,
+        token_method=token_method,
+        oauth_method=oauth_method,
+        connected_method=connected_method,
+        default_method_id=default_method_id,
+        account=conn.provider_account if conn else None,
     )

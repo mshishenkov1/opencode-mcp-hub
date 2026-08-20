@@ -8,6 +8,9 @@
   <h2><a href="/ui/servers/{{ item.alias }}">{{ item.title }}</a></h2>
   <p class="muted">{{ item.description }}</p>
   <p>Статус: <span class="status">{{ item.status_title }}</span></p>
+  {% if item.auth_method_title %}
+  <p>Способ подключения: <span class="auth-method">{{ item.auth_method_title }}</span></p>
+  {% endif %}
   {% if item.preset_title %}<p>Уровень доступа: {{ item.preset_title }}</p>{% endif %}
   {% if item.group_titles %}<p>Группы: {{ item.group_titles|join(', ') }}</p>{% endif %}
   <div class="actions">
