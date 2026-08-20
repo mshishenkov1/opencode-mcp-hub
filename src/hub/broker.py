@@ -24,7 +24,7 @@ from hub.crypto import TokenCipher, code_challenge_s256
 from hub.db import Connection, Database, UpstreamToken, to_naive_utc, utcnow
 from hub.kv import KeyValueStore
 from hub.metrics import Metrics
-from hub.proxy import resolve_header_value
+from hub.proxy import HeaderValueError, resolve_header_value
 from hub.settings import Settings
 
 logger = logging.getLogger("hub.broker")
@@ -271,10 +271,19 @@ class TokenBroker:
         """
         verify = method.verify
         environ = self._catalog_env()
-        headers = {
-            name: resolve_header_value(value, environ, token)
-            for name, value in verify.headers.items()
-        }
+        try:
+            headers = {
+                name: resolve_header_value(value, environ, token)
+                for name, value in verify.headers.items()
+            }
+        except HeaderValueError as exc:
+            # BUG-I4-005: непригодное как заголовок значение отвергается здесь же, до сети;
+            # штатный путь отсекает такой токен раньше — проверкой тела запроса (R-U4).
+            logger.info(
+                "user_token_unusable_as_header",
+                extra={"alias": entry.alias, "auth_method": method.id},
+            )
+            raise UserTokenRejected("значение непригодно как значение HTTP-заголовка") from exc
         try:
             response = await self._http().request(
                 verify.method, verify.url, headers=headers, timeout=self.settings.upstream_timeout

@@ -41,6 +41,7 @@ from hub.proxy import (
     RATE_WINDOW,
     SESSION_HEADER,
     SSE_CONTENT_TYPE,
+    HeaderValueError,
     McpSession,
     ProxyError,
     SseFilter,
@@ -308,15 +309,27 @@ async def _access_token(ctx: ProxyContext, *, force_refresh: bool = False) -> st
 
 
 def _headers_for(ctx: ProxyContext, access_token: str, upstream_session_id: str | None) -> dict[str, str]:
-    return upstream_headers(
-        ctx.entry,
-        client_headers=httpx.Headers(ctx.request.headers.raw),
-        access_token=access_token,
-        preset=str(ctx.state_record.get("preset") or "readonly"),
-        groups=list(ctx.state_record.get("groups") or []),
-        environ=ctx.request.app.state.catalog_env,
-        upstream_session_id=upstream_session_id,
-    )
+    try:
+        return upstream_headers(
+            ctx.entry,
+            client_headers=httpx.Headers(ctx.request.headers.raw),
+            access_token=access_token,
+            preset=str(ctx.state_record.get("preset") or "readonly"),
+            groups=list(ctx.state_record.get("groups") or []),
+            environ=ctx.request.app.state.catalog_env,
+            upstream_session_id=upstream_session_id,
+        )
+    except HeaderValueError as exc:
+        # BUG-I4-005: сохранённое значение непригодно как заголовок (токен принят до появления
+        # проверки R-U2 либо значение пришло из каталога) — просим переподключиться, а не падаем
+        # 500 при кодировании заголовков. Само значение в журнал не попадает (R-U9).
+        logger.info("upstream_header_unusable", extra={"alias": ctx.alias})
+        raise ProxyError(
+            status_code=200,
+            code=CODE_CONNECTION,
+            message=MSG_NEEDS_REAUTH,
+            data={"reason": REASON_NEEDS_REAUTH, "hint_url": _hint_url(ctx.request, ctx.alias)},
+        ) from exc
 
 
 def _upstream_error(ctx: ProxyContext, kind: str) -> ProxyError:

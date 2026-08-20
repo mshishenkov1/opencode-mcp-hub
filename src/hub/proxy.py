@@ -385,11 +385,42 @@ class SessionStore:
         return result
 
 
+class HeaderValueError(ValueError):
+    """Значение непригодно как значение HTTP-заголовка (R-P2, R-U2)."""
+
+
+def is_header_safe(value: str) -> bool:
+    """Пригодно ли значение для HTTP-заголовка: только печатные ASCII ``0x20..0x7E``.
+
+    Границы выбраны так (BUG-I4-005):
+
+    * не-ASCII (``> 0x7E``) — заголовки кодируются в ASCII/latin-1, кириллица из буфера обмена
+      роняет запрос ``UnicodeEncodeError``; obs-text (0x80..0xFF) RFC 9110 §5.5 объявляет
+      устаревшим, договориться о кодировке с целевой системой всё равно нельзя;
+    * управляющие символы (``< 0x20`` и ``0x7F``) — RFC 9110 запрещает их в field-value;
+      CR и LF отсекаются в первую очередь: перевод строки в значении позволяет дописать
+      посторонний заголовок к запросу Hub (header injection);
+    * табуляция (``0x09``) формально допустима, но осмысленных токенов с ней не бывает,
+      а получатель волен свернуть её по obs-fold — не пропускаем.
+
+    Пробел внутри значения разрешён: он встречается в штатных схемах (``Bearer <token>``).
+    """
+    return all("\x20" <= char <= "\x7e" for char in value)
+
+
 def resolve_header_value(value: str | EnvRef, environ: Any, access_token: str) -> str:
-    """``env:VAR`` → значение переменной; ``{{access_token}}`` → токен целевой системы (R-P2)."""
+    """``env:VAR`` → значение переменной; ``{{access_token}}`` → токен целевой системы (R-P2).
+
+    Значение, непригодное как заголовок, наружу не отдаётся: вызывающий обязан превратить
+    ``HeaderValueError`` во внятный отказ, а не в 500 при кодировании заголовков (R-U2).
+    """
     if isinstance(value, EnvRef):
-        return value.get(environ) or ""
-    return value.replace("{{access_token}}", access_token)
+        resolved = value.get(environ) or ""
+    else:
+        resolved = value.replace("{{access_token}}", access_token)
+    if not is_header_safe(resolved):
+        raise HeaderValueError("значение непригодно как значение HTTP-заголовка")
+    return resolved
 
 
 def upstream_headers(
@@ -591,6 +622,7 @@ __all__ = [
     "TOOLS_CACHE_PREFIX",
     "BreakerDecision",
     "CircuitBreaker",
+    "HeaderValueError",
     "McpSession",
     "ProxyError",
     "SessionStore",
@@ -600,6 +632,7 @@ __all__ = [
     "build_metrics_recorder",
     "filter_tools_payload",
     "first_request_id",
+    "is_header_safe",
     "iter_upstream_body",
     "jsonrpc_error",
     "jsonrpc_methods",

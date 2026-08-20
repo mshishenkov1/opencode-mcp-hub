@@ -28,7 +28,7 @@ from hub.permissions import (
     preset_requires_reauth,
     unknown_groups,
 )
-from hub.proxy import TOOLS_CACHE_PREFIX
+from hub.proxy import TOOLS_CACHE_PREFIX, is_header_safe
 
 router = APIRouter(tags=["api"])
 
@@ -185,6 +185,15 @@ def _validated_token(method: AuthUserToken, payload: dict[str, Any]) -> str:
     if len(token) > field.max_length:
         raise HubError(
             400, "invalid_request", f"token: значение длиннее {field.max_length} символов"
+        )
+    # BUG-I4-005: значение уходит в заголовок проверочного запроса (R-U2, R-U3), поэтому пригодность
+    # для заголовка — такая же проверка тела, как длина, и выполняется до обращения в сеть (R-U4).
+    if not is_header_safe(token):
+        raise HubError(
+            400,
+            "invalid_request",
+            "token: значение содержит символы, недопустимые в HTTP-заголовке "
+            "(нужны печатные ASCII без переводов строки)",
         )
     return token
 
