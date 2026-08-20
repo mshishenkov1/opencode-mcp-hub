@@ -753,7 +753,7 @@ criteria:
     text: "deploy/.env.example содержит все новые переменные"
     given: "файл deploy/.env.example"
     when: "файл читается и сравнивается с таблицей настроек spec.md §10 (R-T1)"
-    then: "для каждой переменной таблицы (HUB_WEB_AUTH, HUB_CONSENT, HUB_OAUTH_ALLOWED_REDIRECTS, HUB_ACCESS_TOKEN_TTL, HUB_REFRESH_TOKEN_TTL, HUB_AUTH_CODE_TTL, HUB_OAUTH_TX_TTL, HUB_WEB_SESSION_TTL, HUB_RATE_LIMIT_REGISTER, HUB_RATE_LIMIT_TOKEN, HUB_RATE_LIMIT_MCP, HUB_TRUST_PROXY, HUB_MAX_SSE_PER_USER, HUB_MAX_BODY_BYTES, HUB_UPSTREAM_TIMEOUT, HUB_UPSTREAM_SSE_IDLE_TIMEOUT, HUB_UPSTREAM_IDLE_TTL, HUB_CLIENT_SESSION_TTL, HUB_TOOLS_CACHE_TTL, HUB_TOKEN_REFRESH_LEAD, HUB_TOKEN_REFRESH_INTERVAL, HUB_TOKEN_REFRESH_ENABLED, HUB_CB_FAILURES, HUB_CB_RESET, HUB_CONNECTION_CACHE_TTL, HUB_DB_AUTO_MIGRATE, KEYCLOAK_ISSUER, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET, KEYCLOAK_SCOPES, KEYCLOAK_JWKS_TTL) в файле есть строка с этим именем; значения секретов пусты или равны change-me"
+    then: "для каждой переменной таблицы (HUB_WEB_AUTH, HUB_CONSENT, HUB_OAUTH_ALLOWED_REDIRECTS, HUB_ACCESS_TOKEN_TTL, HUB_REFRESH_TOKEN_TTL, HUB_AUTH_CODE_TTL, HUB_OAUTH_TX_TTL, HUB_WEB_SESSION_TTL, HUB_RATE_LIMIT_REGISTER, HUB_RATE_LIMIT_TOKEN, HUB_RATE_LIMIT_MCP, HUB_TRUST_PROXY, HUB_MAX_SSE_PER_USER, HUB_MAX_BODY_BYTES, HUB_UPSTREAM_TIMEOUT, HUB_UPSTREAM_SSE_IDLE_TIMEOUT, HUB_UPSTREAM_IDLE_TTL, HUB_CLIENT_SESSION_TTL, HUB_TOOLS_CACHE_TTL, HUB_TOKEN_REFRESH_LEAD, HUB_TOKEN_REFRESH_INTERVAL, HUB_TOKEN_REFRESH_ENABLED, HUB_CB_FAILURES, HUB_CB_RESET, HUB_CB_PROBE_GRACE, HUB_CONNECTION_CACHE_TTL, HUB_DB_AUTO_MIGRATE, KEYCLOAK_ISSUER, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET, KEYCLOAK_SCOPES, KEYCLOAK_JWKS_TTL) в файле есть строка с этим именем; значения секретов пусты или равны change-me"
   - id: AC-146
     text: "Тесты не обращаются к сети, нагрузочный smoke вынесен в отдельный маркер"
     given: "полный прогон тестов ревизии 2"
@@ -812,3 +812,64 @@ criteria:
     given: "перехват логов приложения; окружение из четырёх обязательных переменных I-1"
     when: "create_app() без HUB_REDIS_URL; затем create_app() с заданным HUB_REDIS_URL; отдельно — применение миграций при HUB_DB_AUTO_MIGRATE=true на подключении PostgreSQL (перехват выполняемых SQL) и на SQLite"
     then: "в первом случае в логах есть запись уровня WARNING, содержащая 'HUB_REDIS_URL' и пояснение, что реплики не делят состояние (denylist, MCP-сессии, окна rate-limit, circuit-breaker); приложение при этом создаётся и обслуживает запросы; во втором случае такой записи нет; на PostgreSQL до применения ревизий выполняется pg_advisory_xact_lock, на SQLite блокировка не запрашивается и миграции проходят как прежде (AC-138/AC-142 не изменились)"
+  # --- Ревизия 2.2: бэклог Hub H5-1…H5-4 (перенос HAC-01…HAC-12) ---
+  - id: AC-157
+    text: "Пока пробный запрос half-open не завершён, право на пробу второй раз не выдаётся (HAC-01, R-P10)"
+    given: "выключатель alias открыт, HUB_CB_RESET=30, HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300; окно истекло и первый запрос захватил право на пробу, ответ upstream ещё не получен"
+    when: "часы сдвинуты на 60 секунд вперёд и приходит новый запрос"
+    then: "право на пробу второй раз не выдаётся: запрос получает 503 с JSON-RPC -32004 upstream_unavailable и заголовком Retry-After, upstream не вызывается"
+  - id: AC-158
+    text: "TTL права на пробу равен max(HUB_CB_RESET, HUB_UPSTREAM_TIMEOUT, HUB_UPSTREAM_SSE_IDLE_TIMEOUT) + HUB_CB_PROBE_GRACE (HAC-02, R-P10)"
+    given: "HUB_CB_RESET=30, HUB_UPSTREAM_TIMEOUT=30, HUB_UPSTREAM_SSE_IDLE_TIMEOUT=300, HUB_CB_PROBE_GRACE=5"
+    when: "право на пробу захвачено"
+    then: "TTL ключа cb:<alias>:probe равен 305 секундам, значение until равно now+305; Retry-After отказов в half-open вычисляется от этого until и не меньше 1 секунды"
+  - id: AC-159
+    text: "Успешная проба снимает право немедленно и закрывает выключатель (HAC-03, R-P10)"
+    given: "выключатель в half-open, проба выполняется"
+    when: "проба завершилась успешно"
+    then: "ключ cb:<alias>:probe удалён немедленно (не по TTL), состояние cb:<alias> равно {failures: 0, open_until: 0.0}, следующий запрос идёт на upstream без задержки"
+  - id: AC-160
+    text: "Невалидный левый элемент X-Forwarded-For отбрасывается, ключ лимита берётся от адреса соединения (HAC-04, R-T5)"
+    given: "HUB_TRUST_PROXY=true, соединение с адресом 10.0.0.7"
+    when: "приходит запрос на /oauth/register с заголовком X-Forwarded-For 'not-an-ip, 10.1.1.1'"
+    then: "ключ rate-limit равен rl:register:10.0.0.7 — значение заголовка отброшено"
+  - id: AC-161
+    text: "Слишком длинный X-Forwarded-For отбрасывается без попытки разбора (HAC-05, R-T5)"
+    given: "HUB_TRUST_PROXY=true, соединение с адресом 10.0.0.7"
+    when: "приходит запрос с X-Forwarded-For длиной 4096 символов"
+    then: "значение отброшено без попытки разбора, ключ равен rl:register:10.0.0.7; в KV не появляется ключей длиннее ожидаемого"
+  - id: AC-162
+    text: "Валидные IPv4/IPv6 (в т.ч. с портом и в скобках) дают нормализованный IP в ключе лимита (HAC-06, R-T5)"
+    given: "HUB_TRUST_PROXY=true"
+    when: "приходят запросы с X-Forwarded-For '203.0.113.5', '[2001:db8::1]:443' и '2001:db8::1'"
+    then: "во всех трёх случаях ключ содержит нормализованный IP-адрес клиента, а не адрес соединения"
+  - id: AC-163
+    text: "Отклонённое значение X-Forwarded-For не попадает в журнал и audit_log (HAC-07, R-T5, R-T4)"
+    given: "HUB_TRUST_PROXY=true и заведомо мусорный X-Forwarded-For"
+    when: "запрос обработан и прочитаны записи журнала"
+    then: "есть запись уровня WARNING о непринятом заголовке, само значение в журнал не попало (в тексте записи его нет), в audit_log значения тоже нет"
+  - id: AC-164
+    text: "При HUB_TRUST_PROXY=false заголовок игнорируется полностью (HAC-08, R-T5)"
+    given: "HUB_TRUST_PROXY=false (по умолчанию), соединение с адресом 10.0.0.7"
+    when: "приходит запрос с X-Forwarded-For '203.0.113.5'"
+    then: "ключ равен rl:register:10.0.0.7 — поведение по умолчанию не изменилось"
+  - id: AC-165
+    text: "В закрытом состоянии успешный запрос не делает удалений в KV (HAC-09, R-P10)"
+    given: "выключатель закрыт, счётчик операций фейкового KV обнулён"
+    when: "успешно проксирован один запрос"
+    then: "в KV выполнена ровно одна операция записи состояния cb:<alias> и ноль операций удаления; ответ клиенту не изменился"
+  - id: AC-166
+    text: "После успешной пробы обычные запросы не обращаются к KV за удалением права (HAC-10, R-P10)"
+    given: "HUB_CB_FAILURES подряд идущих ошибок перевели выключатель в открытое состояние"
+    when: "после истечения окна проба завершилась успешно и затем прошли ещё два обычных запроса"
+    then: "выключатель закрыт, ключ пробы отсутствует, на два последующих запроса пришлось ноль операций удаления в KV"
+  - id: AC-167
+    text: "Провал пробы оставляет состояние {failures: HUB_CB_FAILURES, open_until: now + HUB_CB_RESET} (HAC-11, R-P10)"
+    given: "выключатель в half-open, право на пробу захвачено"
+    when: "пробный запрос завершился ошибкой 502"
+    then: "состояние cb:<alias> равно {failures: HUB_CB_FAILURES, open_until: now + HUB_CB_RESET}, ключ пробы удалён, следующий запрос получает 503 с -32004"
+  - id: AC-168
+    text: "Наблюдаемое поведение R-P10 не изменилось: прежние критерии circuit-breaker проходят без правок ожиданий (HAC-12, R-P10)"
+    given: "набор тестов Hub на circuit-breaker (в т.ч. проверяющий AC-151 и AC-152)"
+    when: "применено изменение записи состояния в ветке повторного открытия окна и прогнаны тесты"
+    then: "все тесты проходят без правок ожиданий — наблюдаемое поведение R-P10 не изменилось; мутация «failures = 0 в ветке повторного открытия» валит тест AC-151"
