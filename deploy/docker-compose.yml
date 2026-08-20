@@ -53,13 +53,15 @@ services:
       timeout: 3s
       retries: 10
 
-  # Эталонный нативный OAuth MCP-сервер ТЭГ (magnit-tag-mcp, режим MM_HTTP_AUTH=oauth).
+  # MCP-сервер ТЭГ (magnit-tag-mcp). Режим авторизации задаётся TAG_MCP_AUTH_MODE.
   tag-mcp:
     image: ${TAG_MCP_IMAGE:-ghcr.io/mshishenkov1/magnit-tag-mcp:dev}
     env_file: [.env]
     environment:
       MM_URL: ${MM_URL:-https://tag.magnit.ru}
-      MM_HTTP_AUTH: oauth
+      # oauth — нативная MCP-авторизация (нужно OAuth-приложение ТЭГ);
+      # passthrough — каждый клиент присылает свой токен, Hub подставляет его при проксировании
+      MM_HTTP_AUTH: ${TAG_MCP_AUTH_MODE:-passthrough}
       TAG_MCP_PUBLIC_URL: ${TAG_MCP_PUBLIC_URL:-https://localhost:8443/tag}
       TAG_MCP_REDIS_URL: redis://redis:6379/1
       SSL_CERT_FILE: /etc/ssl/certs/tander-ca-bundle.pem
