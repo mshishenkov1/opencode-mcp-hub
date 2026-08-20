@@ -1,0 +1,26 @@
+{
+  "dispute": "disputes/test-dispute-I5-ac145-app-name-space.json",
+  "subject": "AC-145 против N5-P3/N5-P4 в части пробела в artifacts[].app_name",
+  "resolved_by": "test-agent",
+  "date": "2026-08-21",
+  "verdict": "dev-agent прав; претензия принята",
+  "reasoning": [
+    "N5-P3 и N5-P4 ревизии 1.5 прямо разрешают пробел U+0020 в app_name, если он не первый и не последний символ; для ca.install_name и artifacts[].install_name пробел запрещён.",
+    "На этом разрешении держатся AC-62, AC-64, AC-138 и AC-154 со штатным именем «OpenCode Magnit.app». Тест, написанный по букве AC-145 с единым перечнем значений, требовал бы одновременно отвергать и принимать пробел в app_name.",
+    "Реализация (is_safe_app_name в installers/common/install-posix.sh, Test-AppName в installers/windows/install.ps1) следует N5-P3/N5-P4: 'a b.pem' принимается, ' a.pem' и 'a.pem ' отвергаются. Расхождения реализации с правилами нет — расхождение в формулировке AC-145."
+  ],
+  "resolution": [
+    "Перечни значений в тестах AC-145 разведены по полям: для ca.install_name и artifacts[].install_name — все семь значений AC-145, включая 'a b.pem'; для artifacts[].app_name — те же метасимволы, но вместо внутреннего пробела проверяются КРАЕВЫЕ: ' a.app' и 'a.app '.",
+    "Добавлен явный контрольный тест «пробел ВНУТРИ app_name допустим»: штатное «OpenCode Magnit.app» принимается, а 'tander ca.pem' в ca.install_name отвергается кодом 2 — различие полей проверяется наблюдаемо, а не читается из комментария.",
+    "Формулировку AC-145 при следующей ревизии спецификации уточнить: «для artifacts[].app_name вместо 'a b.pem' проверяются ' a.pem' и 'a.pem '»."
+  ],
+  "tests": [
+    "installers/tests/bats/55-injection.bats::AC-145: метасимвол в ca.install_name → код 2 во всех шести режимах, канареек нет",
+    "installers/tests/bats/55-injection.bats::AC-145: метасимвол в artifacts[].install_name → код 2 во всех шести режимах, канареек нет",
+    "installers/tests/bats/55-injection.bats::AC-145: метасимвол и краевой пробел в artifacts[].app_name → код 2 во всех шести режимах",
+    "installers/tests/bats/55-injection.bats::AC-145: пробел ВНУТРИ app_name допустим — «OpenCode Magnit.app» принимается (N5-P3, N5-P4)",
+    "installers/tests/pester/DesktopEntry.Tests.ps1::AC-139: Test-AppName — таблица допустимых и запрещённых значений"
+  ],
+  "side_finding": "При разборе перечня AC-145 обнаружен отдельный дефект, к диспуту не относящийся: значение 'a\\tb.app' (JSON-экранированная табуляция) принимается кодом 0, потому что парсер манифеста молча заменяет управляющие символы пробелом. Оформлено как bugs/BUG-I5-003.json.",
+  "status": "resolved"
+}
