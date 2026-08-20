@@ -44,20 +44,84 @@ jobs:
       - name: Прогон bats
         run: bats installers/tests/bats
 
-  # required: true — тесты install.ps1 на pwsh без Windows-реестра
+  # required: true — тесты install.ps1 на обеих платформах.
+  #
+  # Зачем матрица (AC-143, часть AC-136/139/140). На ubuntu-latest '\' — обычный символ имени
+  # файла: схлопывание форм вида '%USERPROFILE%\.' выполняет только Windows-реализация
+  # [IO.Path]::GetFullPath. Поэтому буквальные варианты с обратным слэшем в
+  # installers/tests/pester/PathSafety.Tests.ps1 на не-Windows помечаются Set-ItResult -Skipped,
+  # и Windows-ветка требований автоматикой не подтверждалась (reports/test-report-i5.md §10.5).
+  # windows-latest закрывает эту дыру верификации.
+  #
+  # Две оболочки на Windows: встроенный Windows PowerShell 5.1 — целевая версия install.ps1
+  # (#Requires -Version 5.1, N5-T5), pwsh 7 — среда, в которой набор гоняется на Linux.
+  # Расхождение между ними ловится до пользователя.
   pester:
-    name: pester (ubuntu-latest, pwsh)
-    runs-on: ubuntu-latest
+    name: pester (${{ matrix.os }}, ${{ matrix.shell }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: pwsh
+            forbid_skips: 'false'
+          # powershell — встроенный Windows PowerShell 5.1 хостед-раннера
+          - os: windows-latest
+            shell: powershell
+            forbid_skips: 'true'
+          # pwsh — PowerShell 7, предустановлен на том же раннере
+          - os: windows-latest
+            shell: pwsh
+            forbid_skips: 'true'
     steps:
-      - uses: actions/checkout@v4
-      - name: Установить Pester
-        shell: pwsh
-        run: Install-Module -Name Pester -Force -Scope CurrentUser -SkipPublisherCheck
-      - name: Прогон Pester
-        shell: pwsh
+      # До checkout: на Windows-раннере git настроен с core.autocrlf=true и подменил бы LF на
+      # CRLF, а Encoding.Tests.ps1 (AC-134) требует *.sh без символов CR.
+      - name: Сохранить переводы строк как в репозитории
+        if: runner.os == 'Windows'
+        shell: bash
         run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+      - name: Версия оболочки
+        shell: ${{ matrix.shell }}
+        run: $PSVersionTable | Format-List | Out-String | Write-Output
+      - name: Установить Pester 5.x
+        shell: ${{ matrix.shell }}
+        run: |
+          if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            # Windows PowerShell 5.1: PSGallery отвечает только по TLS 1.2, а провайдера NuGet
+            # в чистом профиле пользователя нет.
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          }
+          Install-Module -Name Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 `
+            -Force -Scope CurrentUser -SkipPublisherCheck -AllowClobber
+      - name: Прогон Pester
+        shell: ${{ matrix.shell }}
+        run: |
+          # Явный импорт: в Windows PowerShell 5.1 рядом лежит встроенный Pester 3.4.0,
+          # синтаксис Invoke-Pester у которого несовместим с набором.
+          Import-Module -Name Pester -MinimumVersion 5.0.0 -Force
           $result = Invoke-Pester -Path installers/tests/pester -PassThru
+          "Pester $((Get-Module Pester).Version): passed=$($result.PassedCount) failed=$($result.FailedCount) skipped=$($result.SkippedCount)" | Write-Output
           if ($result.FailedCount -gt 0) { exit 1 }
+          # Пустой прогон (не нашлись файлы, оболочка не та) обязан быть красным, а не зелёным.
+          if ($result.PassedCount -lt 1) {
+            "Ни одного выполненного теста: путь installers/tests/pester не дал набора" | Write-Output
+            exit 1
+          }
+          # На Windows ветки с буквальным '\' обязаны выполняться, а не пропускаться —
+          # ради этого матрица и заведена (AC-143).
+          if ('${{ matrix.forbid_skips }}' -eq 'true' -and $result.SkippedCount -gt 0) {
+            foreach ($t in ($result.Tests | Where-Object { $_.Result -eq 'Skipped' })) {
+              "Пропущен на Windows-раннере: $($t.ExpandedPath)" | Write-Output
+            }
+            "На Windows пропусков быть не должно: Windows-ветка AC-143 обязана подтверждаться прогоном" | Write-Output
+            exit 1
+          }
 
   # required: true — статический анализ shell и PowerShell
   lint:
@@ -126,6 +190,8 @@ jobs:
           ( cd "$work/dist" && sha256sum -c SHA256SUMS )
 
   # Агрегирующее задание: удобно назначать единственным required-check для PR.
+  # needs по имени задания ждёт ВСЕ ветки его матрицы — обе площадки bats и все три прогона
+  # pester, — поэтому один этот чек покрывает и ubuntu, и macOS, и Windows.
   installers-required:
     name: installers-required
     runs-on: ubuntu-latest
