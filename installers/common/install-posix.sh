@@ -54,6 +54,7 @@ OM_CR=$'\r'
 
 # --- отчёт установки (N5-I12)
 MSG_DONE='Готово: OpenCode %s установлен.'
+MSG_SUM_USER='  Пользователь: %s (%s)'
 MSG_SUM_BIN='  Бинарник: %s'
 MSG_SUM_CA='  CA: %s'
 MSG_SUM_DESKTOP='  Desktop: %s'
@@ -171,6 +172,7 @@ MSG_ERR_ARCH_UNSUPPORTED='Неподдерживаемая архитектур�
 MSG_ERR_NO_WRITE='Нет прав на запись в каталог: %s'
 MSG_ERR_NO_WRITE_HINT='Запустите установщик от имени владельца каталога или укажите --prefix <каталог>'
 MSG_ERR_NEED_ROOT="нужны права root: запустите под root или без --system (установка в \$HOME/.local/bin)"
+MSG_ERR_NO_SOURCE_USER='--system: не удалось определить исходного пользователя (SUDO_USER и logname пусты) — запустите sudo ./install.sh --system от имени пользователя или установите без --system'
 MSG_ERR_PURGE_UNSAFE='Небезопасный путь в purge_paths: %s (допустимы только пути внутри домашнего каталога)'
 MSG_ERR_PURGE_REJECTED='Список purge_paths отвергнут целиком, ничего не удалено'
 MSG_ERR_PATH_UNSAFE='Небезопасный путь (%s): %s'
@@ -205,6 +207,13 @@ ca_target=""
 profile_file=""
 profile_is_fish=0
 use_sudo=0
+# Исходный пользователь и его дом (N5-I14). Значение по умолчанию — текущий процесс: при запуске
+# без --system правило ничего не меняет, и функции, вызываемые тестами по отдельности
+# (path_normalize, expand_user_path), ведут себя как прежде.
+src_user=""
+src_group=""
+user_home="${HOME:-}"
+need_chown=0
 plan_step=0
 check_diff=0
 desktop_summary=""
@@ -507,7 +516,8 @@ is_sha256() {
 # ведутся уже над её результатом, а не над исходным текстом.
 #
 # path_normalize <путь> [база]:
-#   - разворачивает ведущие "~" и "~/" в $HOME;
+#   - разворачивает ведущие "~" и "~/" в дом исходного пользователя ($HOME, а при --system —
+#     дом пользователя из SUDO_USER/logname, N5-I14);
 #   - относительный путь достраивает от «базы»; без базы относительный путь отвергается,
 #     то есть результат всегда абсолютный;
 #   - схлопывает повторяющиеся "/", отбрасывает сегменты "." и завершающие "/";
@@ -525,8 +535,8 @@ path_normalize() {
   esac
   tilde=$(printf '\176')
   case $p in
-    "$tilde") p=$HOME ;;
-    "$tilde/"*) p="$HOME/${p#"$tilde/"}" ;;
+    "$tilde") p=$user_home ;;
+    "$tilde/"*) p="$user_home/${p#"$tilde/"}" ;;
   esac
   case $p in
     /*) : ;;
@@ -892,8 +902,19 @@ verify_package() {
 # install_name из манифеста уже проверен is_safe_pkg_path, но подстановка в путь не должна
 # зависеть от того, что проверка выше сохранится в неизменном виде.
 compute_layout() {
-  local xdg_config prefix_dir
-  xdg_config=${XDG_CONFIG_HOME:-$HOME/.config}
+  local xdg_config prefix_dir home_norm xdg_norm
+  xdg_config=${XDG_CONFIG_HOME:-}
+  # При --system переменная окружения root не должна определять, куда встанет CA пользователя:
+  # XDG_CONFIG_HOME учитывается, только если после нормализации лежит СТРОГО внутри дома
+  # исходного пользователя (N5-I14). В остальных случаях — <дом>/.config.
+  if [ -n "$xdg_config" ] && [ "$need_chown" -eq 1 ]; then
+    if ! home_norm=$(path_normalize "$user_home") ||
+      ! xdg_norm=$(path_normalize "$xdg_config") ||
+      ! path_is_inside "$home_norm" "$xdg_norm"; then
+      xdg_config=''
+    fi
+  fi
+  [ -n "$xdg_config" ] || xdg_config="$user_home/.config"
   path_require "$xdg_config/opencode" "XDG_CONFIG_HOME"
   config_dir=$REPLY
   if [ -n "$opt_prefix" ]; then
@@ -905,7 +926,7 @@ compute_layout() {
   elif [ "$opt_system" -eq 1 ]; then
     bin_dir="/usr/local/bin"
   else
-    bin_dir="$HOME/.local/bin"
+    bin_dir="$user_home/.local/bin"
   fi
   path_require "$bin_dir" "каталог бинарника"
   bin_dir=$REPLY
@@ -917,19 +938,21 @@ compute_layout() {
   profile_file=$(profile_path)
 }
 
+# Файл профиля всегда принадлежит дому ИСХОДНОГО пользователя: при --system это не дом root
+# (N5-I14). Без --system $user_home и есть $HOME, поведение прежнее.
 profile_path() {
   local shell_name=${SHELL##*/}
   case $shell_name in
-    zsh) printf '%s/.zshrc' "$HOME" ;;
+    zsh) printf '%s/.zshrc' "$user_home" ;;
     bash)
       if [ "$platform" = "macos" ]; then
-        printf '%s/.bash_profile' "$HOME"
+        printf '%s/.bash_profile' "$user_home"
       else
-        printf '%s/.bashrc' "$HOME"
+        printf '%s/.bashrc' "$user_home"
       fi
       ;;
-    fish) printf '%s/.config/fish/conf.d/opencode-magnit.fish' "$HOME" ;;
-    *) printf '%s/.profile' "$HOME" ;;
+    fish) printf '%s/.config/fish/conf.d/opencode-magnit.fish' "$user_home" ;;
+    *) printf '%s/.profile' "$user_home" ;;
   esac
 }
 
@@ -1070,10 +1093,12 @@ profile_foreign_env_line() {
 apply_profile_block() {
   local with_path=$1
   local tmp_block tmp_new dir backup
+  # Каталог файла профиля (актуально для fish: ~/.config/fish/conf.d) создаётся как
+  # пользовательский — с владельцем исходного пользователя (N5-I14). Уже существующий каталог
+  # (для zsh/bash это сам домашний каталог) не трогается: менять владельца чужого каталога
+  # установщик не вправе.
   dir=$(dirname "$profile_file")
-  if [ ! -d "$dir" ]; then
-    mkdir -p "$dir"
-  fi
+  make_user_dir "$dir"
   tmp_block=$(mktemp "${TMPDIR:-/tmp}/opencode-block.XXXXXX")
   tmp_new=$(mktemp "${TMPDIR:-/tmp}/opencode-profile.XXXXXX")
   write_block_file "$tmp_block" "$with_path"
@@ -1116,9 +1141,13 @@ apply_profile_block() {
   backup="$profile_file$OM_PROFILE_BAK_SUFFIX"
   if [ -f "$profile_file" ] && ! profile_has_block "$profile_file" && [ ! -f "$backup" ]; then
     cp "$profile_file" "$backup"
+    chown_user_path "$backup"
     say "$MSG_PROFILE_BACKUP" "$backup"
   fi
+  # Права существующего файла профиля сохраняются (запись через cat в него же), у созданного —
+  # умолчание 0644; владелец при --system — исходный пользователь (N5-I14).
   cat "$tmp_new" >"$profile_file"
+  chown_user_path "$profile_file"
   rm -f "$tmp_block" "$tmp_new"
   say "$MSG_PROFILE_UPDATED" "$profile_file"
   if [ "$with_path" -eq 1 ]; then
@@ -1143,6 +1172,104 @@ remove_profile_block() {
   cat "$tmp_new" >"$profile_file"
   rm -f "$tmp_new"
   say "$MSG_UNINSTALL_REMOVED" "$OBJ_PROFILE" "$profile_file"
+}
+
+# =====================================================================================
+# Исходный пользователь и владелец пользовательской части (N5-I14)
+# =====================================================================================
+# --system означает «бинарник в системный каталог», а не «вся установка от имени root».
+# Пользовательская часть — CA, каталог конфига, файл профиля и резервные копии — относится к
+# дому ИСХОДНОГО пользователя (того, кто запустил установщик) и принадлежит ему. Опираться на
+# $HOME здесь нельзя: под sudo он указывает либо на /var/root (/root), либо на дом пользователя
+# — в зависимости от env_reset/env_keep, то есть значение недетерминированно.
+
+# Домашний каталог из базы пользователей: getent passwd (Linux) или dscl (macOS). Печатает путь;
+# код 1 — записи нет.
+user_home_from_db() {
+  local user=$1 line home=''
+  if command -v getent >/dev/null 2>&1; then
+    line=$(getent passwd "$user" 2>/dev/null) || line=''
+    if [ -n "$line" ]; then
+      home=$(printf '%s\n' "$line" | awk -F: 'NR == 1 { print $6 }')
+    fi
+  fi
+  if [ -z "$home" ] && command -v dscl >/dev/null 2>&1; then
+    home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null |
+      awk 'NR == 1 { sub(/^NFSHomeDirectory:[ \t]*/, ""); print }')
+  fi
+  [ -n "$home" ] || return 1
+  printf '%s' "$home"
+}
+
+# Порядок определения фиксирован, берётся первое подходящее значение (N5-I14):
+#   1) эффективный uid != 0 — текущий пользователь, дом из $HOME;
+#   2) uid = 0 и SUDO_USER непуст и не root;
+#   3) uid = 0 и logname дал непустое имя, не равное root.
+# Иначе — код 5 ДО любой файловой операции и без единого вызова sudo: установка в дом root с
+# кодом 0 запрещена, это ровно тот исход, при котором пользователь остаётся без CA и без
+# NODE_EXTRA_CA_CERTS, а установщик рапортует об успехе.
+resolve_source_user() {
+  local euid candidate home
+  euid=$(id -u)
+  # Без --system правило не применяется: установка от имени root в собственный дом root — не
+  # ошибка, а обычный сценарий (bin_dir = <дом>/.local/bin).
+  if [ "$opt_system" -ne 1 ] || [ "$euid" -ne 0 ]; then
+    src_user=$(id -un)
+    user_home=$HOME
+    need_chown=0
+    return 0
+  fi
+
+  candidate=${SUDO_USER:-}
+  if [ -z "$candidate" ] || [ "$candidate" = "root" ]; then
+    candidate=$(logname 2>/dev/null || printf '')
+  fi
+  if [ -z "$candidate" ] || [ "$candidate" = "root" ]; then
+    die "$EX_PERM" "$MSG_ERR_NO_SOURCE_USER"
+  fi
+
+  # Дом берётся из базы пользователей, а не из $HOME, и обязан существовать: несуществующий
+  # каталог — та же ошибка входных данных, что и неопределимый пользователь (N5-I14).
+  if ! home=$(user_home_from_db "$candidate"); then
+    die "$EX_PERM" "$MSG_ERR_NO_SOURCE_USER"
+  fi
+  if ! home=$(path_normalize "$home"); then
+    die "$EX_PERM" "$MSG_ERR_NO_SOURCE_USER"
+  fi
+  if [ ! -d "$home" ]; then
+    die "$EX_PERM" "$MSG_ERR_NO_SOURCE_USER"
+  fi
+
+  src_user=$candidate
+  user_home=$home
+  src_group=$(id -gn "$candidate" 2>/dev/null || id -g "$candidate" 2>/dev/null || printf '')
+  need_chown=1
+}
+
+# Владелец объекта пользовательской части. Вызов имеет смысл только когда процесс — root, а
+# исходный пользователь — нет (need_chown); в остальных случаях владелец и так верный.
+# Файлы в bin_dir через эту функцию не проходят: /usr/local/bin остаётся root-овым (N5-I14).
+chown_user_path() {
+  local path=$1 owner
+  [ "$need_chown" -eq 1 ] || return 0
+  [ -e "$path" ] || return 0
+  if [ -n "$src_group" ]; then
+    owner="$src_user:$src_group"
+  else
+    owner=$src_user
+  fi
+  chown "$owner" "$path" 2>/dev/null || true
+}
+
+# Создание каталога пользовательской части: права 0755 и владелец — исходный пользователь.
+# Владелец назначается только созданному каталогу; уже существующие каталоги не трогаются.
+make_user_dir() {
+  local dir=$1
+  [ -d "$dir" ] && return 0
+  mkdir -p "$dir" || return 1
+  chmod 0755 "$dir"
+  chown_user_path "$dir"
+  return 0
 }
 
 # =====================================================================================
@@ -1195,12 +1322,11 @@ installed_version() {
 # =====================================================================================
 # Шаги установки
 # =====================================================================================
+# Каталог конфига и CA-файл — пользовательская часть: при --system они создаются в доме
+# исходного пользователя и принадлежат ему, а не root (N5-I14). Права прежние: 0755 и 0644.
 install_ca() {
   local current
-  if [ ! -d "$config_dir" ]; then
-    mkdir -p "$config_dir"
-    chmod 0755 "$config_dir"
-  fi
+  make_user_dir "$config_dir"
   if [ -f "$ca_target" ]; then
     current=$(to_lower "$(sha256_of "$ca_target")")
     if [ "$current" = "$MF_ca_sha" ]; then
@@ -1209,11 +1335,13 @@ install_ca() {
     fi
     cp "$pkg_root/$MF_ca_file" "$ca_target"
     chmod 0644 "$ca_target"
+    chown_user_path "$ca_target"
     say "$MSG_CA_REPLACED" "$ca_target"
     return 0
   fi
   cp "$pkg_root/$MF_ca_file" "$ca_target"
   chmod 0644 "$ca_target"
+  chown_user_path "$ca_target"
   say "$MSG_CA_INSTALLED" "$ca_target"
 }
 
@@ -1250,7 +1378,7 @@ desktop_dest_dir() {
   if [ -w "/Applications" ] || [ "$use_sudo" -eq 1 ]; then
     printf '/Applications'
   else
-    printf '%s/Applications' "$HOME"
+    printf '%s/Applications' "$user_home"
   fi
 }
 
@@ -1354,9 +1482,18 @@ handle_user_config() {
   say "$MSG_CONFIG_KEPT" "$cfg"
 }
 
+# При --system отдельной строкой печатается, от имени какого пользователя выполнена
+# пользовательская часть: пути CA и конфига лежат в его доме, а не в доме root (N5-I14).
+print_source_user() {
+  if [ "$opt_system" -eq 1 ]; then
+    out "$MSG_SUM_USER" "$src_user" "$user_home"
+  fi
+}
+
 print_report() {
   local profile_changed=$1
   out "$MSG_DONE" "$MF_version"
+  print_source_user
   out "$MSG_SUM_BIN" "$bin_target"
   out "$MSG_SUM_CA" "$ca_target"
   out "$MSG_SUM_DESKTOP" "$desktop_summary"
@@ -1435,6 +1572,7 @@ do_check() {
 
   out "$MSG_CHECK_PKG" "$MF_version" "$MF_os" "$MF_arch"
   out "$MSG_CHECK_MANIFEST"
+  print_source_user
 
   if [ -f "$bin_target" ]; then
     current=$(to_lower "$(sha256_of "$bin_target")")
@@ -1520,7 +1658,7 @@ find_installed_desktop() {
     printf '%s' "$path"
     return 0
   fi
-  if path=$(desktop_target_path "$HOME/Applications" "$app") && [ -d "$path" ]; then
+  if path=$(desktop_target_path "$user_home/Applications" "$app") && [ -d "$path" ]; then
     printf '%s' "$path"
     return 0
   fi
@@ -1543,6 +1681,7 @@ do_plan_install() {
   local with_path=0
   detect_profile_kind
   out "$MSG_PLAN_HEAD" "$MF_version" "$MF_os" "$MF_arch"
+  print_source_user
   if [ ! -d "$config_dir" ]; then
     plan_line "$MSG_PLAN_MKDIR" "$config_dir"
   fi
@@ -1578,6 +1717,7 @@ do_plan_install() {
 
 do_plan_uninstall() {
   out "$MSG_PLAN_UNINSTALL_HEAD" "$MF_version"
+  print_source_user
   plan_line "$MSG_PLAN_REMOVE" "$bin_target"
   plan_line "$MSG_PLAN_REMOVE" "$bin_backup"
   plan_line "$MSG_PLAN_REMOVE_BLOCK" "$profile_file"
@@ -1600,16 +1740,16 @@ do_plan_uninstall() {
 # манифеста (N5-P3), который раскрывается вручную, а не выражения shell.
 expand_user_path() {
   local p=$1 xdg_config xdg_data tilde
-  xdg_config=${XDG_CONFIG_HOME:-$HOME/.config}
-  xdg_data=${XDG_DATA_HOME:-$HOME/.local/share}
+  xdg_config=${XDG_CONFIG_HOME:-$user_home/.config}
+  xdg_data=${XDG_DATA_HOME:-$user_home/.local/share}
   tilde=$(printf '\176')
   case $p in
-    "$tilde") p=$HOME ;;
-    "$tilde/"*) p="$HOME/${p#"$tilde/"}" ;;
+    "$tilde") p=$user_home ;;
+    "$tilde/"*) p="$user_home/${p#"$tilde/"}" ;;
   esac
   p=${p//'${XDG_CONFIG_HOME}'/$xdg_config}
   p=${p//'${XDG_DATA_HOME}'/$xdg_data}
-  p=${p//'${HOME}'/$HOME}
+  p=${p//'${HOME}'/$user_home}
   printf '%s' "$p"
 }
 
@@ -1636,7 +1776,7 @@ purge_path_is_safe() {
   case $normalized in
     *".."*) return 1 ;;
   esac
-  home_dir=$(path_normalize "$HOME") || return 1
+  home_dir=$(path_normalize "$user_home") || return 1
   path_is_inside "$home_dir" "$normalized"
 }
 
@@ -1713,6 +1853,9 @@ do_uninstall() {
     use_sudo=1
   fi
   say "$MSG_UNINSTALL_HEAD" "$MF_version"
+  if [ "$opt_system" -eq 1 ]; then
+    say "$MSG_SUM_USER" "$src_user" "$user_home"
+  fi
   remove_object "$OBJ_BIN" "$bin_target"
   remove_object "$OBJ_BIN_BAK" "$bin_backup"
   remove_profile_block
@@ -1772,6 +1915,10 @@ main() {
   fi
   check_system
   require_hash_tool
+  # Исходный пользователь определяется ДО раскладки путей и до первой файловой операции:
+  # отказ по коду 5 не должен оставлять частичной установки, а раскладка обязана считаться от
+  # дома этого пользователя (N5-I14).
+  resolve_source_user
   compute_layout
 
   if [ "$opt_uninstall" -eq 1 ]; then
