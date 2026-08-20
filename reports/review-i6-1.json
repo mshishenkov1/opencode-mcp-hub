@@ -1,0 +1,163 @@
+{
+  "verdict": "request_changes",
+  "iteration": "I-6",
+  "scope": "git diff 22766be...HEAD -- deploy loadtest reports .gitignore (816623e, 6d526bc, f3c107b, 0eb1dd5, c062217)",
+  "gates": {
+    "pytest": "649 passed, 1 deselected (exit 0)",
+    "ruff check src tests loadtest": "All checks passed",
+    "helm lint opencode-mcp-hub": "0 failed (INFO: icon is recommended)",
+    "helm lint tag-mcp": "0 failed (INFO: icon is recommended)",
+    "docker compose -f deploy/docker-compose.yml config -q": "OK",
+    "docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.windows.yml config -q": "OK",
+    "docker compose -f loadtest/docker-compose.loadtest.yml config -q": "OK",
+    "deploy/smoke.sh -k https://localhost:8443 (живой стенд hubi3)": "РЕЗУЛЬТАТ: OK — 10 OK / 0 FAIL / 6 SKIP, exit 0",
+    "deploy/smoke.sh против несуществующего порта": "РЕЗУЛЬТАТ: ПРОВАЛ, exit 1 (ненулевой код подтверждён)",
+    "loadtest/tools/check_no_prod.sh на подсунутых файлах": "corp.tander.ru → exit 1, tag.magnit.ru → exit 1, evil-prod.example.com (вне allow-list) → exit 1, mock-upstream → exit 0",
+    "контрольный прогон k6 (SCALE=0.01, DURATION=20s, проект hubloadrev, снесён после)": "903 http_reqs = 602 setup + 301 итераций (сходится с формулой отчёта); добавка proxy p50 5,82 мс, p95 9,13 мс при порогах 15/50; overhead.py отработал, exit 0"
+  },
+  "findings": [
+    {
+      "severity": "major",
+      "where": "deploy/helm/opencode-mcp-hub/values-prod.yaml + templates/externalsecret.yaml",
+      "what": "Prod-профиль внутренне несогласован по секретам БД и Redis: helm template показывает, что Deployment и Job миграций читают HUB_DATABASE_URL из Secret opencode-mcp-hub-db (key url) и HUB_REDIS_URL из opencode-mcp-hub-redis (key url), а ExternalSecret с creationPolicy: Owner кладёт database_url/redis_url в совсем другой Secret — opencode-mcp-hub-secrets, где эти ключи никто не читает. Итог: две из четырёх записей externalSecret.data мертвы, а два Secret'а, от которых зависит старт, чарт не создаёт и deploy/helm/README.md о них не упоминает. Либо направить external.postgres/redis.existingSecret на opencode-mcp-hub-secrets с ключами HUB_DATABASE_URL/HUB_REDIS_URL, либо убрать их из externalSecret.data и явно описать два внешних Secret'а.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "deploy/helm/opencode-mcp-hub/values-prod.yaml (hub.webAuth: keycloak, externalSecret.data)",
+      "what": "При HUB_WEB_AUTH=keycloak переменная KEYCLOAK_CLIENT_SECRET обязательна — src/hub/settings.py:289 бросает ConfigError и Hub не стартует. В прод-профиле secrets.create=false, а externalSecret.data содержит только HUB_SECRET_KEY, HUB_ENCRYPTION_KEY, HUB_DATABASE_URL, HUB_REDIS_URL; в Deployment ключ подключён с optional: true, поэтому отсутствия не видно до старта пода. Дописать вручную в целевой Secret нельзя: creationPolicy: Owner его перезапишет. Установка строго по values-prod.yaml даёт CrashLoopBackOff. Добавить keycloak_client_secret в externalSecret.data.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "deploy/helm/opencode-mcp-hub/values-pilot.yaml, values-prod.yaml, values.yaml (secrets.oauth), deploy/helm/README.md",
+      "what": "Ни один профиль не доставляет в под учётные данные OAuth-приложений целевых систем, которых требует боевой catalog.yaml: client_id подставляется через ${GITLAB_OAUTH_CLIENT_ID}, ${GITLAB_PLATFORM_OAUTH_CLIENT_ID}, ${JIRA_OAUTH_CLIENT_ID}, ${CONFLUENCE_OAUTH_CLIENT_ID} (нигде не задаются в hub.env), client_secret — через env:*_OAUTH_CLIENT_SECRET (secrets.oauth пуст по умолчанию и не переопределён в профилях, в externalSecret.data их тоже нет). Штатная установка любого профиля с настоящим каталогом даёт Hub, у которого все facade-серверы ненастроены и каталог пуст — ровно тот симптом «сервер исчез после выкатки», который описан в deploy/runbook.md §8. Внести client_id в профили и ключи секретов в externalSecret.data/secrets.oauth либо явно задокументировать обязательный набор --set в deploy/helm/README.md.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "loadtest/README.md, шаг 3 «Засеять данные»",
+      "what": "В перечне export нет HUB_LITELLM_BASE_URL. Воспроизведено: seed.py по инструкции падает с 'ConfigError: Ошибка конфигурации Hub: HUB_LITELLM_BASE_URL: обязательная переменная не задана' (settings.py). После добавления HUB_LITELLM_BASE_URL=http://localhost:8080 сев проходит. Инструкция по нагрузочному прогону нерабочая как есть; добавить переменную (со значением мока — это ещё и часть защиты D6-10).",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "deploy/README-windows.md §8 «Резервное копирование»",
+      "what": "Инструкция для «Планировщика заданий» ссылается на скрипт ./backup.sh (wsl -d <дистрибутив> -- bash -lc \"cd ~/opencode-mcp-hub/deploy && ./backup.sh\"), которого в репозитории нет (deploy/backup.sh отсутствует). Оператор заведёт задание, оно будет молча падать, резервных копий не появится — при том, что этот же раздел справедливо называет дамп Postgres единственным критичным артефактом. Либо добавить deploy/backup.sh, либо переписать шаг на приведённый выше однострочник pg_dump.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/.env.example ↔ deploy/README-windows.md §4",
+      "what": "README велит сделать cp .env.example .env и заполнить, в том числе, HUB_SITE_ADDRESS и HUB_HTTPS_PORT, но в .env.example этих ключей нет (есть только HUB_REPLICAS и TAG_MCP_PUBLIC_URL). Обе переменные используются docker-compose.windows.yml через интерполяцию, то есть оператор обязан дописать их руками, не увидев ни строчки подсказки в шаблоне. Добавить обе строки в .env.example с комментарием.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/docker-compose.windows.yml (HUB_TRUST_PROXY), deploy/helm/opencode-mcp-hub/values.yaml + values-pilot/prod (hub.trustProxy: true)",
+      "what": "Для Windows-стенда решение верное — проверено экспериментально: caddy:2-alpine без trusted_proxies перезаписывает X-Forwarded-For адресом соединения (подделанный клиентом 'X-Forwarded-For: 9.9.9.9' до бэкенда не доходит), а hub._client_ip берёт ЛЕВЫЙ элемент заголовка (src/hub/routes/oauth.py:72), так что подделать бакет лимита нельзя. Замечание к чартам: trustProxy: true выставлен безусловно, включая ветку istio.enabled=true (Envoy X-Forwarded-For дополняет, а не заменяет, если не настроен numTrustedHops) и nginx-ingress с use-forwarded-headers: true — в этих конфигурациях левый элемент задаёт клиент, и HUB_RATE_LIMIT_REGISTER/HUB_RATE_LIMIT_TOKEN обходятся. Зафиксировать предусловие в values/README: trustProxy: true допустим только пока граничный прокси заголовок перезаписывает.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "loadtest/k6/refresh_storm.js (MODE=burst thresholds)",
+      "what": "В залповом режиме жёстко объявлен порог oauth_refresh: p(95)<THRESHOLD_REFRESH_P95 (по умолчанию 100 мс), который заведомо не выполняется уже на 1/10 нагрузки — отчёт честно фиксирует p95 = 242,4 мс. То есть k6 run refresh_storm.js всегда завершается ненулевым кодом и сценарий нельзя поставить в CI. Порога на /oauth/token спека действительно не задаёт (S-02 — про /api/*), поэтому нужно согласовать значение и зафиксировать его в default'е либо явно пометить сценарий как измерительный, без порога.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "reports/loadtest-2026-08-20.md + .gitignore (loadtest/.seed/)",
+      "what": "Признаков выдуманных цифр нет — все проверяемые величины сходятся: 1 440 запросов сценария (а) = 480 итераций × 3 запроса при rate=round(500/60); 250 запросов сценария (в) = 50 VU × 5 ротаций (STORM_VUS=scaled(500), CHAINS=60×2); 11 259/25 с = 450 rps; k6 v2.2.0 совпадает с установленным; fsync=off, MOCK_LATENCY_MS=0, HUB_UPSTREAM_IDLE_TTL=86400 и боевой default 600 (settings.py:149) — всё соответствует конфигурации контура; 15 004 запроса сценария (б) сходятся с формулой setup(2×SESSIONS+2) + итерации, что подтверждено контрольным прогоном (903 = 602 + 301). Замечание в бэклог: сырые --summary-export k6 не сохранены (каталог loadtest/.seed/ в .gitignore), поэтому проверить отчёт по артефактам постфактум нельзя — класть summary-JSON рядом с отчётом в reports/.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/smoke.sh ↔ deploy/smoke.ps1",
+      "what": "Паритет проверок по составу полный (те же 8 блоков, те же ожидаемые коды, ни один запрос не следует редиректам: curl без -L, PowerShell с MaximumRedirection=0), но реализации расходятся в мелочах: bash ищет в /health точную подстроку '\"status\":\"ok\"' без пробелов, ps1 — регулярку '\"status\"\\s*:\\s*\"ok\"' (bash упадёт на первом же изменении сериализации JSON); bash не проверяет HTTP-код у /.well-known/opencode и /metrics, ps1 проверяет. Свести к одной семантике.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/smoke.sh / smoke.ps1, блок «Метаданные facade-серверов»",
+      "what": "SKIP вместо FAIL при отсутствии настроенных facade-серверов — решение принимаю (см. dev_divergences), но следствие: на стенде без выданных OAuth-приложений (текущее состояние) ключевая проверка D6-03 не выполняется вовсе, и smoke зелёный, даже если метаданные сломаны. В бэклог: сверять список alias'ов не только с AS-метаданными, но и с каталогом (GET /api/catalog с ключом или локальный catalog.yaml) и давать FAIL, когда в каталоге есть настроенный facade-сервер, а метаданных по нему нет.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/helm/opencode-mcp-hub/values-pilot.yaml (external.postgres.url, external.redis.url)",
+      "what": "external.postgres.url задан строкой-заглушкой с литералом __from_secret__ при одновременно заданном existingSecret.name: hub-postgres. По hub.dbEnv побеждает existingSecret, url игнорируется — мёртвая настройка, которая читается как «пароль подставится сам». external.redis.url в пилоте, наоборот, попадёт в манифест Deployment открытым значением (сейчас без пароля — но шаблон приглашает вписать пароль в values). Убрать заглушку и описать, что redis с паролем идёт только через existingSecret.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "loadtest/tools/check_no_prod.sh, loadtest/tools/seed.py::_check_no_prod",
+      "what": "Гейт работает (проверено на четырёх подсунутых файлах), но у него две дыры: find исключает из проверки все *.json (каталог или конфигурация в JSON пройдёт мимо обеих линий — и по FORBIDDEN_PATTERNS, и по allow-list хостов), а _check_no_prod в seed.py проверяет только HUB_PUBLIC_URL и HUB_DATABASE_URL, не трогая HUB_LITELLM_BASE_URL и HUB_REDIS_URL. Ограничить исключение конкретно artefact-файлами прогона (summary-*.json, seed.json) и добавить две переменные в проверку seed.py.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "checked_ok": [
+    "Секреты в Helm: HUB_SECRET_KEY / HUB_ENCRYPTION_KEY / HUB_ADMIN_TOKEN / KEYCLOAK_CLIENT_SECRET / secrets.oauth.* — во всех values пусты; helm template с values-prod.yaml вообще не рендерит kind: Secret (только ExternalSecret); в манифестах секреты всегда через secretKeyRef, никогда значением. Взаимоисключение secrets.create и externalSecret.enabled — {{ fail }}.",
+    "securityContext: runAsNonRoot + runAsUser/Group/fsGroup 10001 + seccompProfile RuntimeDefault на поде; allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities drop ALL на контейнере — в обоих чартах и в Job миграций. Под readOnlyRootFilesystem подложен emptyDir на /tmp. automountServiceAccountToken: false и у пода, и у Job.",
+    "hostNetwork / hostPID / hostIPC / privileged / hostPath / NET_BIND_SERVICE в deploy/helm не встречаются вовсе.",
+    "Ingress: tls включён в values.yaml и в обоих профилях обоих чартов, secretName ведёт на внешний kubernetes.io/tls (D-1); при istio.enabled=true Ingress не рендерится, вместо него VirtualService.",
+    "NetworkPolicy: podSelector по selectorLabels, policyTypes Ingress+Egress; вход — только namespaceSelector ingress-nginx и monitoring на containerPort; выход — DNS плюс явные CIDR/порты (5432/6379 и 443 внутри RFC1918). Лишнего не открывает; в проде включена, в пилоте выключена сознательно.",
+    "Job миграций: helm.sh/hook pre-install,pre-upgrade, weight -5, hook-delete-policy before-hook-creation,hook-succeeded, backoffLimit 3, parallelism по умолчанию 1, restartPolicy Never, sidecar.istio.io/inject: false при istio. Параллельный запуск исключён политикой hook'а, а advisory-блокировка (R-M1) прикрывает совпадение с HUB_DB_AUTO_MIGRATE=true. Если не задан ни existingSecret, ни url — {{ fail }} на этапе шаблона.",
+    "ConfigMap каталога: рендерится из --set-file, секретов не содержит — в catalog.yaml только ссылки env:*_OAUTH_CLIENT_SECRET и ${*_OAUTH_CLIENT_ID}; пустой catalog.content отбивается {{ fail }}.",
+    "Windows-override: наружу выставляет только proxy (8443 и ${HUB_HTTPS_PORT:-443} → 8443); Postgres и Redis портов не публикуют ни в базовом compose, ни в override; bind-mount'ы :ro, данные в named volume. docker compose config с override валиден.",
+    "HUB_TRUST_PROXY=true за Caddy — обосновано (эксперимент с caddy:2-alpine: подделанный X-Forwarded-For до бэкенда не доходит, Caddy без trusted_proxies заголовок перезаписывает).",
+    "smoke.sh на живом стенде hubi3 (https://localhost:8443): 10 OK / 0 FAIL / 6 SKIP, exit 0; при недоступном стенде 10 FAIL и exit 1. Разбор alias'ов из scopes_supported AS-метаданных с запасным источником по /mcp/<alias> в /.well-known/opencode работает, неизвестный alias проверяется на 404. По умолчанию во внешние системы не ходит: /cli/start и /auth/login только под --external/-External.",
+    "Нагрузочный контур: моки строго на границе (mock_upstream — upstream MCP и токен-эндпоинт целевой системы; HUB_LITELLM_BASE_URL тоже на мок), сам Hub не замокан ни в одном месте. Пороги в config.js совпадают с S-01/S-02 (15/50/100 мс, error rate 0,1 %) и нигде не занижены; mcp.js применяет 15/50 к абсолютной задержке mcp_via_hub, то есть строже спеки, а точную разницу считает overhead.py.",
+    "runbook.md сверен по коду: все 9 метрик существуют (hub_http_requests_total, hub_http_request_duration_seconds, hub_mcp_requests_total, hub_mcp_request_duration_seconds, hub_upstream_errors_total, hub_upstream_sessions_active, hub_token_refresh_total, hub_oauth_tokens_issued_total, hub_login_sessions_active); X-Request-ID проставляется (app.py:114); AUTH_CACHE_TTL = 60 (auth.py:15); префиксы Redis keyauth: и cb: совпадают (auth.py:14, proxy.py:31); DELETE /api/me/connections/{alias} есть (routes/api.py:156); HUB_CB_FAILURES=5 и HUB_CB_RESET=30 совпадают с settings.py:152-153; /admin/catalog/reload по заголовку X-Admin-Token — routes/admin.py; команды mcp-hub catalog validate / db current / db upgrade существуют в cli.py.",
+    "README-windows.md сверен по коду: HUB_DB_AUTO_MIGRATE по умолчанию true (settings.py:164, .env.example:86) — утверждение про восстановление дампа корректно; /ui/* без сессии действительно отдают 302 на /auth/login?next=… (проверено на живом стенде); переменные HUB_SITE_ADDRESS/HUB_HTTPS_PORT/HUB_PUBLIC_URL/TAG_MCP_PUBLIC_URL/HUB_REPLICAS реально читаются интерполяцией compose из deploy/.env. Инструкций, ломающих стенд, не нашёл."
+  ],
+  "dev_divergences": [
+    {
+      "item": "нет /ui/login — smoke проверяет 302 на /auth/login",
+      "agree": true,
+      "note": "Подтверждено на живом стенде: GET /ui/connections → 302 Location /auth/login?next=%2Fui%2Fconnections. Решение верное."
+    },
+    {
+      "item": "--external для проверок, ходящих в LiteLLM (POST /cli/start, GET /auth/login)",
+      "agree": true,
+      "note": "Соответствует N-04 «без боевых систем по умолчанию». По умолчанию скрипт не выходит за пределы стенда — проверено."
+    },
+    {
+      "item": "имена файлов docker-compose.windows.yml и runbook.md вместо предложенных требованием",
+      "agree": true,
+      "note": "Косметика, оба имени согласованы во всех ссылающихся документах."
+    },
+    {
+      "item": "SKIP вместо FAIL для ненастроенных facade-серверов",
+      "agree": true,
+      "note": "Как поведение по умолчанию — да: ненастроенный сервер не публикуется намеренно. Но следствие (на пустом стенде ключевая проверка D6-03 не выполняется) стоит закрыть сверкой с каталогом — вынес в findings как minor, в бэклог."
+    },
+    {
+      "item": "отсутствие отдельных метрик состояния circuit-breaker и числа подключений",
+      "agree": true,
+      "note": "Обходные индикаторы в runbook §9 корректны и проверены: метка kind=\"circuit_open\" у hub_upstream_errors_total действительно существует. Явные hub_circuit_breaker_state и gauge подключений — кандидаты в следующую итерацию, как и написано в runbook."
+    }
+  ],
+  "backlog": [
+    "Полный прогон S-07 (30 000 VU, ~5 000 вызовов/с) перед релизом — в I-6 сделана 1/10 (D6-09).",
+    "SSE под нагрузкой и HUB_MAX_SSE_PER_USER; прогон с боевыми rate-limit; прогон с MOCK_FAIL_RATE для circuit-breaker; измерение (а не расчёт) линейности на нескольких репликах; Postgres с fsync=on.",
+    "Согласовать порог p95 для /oauth/token и внести в THRESHOLD_REFRESH_P95.",
+    "Метрики hub_circuit_breaker_state и gauge числа подключений по alias.",
+    "smoke: сверка alias'ов с каталогом, чтобы SKIP не маскировал сломанные метаданные.",
+    "Сохранять summary-JSON k6 рядом с отчётом о прогоне.",
+    "helm --dry-run/установка в настоящий namespace, subchart Postgres/Redis, prometheus-adapter для HPA по RPS."
+  ],
+  "dispute_resolutions": []
+}
