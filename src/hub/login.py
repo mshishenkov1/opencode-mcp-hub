@@ -381,6 +381,12 @@ class LoginService:
                 if not user.groups:
                     user.groups = ["all"]
                 user.updated_at = now
+            # R-L5: строка users должна попасть в БД до вставки api_keys — ORM не упорядочивает
+            # INSERT'ы разных моделей по внешнему ключу (без relationship порядок задаётся именем
+            # класса, и api_keys уходит раньше users → ForeignKeyViolationError в PostgreSQL).
+            # flush() внутри session.begin() остаётся в той же транзакции: при ошибке ниже
+            # откатывается всё целиком.
+            await session.flush()
             session.add(
                 ApiKey(
                     key_sha256=sha256_hex(key),
