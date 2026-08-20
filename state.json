@@ -63,6 +63,10 @@
     {
       "ts": "2026-08-20T09:00:00",
       "event": "I-3 done: все гейты зелёные (mutation 74%)"
+    },
+    {
+      "ts": "2026-08-20T09:09:39",
+      "event": "gates: ALL PASS -> gates-i3-plus-h5-20260820.json"
     }
   ]
 }
