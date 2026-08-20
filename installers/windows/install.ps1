@@ -244,30 +244,36 @@ function Test-Sha256Value {
 # Путь внутри пакета: относительный, без "..", без буквы диска, без обратного слэша (N5-P3).
 # Отвергаются также ".", "./x", "x/." и завершающий "/" — формы, при которых "<каталог>/<значение>"
 # схлопывается в сам каталог (паритет с is_safe_pkg_path в common/install-posix.sh).
+# Ревизия 1.5 (N5-P4, N5-I13): набор символов задан БЕЛЫМ списком — A-Za-z0-9, точка,
+# подчёркивание, дефис и разделитель "/". Тот же набор применяет POSIX-ветка, поэтому пакет,
+# принятый на macOS/Linux, принимается и на Windows. Проверка "\z", а не "$": в .NET "$"
+# совпадает и перед завершающим переводом строки, то есть "a.pem`n" прошло бы whitelist.
+# Сегменты "." и ".." проверяются ПОСЕГМЕНТНО, а не поиском подстроки: "opencode..pem" — законное
+# имя файла, и раньше оно принималось POSIX-веткой и отвергалось здесь (расхождение паритета).
 function Test-PackagePath {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return $false }
+    if ($Value -notmatch '\A[A-Za-z0-9._/-]+\z') { return $false }
     if ($Value.StartsWith('/')) { return $false }
-    if ($Value.Contains('\')) { return $false }
-    if ($Value.Contains('..')) { return $false }
-    if ($Value -match '^[A-Za-z]:') { return $false }
-    if ($Value -eq '.') { return $false }
-    if ($Value.StartsWith('./')) { return $false }
     if ($Value.EndsWith('/')) { return $false }
-    if ($Value.EndsWith('/.')) { return $false }
+    foreach ($segment in $Value.Split('/')) {
+        if ($segment -eq '.' -or $segment -eq '..') { return $false }
+    }
     return $true
 }
 
 # Имя приложения (artifacts[].app_name): одно имя без разделителей пути и самоссылок и без
 # подстановочных символов — значение участвует в сопоставлении записей реестра (-like) и в путях,
 # поэтому проверяется строже пути внутри пакета (N5-P4, N5-R1). Паритет с is_safe_app_name.
+# Отличие набора символов от Test-PackagePath ровно одно: допускается пробел U+0020, но не
+# первым и не последним символом («OpenCode Magnit.app»); разделитель "/" не допускается.
 function Test-AppName {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return $false }
     if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
-    if (-not (Test-PackagePath $Value)) { return $false }
-    if ($Value.Contains('/')) { return $false }
-    if ($Value.IndexOfAny([char[]]@('*', '?', '[', ']')) -ge 0) { return $false }
+    if ($Value -notmatch '\A[A-Za-z0-9._ -]+\z') { return $false }
+    if ($Value.StartsWith(' ') -or $Value.EndsWith(' ')) { return $false }
+    if ($Value -eq '.' -or $Value -eq '..') { return $false }
     return $true
 }
 
