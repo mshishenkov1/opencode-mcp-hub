@@ -1,0 +1,89 @@
+{
+  "iteration": "I-5",
+  "cycle": 3,
+  "base": "340fd6d",
+  "head": "79fd01e",
+  "branch": "pipeline/i1-hub-login-catalog-20260818",
+  "verdict": "request_changes",
+  "checked": {
+    "blockers_from_review_i5_1_and_i5_2": "закрыты и не воспроизводятся (собственные PoC-пакеты, 6 режимов × 13 значений app_name)",
+    "runs": {
+      "bats": "196/196, три независимых прогона (installers/tests/bats), код 0",
+      "shellcheck": "shellcheck -s bash по всем installers/**/*.sh — 0 замечаний",
+      "trace_ac": "installers/tests/trace-ac.sh — код 0, 142 критерия, 126 с тестами, все unit/integration покрыты",
+      "pester": "НЕ ВЫПОЛНЕН: pwsh на машине ревью отсутствует; AC-139, AC-140 и часть AC-136 проверены только чтением кода install.ps1"
+    },
+    "poc_a_app_name_traversal": "значения '../../../../..<abs>/canary', '../../tmp', '..', '.', '/Applications', 'OpenCode.app/', 'sub/OpenCode.app' — код 2 во всех шести режимах (установка, --check, --dry-run, --uninstall, --dry-run --uninstall, --uninstall --purge); /Applications побайтово не изменился, ловушка sudo пуста",
+    "poc_b_dmg_without_app_name": "поле отсутствует / \"\" / \"   \" / \"\\t\\n \" / null — код 2 во всех шести режимах, сообщение 'поле artifacts.1.app_name — обязательное поле отсутствует или пусто', каталоги целы",
+    "poc_second_line": "install_desktop вызван напрямую при OPENCODE_INSTALLER_SOURCE_ONLY=1 с заглушками run_priv/rm/ditto/hdiutil/mkdir и подставленными MF_*: '', '..', '.', '/', '/Applications', '../../etc', 'sub/x.app', 'OpenCode.app/' → код 2, НИ ОДНОГО вызова заглушек; контрольное 'OpenCode.app' доходит до ditto <mount>/OpenCode.app → /Applications/OpenCode.app",
+    "bug_i5_001": "манифест с \\n, \\t, \\r, 0x01, кавычкой и обратным слэшем в hub_url — валидный JSON по python3 json.load, значение после разбора совпадает с исходным побайтово; на копии release.sh с тождественным json_escape самопроверка падает ('common/manifest.json в архиве не является валидным JSON', код 1)",
+    "mutations": "8 мутаций с откатом git checkout -- installers/common installers/release.sh installers/windows; git status по installers/ в конце чист"
+  },
+  "findings": [
+    {
+      "severity": "blocker",
+      "where": "installers/common/install-posix.sh:1425-1439 (purge_path_is_safe), 1461-1489 (purge_each); installers/windows/install.ps1:1094-1103 (Test-PurgePathSafe)",
+      "what": "Тот же класс уязвимости, что №1 и №2, но в purge_paths: проверка «путь внутри $HOME и не равен самому $HOME» обходится задвоением разделителя. Значение purge_paths=[\"${HOME}//\"] (равно как \"~//\", \"${HOME}///\") даёт expanded=\"$HOME//\", которое НЕ равно \"$HOME\" строкой и подходит под шаблон \"$HOME\"/?* (второй слэш засчитывается как ?), поэтому validate_purge_paths его пропускает, а purge_each выполняет rm -rf \"$HOME//\" — то есть удаляет домашний каталог пользователя ЦЕЛИКОМ, печатая «Данные: удалено» и завершаясь кодом 0. PoC (воспроизведён на изолированном HOME): до запуска 6 записей, включая Documents/very-important/data.txt и .ssh/id_rsa; после `install.sh --prefix <p> --uninstall --purge` каталог HOME не существует, код 0. Прямо нарушает N5-R2 («путь ... не равен самому домашнему каталогу»). Windows: Test-PurgePathSafe делает TrimEnd('\\') и потому форму '%USERPROFILE%\\\\' отвергает, но '%USERPROFILE%\\.' (и '%USERPROFILE%\\.\\') проходит StartsWith(home+'\\') и попадает в Remove-Item -LiteralPath -Recurse -Force — тот же класс, проверить и починить в паритете (на машине ревью pwsh нет). Требуется нормализация пути перед сравнением (схлопывание повторяющихся разделителей и сегментов '.'), а не только строковое сравнение с $HOME.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/70-uninstall.bats:133 (AC-91) и соседние AC-90",
+      "what": "Тестовый пробел, из-за которого предыдущий blocker не был пойман: негативные значения purge_paths проверяются только на '/etc', '/tmp/x', '~/../other' и '~'. Ни одного значения в нормализующихся формах — '~/', '~//', '${HOME}//', '${HOME}/.', '${HOME}/./' — нет, поэтому набор проходит 196/196 на коде, стирающем домашний каталог. Нужны кейсы на все формы, где после подстановки путь ссылается на сам $HOME, с канарейкой внутри $HOME и проверкой, что каталог и его содержимое на месте (по образцу 36-desktop-safety.bats: снимок до/после).",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/90-release.bats:349 (\"AC-142: --hub-url с переводом строки → манифест остаётся валидным JSON\")",
+      "what": "Тест не способен упасть на осмысленной поломке. AC-142 требует по КАЖДОМУ значению --hub-url двух вещей: манифест валиден по RFC 8259 И «значение hub_url в нём после разбора совпадает с исходным без искажения». Тест на переводе строки проверяет только первое. Проверено мутацией: удаление строки s=${s//$'\\n'/\\\\n} из json_escape (installers/release.sh:158) оставляет манифест валидным (перевод строки подхватывает awk-ветка для управляющих символов), но значение при этом ТЕРЯЕТСЯ — json_escape 'https://hub.test/a<LF>b' даёт 'https://hub.test/ab'; прогон 90-release.bats при этом 24/24 ok, ни одного not ok. Тот же пробел у соседнего значения с табуляцией. Нужно добавить сравнение json_value \"$mf\" hub_url с исходной строкой (как это уже сделано в тесте на кавычку и обратный слэш).",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:515-522 (is_safe_app_name) против installers/windows/install.ps1:264-273 (Test-AppName)",
+      "what": "Расхождение двух линий защиты и неверный комментарий о паритете. Пробельное app_name отвергается только первой линией (manifest_load, проверка ${MF_desktop_app//[[:space:]]/}); is_safe_app_name его пропускает. Проверено прямым вызовом install_desktop при обойдённом manifest_load: app_name=\"   \" проходит desktop_target_path и доходит до ditto в \"/Applications/   \". Катастрофы это не даёт (цель строго внутри каталога назначения, blocker не воспроизводится), но заявленный в install.ps1:266 «Паритет с is_safe_app_name» неверен: Test-AppName отбивает пробельное значение через IsNullOrWhiteSpace, а is_safe_app_name — нет. Предлагается перенести проверку «непусто после отбрасывания пробельных символов» внутрь is_safe_app_name, тогда обе линии совпадут и обязательность для dmg останется отдельным правилом.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/docs/spec.md:779 (N5-B1, ревизия 1.3) и N5-B2 (spec.md:782-796)",
+      "what": "Спека 1.3 разошлась с кодом в сторону устаревшего утверждения: N5-B1 говорит «Самопроверка собранного пакета (N5-B2) ... на управляющих символах она поломку не ловит (bugs/BUG-I5-001.json)». После 7464b12 это неверно — selfcheck_package (release.sh:394-402) разбирает собранный common/manifest.json строгим парсером python3 и ловит ровно этот случай (проверено на копии release.sh с ослабленным json_escape: «Самопроверка пакета не пройдена: common/manifest.json в архиве не является валидным JSON», код 1). При этом описание N5-B2 нового шага самопроверки вообще не содержит. Требований спека не ослабила (наоборот, N5-B1 ужесточён «по результату»), но текст надо привести в соответствие: снять фразу «не ловит» и внести строгую проверку манифеста в перечень шагов N5-B2.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/release.sh:397-402 (selfcheck_package)",
+      "what": "Строгая проверка манифеста выполняется под условием `command -v python3`: на сборочной машине без python3 она молча пропускается, и гарантия N5-B1/N5-B2 «невалидный манифест не выпускается» перестаёт действовать без единого сообщения. Либо сделать python3 явной зависимостью release.sh (как это уже сделано для zip/tar), либо печатать предупреждение о пропущенной проверке; в спеке условие не описано вовсе.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/release.sh:390-402 (selfcheck_package), каталог --out",
+      "what": "При провале самопроверки уже собранный архив остаётся в каталоге --out (проверено: dist2 содержит opencode-magnit-linux-x64-1.17.9-magnit.1.tar.gz, код выхода 1, SHA256SUMS не создан). Для неверной --version AC-142 требует, чтобы ничего не появилось; для провала самопроверки такого требования нет, и битый архив в dist можно перепутать с годным. Стоит удалять архив цели, не прошедшей самопроверку, либо описать поведение в N5-B2.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "mutation_log": [
+    {"id": "M1", "where": "install-posix.sh is_safe_app_name — снят запрет разделителя пути", "result": "not ok 2 (36-desktop-safety.bats, 35-manifest-paths.bats) — поймана"},
+    {"id": "M2", "where": "desktop_target_path — снята проверка вложенности (case \"$dest\"/?*)", "result": "0 падений; эквивалентный мутант: при живом is_safe_app_name значения, различающие поведение, недостижимы — см. M2b"},
+    {"id": "M2b", "where": "desktop_target_path — снят вызов is_safe_app_name", "result": "not ok 2 (install_desktop с \".\" и \"OpenCode.app/\"; таблица desktop_target_path) — поймана"},
+    {"id": "M3", "where": "install-posix.sh manifest_load — снята обязательность app_name для installer_type=dmg", "result": "not ok 8 (36-desktop-safety.bats) — поймана"},
+    {"id": "M4", "where": "release.sh json_escape — снято экранирование перевода строки", "result": "0 падений — ТЕСТОВЫЙ ПРОБЕЛ, см. finding 3 (манифест остаётся валидным за счёт awk-ветки, но значение теряется)"},
+    {"id": "M5", "where": "install-posix.sh apply_profile_block — блок дописывается в конец вместо правки на месте", "result": "not ok 1 (AC-42, AC-141) — поймана"},
+    {"id": "M6", "where": "install-posix.sh profile_foreign_env_line — сокращён список объявляющих префиксов", "result": "not ok 3 (AC-47, AC-141) — поймана"},
+    {"id": "M7", "where": "install-posix.sh is_safe_pkg_path — снят запрет \".\", \"./x\", \"x/.\", \"x/\"", "result": "not ok 4 (10-manifest, 35-manifest-paths, 36-desktop-safety) — поймана"},
+    {"id": "M8", "where": "install-posix.sh purge_path_is_safe — снято ограничение $HOME", "result": "not ok 3 (AC-90, AC-91) — поймана (но не ловит нормализующиеся формы, см. finding 2)"}
+  ],
+  "notes": [
+    "Экранирование подстановочных символов в install.ps1 (WildcardPattern::Escape + Test-AppName) и ConvertFrom-UninstallString проверены только чтением кода: pwsh на машине ревью отсутствует, Pester-набор (в т.ч. новый DesktopEntry.Tests.ps1) не выполнялся. Логика соответствует AC-139/AC-140; на POSIX подстановочные символы в app_name безопасны (все подстановки в кавычках, glob не раскрывается — проверено прогоном с app_name=\"*\").",
+    "AC-138…AC-142 соответствуют фактическому поведению кода; ревизии 1.2 и 1.3 требований не ослабили (см. finding 5 — единственная неточность формулировки, а не послабление)."
+  ],
+  "dispute_resolutions": []
+}
