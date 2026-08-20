@@ -1,0 +1,7 @@
+{
+  "bug_id": "BUG-I1-001",
+  "test": "tests/test_proxy.py::test_missing_connection_returns_jsonrpc_error",
+  "claim": "Тест удаляет строку из connections сырым SQL (DELETE FROM connections WHERE id = :cid) при живых зависимых строках (upstream_tokens.connection_id, refresh_tokens.connection_id, oauth_codes.connection_id). Пока в SQLite проверка внешних ключей была выключена, удаление проходило; после включения PRAGMA foreign_keys=ON (фикс BUG-I1-001, чтобы тестовое окружение совпадало с боевым PostgreSQL) тест падает с 'FOREIGN KEY constraint failed'. На PostgreSQL этот DELETE не прошёл бы никогда — тест опирается на поведение, которого в бою нет. Продуктовый код строки connections не удаляет вовсе: отключение (DELETE /api/me/connections/{alias}) удаляет upstream_tokens, отзывает токены Hub и переводит connection в status=not_connected.",
+  "evidence": "spec.md §6 (модель данных): connections.user_id FK→users, схема не предусматривает ON DELETE CASCADE; R-B8 (отключение) описывает отзыв токенов и статус not_connected, а не удаление строки connections. Прогон: .venv/bin/python -m pytest -q → 648 passed, 1 failed (только этот тест).",
+  "proposed_resolution": "Сценарий 'подключения нет' воспроизводить так, как он возможен в бою: либо создавать пользователя/сессию без строки connections, либо удалять зависимые строки перед DELETE (upstream_tokens, refresh_tokens, oauth_codes для этого connection_id), либо переводить подключение в not_connected. Продуктовый код менять не требуется."
+}
