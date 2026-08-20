@@ -196,21 +196,39 @@ MCP-сессии, окна rate-limit и состояние circuit-breaker; п�
 заново. Дамп содержит персональные данные и зашифрованные токены — хранить рядом с
 сертификатами, с тем же ограничением доступа.
 
-Резервная копия:
+Резервная копия — скриптом `deploy/backup.sh` (WSL) или `deploy/backup.ps1`
+(PowerShell 7, без WSL). Оба делают одно и то же: дамп Postgres в
+`deploy/backups/hub-<дата>-<время>.dump` (формат `custom`), рядом копия `.env`,
+проверка сигнатуры дампа и ротация последних `N` копий (по умолчанию 7).
+Ненулевой код возврата при любой ошибке — задание в планировщике не провалится молча.
 
 ```bash
 # внутри WSL, каталог deploy/
-mkdir -p backups
-docker compose -f docker-compose.yml -f docker-compose.windows.yml exec -T postgres \
-  pg_dump -U hub -d hub --format=custom > backups/hub-$(date +%Y%m%d-%H%M).dump
-cp .env backups/env-$(date +%Y%m%d-%H%M).bak
+bash ./backup.sh                    # 7 последних копий в deploy/backups
+BACKUP_KEEP=14 bash ./backup.sh     # хранить 14
+BACKUP_DIR=/mnt/d/backup bash ./backup.sh
 ```
 
-Ежедневно по расписанию — через «Планировщик заданий» Windows, действие
-`wsl -d <дистрибутив> -- bash -lc "cd ~/opencode-mcp-hub/deploy && ./backup.sh"`,
-либо тем же однострочником. Хранить 7 последних копий.
+```powershell
+pwsh -File .\backup.ps1
+pwsh -File .\backup.ps1 -Keep 14 -BackupDir D:\backup\hub
+```
 
-Восстановление:
+Оба скрипта по умолчанию берут пару файлов compose Windows-стенда
+(`docker-compose.yml` + `docker-compose.windows.yml`). Если стенд поднят иначе —
+`BACKUP_COMPOSE_FILES` / `-ComposeFiles` и `BACKUP_PROJECT` / `-Project`.
+
+Ежедневно по расписанию — «Планировщик заданий» Windows, действие на выбор:
+
+```
+wsl -d <дистрибутив> -- bash -lc "cd ~/opencode-mcp-hub/deploy && ./backup.sh"
+pwsh -File C:\opencode-mcp-hub\deploy\backup.ps1
+```
+
+Каталог `deploy/backups/` в git не попадает: дамп содержит персональные данные и
+зашифрованные токены.
+
+Восстановление (порядок описан и в шапке `backup.sh`/`backup.ps1`):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.windows.yml stop hub

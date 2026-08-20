@@ -201,6 +201,15 @@ circuit-breaker, denylist отозванных `jti`, транзакции `/oau
 `/.well-known/opencode` и метаданных. Именно так выглядит «сервер исчез после выкатки»,
 если забыли добавить переменную окружения.
 
+Где задаются переменные facade-серверов:
+
+| Стенд | k8s |
+|---|---|
+| `deploy/.env`: `<ALIAS>_OAUTH_CLIENT_ID` и `<ALIAS>_OAUTH_CLIENT_SECRET` | `catalogOAuth.servers.<alias>.clientId` (env) и ключ `<ALIAS>_OAUTH_CLIENT_SECRET` в Secret релиза |
+
+Таблица «alias → переменные» — в `deploy/helm/README.md`. Список ненастроенных
+серверов печатает `mcp-hub catalog validate`.
+
 ## 9. Набор метрик для дашборда (D6-12)
 
 Все серии отдаёт `GET /metrics` в формате Prometheus 0.0.4. Имена — фактические,

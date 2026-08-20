@@ -11,6 +11,7 @@ htmlcov/
 .coverage
 .DS_Store
 deploy/.env
+deploy/backups/
 deploy/caddy/certs/
 *.egg-info/
 loadtest/.seed/
