@@ -1,0 +1,19 @@
+{
+  "id": "BUG-I5-001",
+  "related_ac": "AC-142 (предлагаемый; см. reports/test-report-i5.md), N5-B1",
+  "severity": "medium",
+  "title": "release.sh: json_escape не экранирует управляющие символы — перевод строки в --hub-url даёт синтаксически битый manifest.json, и самопроверка N5-B2 этого не замечает",
+  "repro_steps": [
+    "Собрать каталог артефактов: bin/opencode в opencode-<os>-<arch>-1.17.9-magnit.1.zip и tander-ca-bundle.pem",
+    "bash installers/release.sh --artifacts <ART> --version 1.17.9-magnit.1 --ca <ART>/tander-ca-bundle.pem --hub-url \"$(printf 'https://hub.test/a\\nb')\" --out <OUT> --targets linux-x64",
+    "Распаковать собранный архив и проверить манифест строгим парсером: python3 -c 'import json,sys; json.load(open(sys.argv[1]))' <root>/common/manifest.json"
+  ],
+  "expected": "N5-B1 ревизии 1.1: «строковые значения, попадающие в манифест, экранируются в JSON». Собранный common/manifest.json обязан быть синтаксически корректным JSON при любом значении --hub-url (либо release.sh обязан отвергнуть такое значение до сборки с кодом 2). Кавычка и обратный слэш экранируются верно — экранирования требуют и управляющие символы (перевод строки, возврат каретки, табуляция).",
+  "actual": "json_escape (installers/release.sh:142-148) заменяет только обратный слэш и двойную кавычку. Перевод строки попадает в манифест как есть, внутрь строкового литерала: строка \"hub_url\": \"https://hub.test/a<LF>b\", — что JSON запрещает (Invalid control character). release.sh завершается кодом 0, архив и SHA256SUMS публикуются. Самопроверка N5-B2 (selfcheck_package) поломку не ловит: она запускает install.sh --dry-run, а самодельный awk-парсер install-posix.sh лоялен к сырым управляющим символам в строке и разбирает такой манифест успешно (проверено: --check печатает «Манифест: корректен», код 7). То есть на портал уходит пакет, не проходящий собственную схему common/manifest.schema.json.",
+  "failing_test": "installers/tests/bats/90-release.bats::AC-142: --hub-url с переводом строки → манифест остаётся валидным JSON",
+  "stacktrace": "not ok 23 AC-142: --hub-url с переводом строки → манифест остаётся валидным JSON\n# (in test file installers/tests/bats/90-release.bats, line 362)\n#   `return 1' failed\n# manifest.json не является валидным JSON:\n# json.decoder.JSONDecodeError: Invalid control character at: line 7 column 33 (char 147)",
+  "suspected_area": "installers/release.sh:142-148 (json_escape) — гипотеза: дописать замену управляющих символов (\\n, \\r, \\t и прочие < 0x20) либо отвергать такие значения --hub-url аргументной проверкой, как это уже сделано для --version. Вторая (необязательная) точка — installers/release.sh:333-390 (selfcheck_package): самопроверка не проверяет манифест строгим парсером и потому пропускает поломку.",
+  "impact": "Пользовательского поведения на POSIX не меняет (парсер install-posix.sh терпим к сырым управляющим символам), но контракт N5-B1 нарушен: собранный пакет не проходит собственную схему manifest.schema.json, а install.ps1 разбирает манифест через ConvertFrom-Json — строгий парсер .NET, то есть windows-пакет с таким манифестом вероятно окажется неустановимым. Ломается тихо: release.sh отдаёт код 0, самопроверка N5-B2 проходит. Триггер — значение --hub-url с переводом строки, задаваемое сборщиком/CI, не пользователем; отсюда severity=medium, а не high.",
+  "iteration": 5,
+  "status": "open"
+}
