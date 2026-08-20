@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic.script import ScriptDirectory
 from asgi_lifespan import LifespanManager
 from sqlalchemy import event, inspect, text
 
@@ -17,7 +18,9 @@ from hub.db import build_engine
 from hub.kv import InMemoryKeyValueStore
 from hub.migrate import (
     ADVISORY_LOCK_ID,
+    BASE_REVISION,
     _lock,
+    alembic_config,
     current_revision,
     head_revision,
     upgrade,
@@ -423,7 +426,14 @@ async def test_current_revision_is_none_for_empty_database(tmp_path: Path) -> No
 
 @pytest.mark.ac("AC-138")
 def test_head_revision_is_i3() -> None:
-    assert head_revision() == "0002_i3_oauth"
+    """Head — ревизия I-4 (``connections.auth_method``, R-U4), цепочка от базовой непрерывна."""
+    assert head_revision() == "0003_i4_user_token"
+    script = ScriptDirectory.from_config(alembic_config())
+    chain = [rev.revision for rev in script.walk_revisions()][::-1]
+    assert chain == ["0001_i1_base", "0002_i3_oauth", "0003_i4_user_token"]
+    assert chain[0] == BASE_REVISION and chain[-1] == head_revision()
+    for previous, current in zip(chain, chain[1:], strict=False):
+        assert script.get_revision(current).down_revision == previous
 
 
 # --- AC-156 ----------------------------------------------------------------

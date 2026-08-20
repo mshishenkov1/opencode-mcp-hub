@@ -25,6 +25,10 @@ from tests.support import (
 REPO_CATALOG = Path(__file__).resolve().parents[1] / "catalog.yaml"
 REPO_CATALOG_VARS = {
     "TAG_MCP_URL": "https://tag-mcp.test/mcp",
+    # Адрес проверки токена ТЭГ (R-U3): переменная задаётся развёртыванием, как и TAG_MCP_URL.
+    # TAG_OAUTH_CLIENT_ID намеренно не задаётся: он объявлен внутри недоступного способа
+    # corp_oauth и не обязан быть настроен (R-U1, уточнение R-C2) — сервер остаётся видимым.
+    "TAG_VERIFY_URL": "https://tag.test/api/v4/users/me",
     "GITLAB_OAUTH_CLIENT_ID": "gl-client",
     "GITLAB_PLATFORM_OAUTH_CLIENT_ID": "glp-client",
     "JIRA_OAUTH_CLIENT_ID": "jira-client",
