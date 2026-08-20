@@ -21,6 +21,7 @@ MSG_ERR_NO_CA='Файл CA не найден: %s'
 MSG_ERR_BAD_TARGET='Неизвестная цель сборки: %s'
 MSG_ERR_NO_CLI='Для цели %s не найден CLI-артефакт. Ожидаются: %s или %s'
 MSG_ERR_VERSION_MISMATCH='Версия артефакта не совпадает с --version: в имени %s, запрошена %s'
+MSG_ERR_BAD_VERSION='Недопустимый формат --version: %s (ожидается <upstream>-magnit.<N>, например 1.17.9-magnit.1)'
 MSG_ERR_NO_HASH_TOOL='Не найдена утилита вычисления sha256: sha256sum, shasum -a 256, openssl dgst -sha256'
 MSG_ERR_SELFCHECK='Самопроверка пакета не пройдена: %s (код %s)'
 MSG_ERR_SELFCHECK_HASH='Самопроверка пакета не пройдена: sha256 файла %s в архиве не совпадает'
@@ -108,6 +109,15 @@ self_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 [ -n "$hub_url" ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--hub-url"; }
 [ -d "$artifacts_dir" ] || die "$EX_ARGS" "$MSG_ERR_NO_ARTIFACTS_DIR" "$artifacts_dir"
 [ -f "$ca_file" ] || die "$EX_ARGS" "$MSG_ERR_NO_CA" "$ca_file"
+
+# --version обязана проходить собственную схему манифеста (N5-P3,
+# ^[0-9]+\.[0-9]+\.[0-9]+-magnit\.[0-9]+$): иначе собрался бы пакет, не проходящий свою же схему.
+case $version in
+  *[!0-9A-Za-z._-]*) die "$EX_ARGS" "$MSG_ERR_BAD_VERSION" "$version" ;;
+esac
+if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-magnit\.[0-9]+$'; then
+  die "$EX_ARGS" "$MSG_ERR_BAD_VERSION" "$version"
+fi
 if [ -z "$out_dir" ]; then
   out_dir="$self_dir/dist"
 fi
@@ -126,6 +136,15 @@ elif command -v openssl >/dev/null 2>&1; then
 else
   die "$EX_FAIL" "$MSG_ERR_NO_HASH_TOOL"
 fi
+
+# Экранирование строки для вставки в JSON-манифест: обратный слэш и двойная кавычка (N5-P3).
+# Без него кавычка/слэш в --hub-url или имени desktop-файла дали бы синтаксически битый манифест.
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
 
 sha256_of() {
   case $hash_tool in
@@ -245,9 +264,12 @@ write_manifest() {
   local dest=$1 os=$2 arch=$3 bin_name=$4
   local ca_sha=$5 cli_sha=$6 cli_size=$7
   local desktop_rel=$8 desktop_sha=$9 desktop_size=${10} desktop_type=${11} desktop_app=${12}
-  local built_at purge_a purge_b desktop_block=""
+  local built_at purge_a purge_b desktop_block="" hub_url_json desktop_rel_json desktop_app_json
 
   built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  hub_url_json=$(json_escape "$hub_url")
+  desktop_rel_json=$(json_escape "$desktop_rel")
+  desktop_app_json=$(json_escape "$desktop_app")
   if [ "$os" = "windows" ]; then
     purge_a='%USERPROFILE%\\.config\\opencode'
     purge_b='%USERPROFILE%\\.local\\share\\opencode'
@@ -264,13 +286,13 @@ write_manifest() {
     desktop_block=",
     {
       \"kind\": \"desktop\",
-      \"file\": \"$desktop_rel\",
+      \"file\": \"$desktop_rel_json\",
       \"sha256\": \"$desktop_sha\",
       \"size\": $desktop_size,
       \"installer_type\": \"$desktop_type\""
     if [ "$desktop_type" = "dmg" ]; then
       desktop_block="$desktop_block,
-      \"app_name\": \"$desktop_app\""
+      \"app_name\": \"$desktop_app_json\""
     fi
     desktop_block="$desktop_block
     }"
@@ -283,7 +305,7 @@ write_manifest() {
   "version": "$version",
   "os": "$os",
   "arch": "$arch",
-  "hub_url": "$hub_url",
+  "hub_url": "$hub_url_json",
   "built_at": "$built_at",
   "source_release": "v$version",
   "ca": {
