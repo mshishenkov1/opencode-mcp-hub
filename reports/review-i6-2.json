@@ -1,0 +1,101 @@
+{
+  "verdict": "request_changes",
+  "iteration": "I-6",
+  "cycle": 2,
+  "scope": "git diff d4ceaf3...HEAD -- deploy loadtest reports .gitignore (1122bec, f554272, 94c291b, cf50289)",
+  "gates": {
+    "pytest -q": "649 passed, 1 deselected (exit 0)",
+    "ruff check src tests loadtest": "All checks passed",
+    "helm lint × 6 (оба чарта × default/pilot/prod)": "6 × «1 chart(s) linted, 0 chart(s) failed»",
+    "docker compose config -q (базовый / +windows / +loadtest)": "все три OK",
+    "deploy/smoke.sh -k https://localhost:8443 (живой стенд hubi3)": "10 OK / 0 FAIL / 6 SKIP, exit 0",
+    "helm template + скриптовая сверка secretKeyRef ⊆ ключи Secret/ExternalSecret (6 рендеров)": "prod обоих чартов и все профили tag-mcp — висящих ссылок нет; в hub/default и hub/pilot без --set висит HUB_DATABASE_URL (см. finding), четыре *_OAUTH_CLIENT_SECRET висят с optional: true (штатно)",
+    "негативные прогоны validateSecrets (7 штук)": "все 7 отбиты {{ fail }} с понятным текстом",
+    "deploy/backup.sh на живом стенде hubi3": "дамп 31 729 байт, права 600 у .dump и env-*.bak, pg_restore -l читает (97 TOC, 11 TABLE DATA), ротация KEEP=3 и KEEP=1 верна, 4 из 4 ошибочных сценариев дают exit 1 без .part-мусора",
+    "loadtest/tools/check_no_prod.sh (обе стороны)": "боевой адрес в *.json → exit 1 (дыра закрыта), evil-prod.example.com в *.json → exit 1, tag.magnit.ru → exit 1; summary-*.json и seed.json исключены, чистый контур → exit 0",
+    "loadtest/tools/seed.py::_check_no_prod (обе стороны)": "боевые HUB_PUBLIC_URL / HUB_DATABASE_URL / HUB_REDIS_URL / HUB_LITELLM_BASE_URL — все четыре отбиты SystemExit; env строго по шагу 3 README проходит валидацию конфигурации (падает только на connect к неподнятому Postgres — ConfigError'а больше нет)"
+  },
+  "previous_must_fix_status": [
+    {"item": "рассогласование Secret'ов БД/Redis в прод-профиле", "status": "closed", "evidence": "helm template values-prod.yaml: единственный Secret hub-opencode-mcp-hub-secrets, ExternalSecret кладёт в него ровно те 9 ключей, которые читают Deployment и Job; external.postgres/redis.existingSecret пусты; скриптовая сверка — 10 secretKeyRef, 0 висящих"},
+    {"item": "KEYCLOAK_CLIENT_SECRET не доставляется", "status": "closed", "evidence": "ключ есть в externalSecret.data, подключён без optional; удаление его из data даёт {{ fail }} «hub.webAuth=keycloak: KEYCLOAK_CLIENT_SECRET обязателен…»; webAuth=keycloak при secrets.create=false и выключенном ESO тоже отбивается"},
+    {"item": "OAuth-креды каталога не доставляются", "status": "closed", "evidence": "catalogOAuth.servers: client_id → env (только при непустом значении), client_secret → ключ общего Secret с optional: true; имена сверены с боевым catalog.yaml — gitlab/gitlab-platform/jira/confluence и TAG_MCP_URL совпадают строка в строку; таблица alias → переменные в deploy/helm/README.md и runbook.md §8 верна"},
+    {"item": "нерабочий шаг 3 в loadtest/README.md", "status": "closed", "evidence": "HUB_LITELLM_BASE_URL=http://localhost:8080 добавлен; воспроизведено: seed.py по инструкции проходит валидацию настроек"},
+    {"item": "ссылка на несуществующий backup.sh", "status": "closed", "evidence": "deploy/backup.sh (100755) и backup.ps1 добавлены, §8 README-windows переписан, deploy/backups/ в .gitignore"}
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "where": "deploy/helm/opencode-mcp-hub/templates/externalsecret.yaml + _helpers.tpl (hub.secretHookAnnotations)",
+      "what": "Hook-схема доставки Secret'а безопасна для обычного Secret, но в прод-профиле она уничтожает живой Secret на КАЖДОМ helm upgrade. Рендер values-prod.yaml: у ExternalSecret стоит helm.sh/hook: pre-install,pre-upgrade с hook-delete-policy: before-hook-creation, а target.creationPolicy: Owner. Owner означает ownerReference на целевом Secret, поэтому удаление ExternalSecret (а before-hook-creation удаляет его перед каждым pre-upgrade) уводит за собой сборщиком мусора и сам Secret hub-opencode-mcp-hub-secrets. Helm не ждёт готовности CRD-ресурса и сразу переходит к Job миграций (weight -5): пока оператор не пересоздал Secret, под Job'а стоит в CreateContainerConfigError, а любой рестарт пода Hub, scale-up HPA (в проде 4…20) или вытеснение с ноды в это окно даёт незапускающийся под. Если Vault/ESO в этот момент недоступен, upgrade падает по activeDeadlineSeconds=600 и оставляет прод БЕЗ Secret'а. Плюс гонка: GC старого Secret может удалить уже пересозданный оператором. В документации зафиксирована только другая, меньшая плата («helm uninstall не удаляет hook-ресурс») — про удаление Secret на upgrade нет ни слова ни в values.yaml, ни в deploy/helm/README.md. Самый дешёвый вариант — target.creationPolicy: Orphan (одна строка: оператор по-прежнему создаёт и обновляет Secret, но не забирает его с собой); альтернативы — повесить на ExternalSecret только pre-install (тогда upgrade его не трогает, но изменения externalSecret.data придётся применять отдельно — это надо описать) либо убрать hook и перенести миграцию в post-install/post-upgrade или init-контейнер (advisory-блокировка R-M1 уже делает параллельный старт безопасным). ОГОВОРКА: проверено по отрендеренным манифестам и документированной семантике Helm/external-secrets — кластера с установленным ESO в I-6 нет.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/helm/opencode-mcp-hub/templates/secret.yaml (ключ databaseUrl) ↔ _helpers.tpl (hub.dbEnv, hub.validateSecrets)",
+      "what": "Асимметрия, из-за которой profil default/pilot без --set secrets.databaseUrl рендерит висящую ссылку. HUB_SECRET_KEY и HUB_ENCRYPTION_KEY кладутся в Secret всегда, пусть и пустыми, а HUB_DATABASE_URL — только под {{ if .Values.secrets.databaseUrl }}; при этом hub.dbEnv и hub.migrateEnv ссылаются на него безусловно и без optional. Скриптовая сверка на `helm template` с values.yaml и values-pilot.yaml показывает ровно эту висящую пару (Deployment и Job → hub-…-secrets/HUB_DATABASE_URL, ключа в Secret нет). validateSecrets ловит такой случай только в ветке externalSecret. Практический эффект: hook-Job миграций встаёт в CreateContainerConfigError, установка падает по таймауту, а предупреждение NOTES.txt про пустой secrets.databaseUrl оператор не увидит вовсе — NOTES печатается только при УСПЕШНОЙ установке. Параметр документирован как обязательный (таблица ключей в README, комментарии в values-pilot.yaml), поэтому не must_fix, но лечится одной строкой: убрать guard и класть ключ пустым, как это уже сделано для secretKey/encryptionKey, — тогда ошибка будет читаемым ConfigError на старте, а не событием kubelet.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/backup.ps1 (нет аналога chmod 600) ↔ deploy/backup.sh:чтение",
+      "what": "backup.sh явно ставит 600 на дамп и на env-<дата>.bak (проверено на живом стенде: -rw------- у обоих файлов), а backup.ps1 ограничения доступа не выставляет вовсе — и hub-*.dump, и env-*.bak получают ACL, унаследованный от каталога deploy\\backups. В копии .env лежит HUB_ENCRYPTION_KEY, без которого токены целевых систем в дампе бесполезны, — то есть эти два файла рядом дают полный доступ к чужим токенам. На доменной машине наследуемый ACL часто включает чтение для Authenticated Users. Добавить icacls (наследование выключить, оставить владельца и админов) либо хотя бы предупреждение в §8 README-windows. Мелочь в backup.sh: chmod 600 выполняется ПОСЛЕ записи, то есть .part и копия .env кратко существуют с правами по umask.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/backup.sh + deploy/backup.ps1 (STAMP до минут)",
+      "what": "Имя копии — hub-<ГГГГММДД>-<ЧЧММ>.dump, поэтому два запуска в пределах одной минуты молча перезаписывают друг друга (воспроизведено: второй прогон подменил hub-20260820-1341.dump без единого предупреждения). Для суточного расписания безобидно, но при ручной перепроверке перед восстановлением оператор может потерять только что снятую копию. Секунды в метке либо отказ, если файл уже существует.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "deploy/backup.ps1, функция Invoke-Compose",
+      "what": "Не проверено вживую (pwsh на машине ревью нет), но по коду подозрительно: при $ErrorActionPreference = 'Stop' конструкция `& docker … 2>&1` в PowerShell 7 превращает вывод внешней команды в stderr в ErrorRecord'ы в потоке успеха, и это способно выбросить терминирующий NativeCommandError ещё до разбора $LASTEXITCODE — то есть ровно на том месте, где скрипт намеренно разбирает коды вручную ($PSNativeCommandUseErrorActionPreference = $false этот путь не закрывает; docker compose пишет в stderr, в том числе безобидные предупреждения). Первый же вызов — ps -q postgres. Прогнать backup.ps1 на Windows с pwsh 7 хотя бы один раз (успех + ветка «postgres не запущен»); при подтверждении — локальный $ErrorActionPreference = 'Continue' вокруг вызова.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "loadtest/tools/check_no_prod.sh (комментарий про исключения) и loadtest/tools/seed.py::_check_no_prod (текст SystemExit)",
+      "what": "Две мелочи в закрытых дырах. (1) Комментарий обещает, что исключаются «только артефакты прогона (summary-*.json, seed.json)», а find исключает ещё и package-lock.json — файла такого в loadtest/ сегодня нет, но комментарий и код разошлись. (2) Сообщение _check_no_prod печатает URL целиком, вместе с паролем: прогон с HUB_REDIS_URL=redis://:pw@redis.corp.tander.ru:6379/0 выводит пароль в stderr (и в лог CI, если гейт станет шагом конвейера). Достаточно печатать имя переменной и хост.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "loadtest/k6/refresh_storm.js + deploy/smoke.sh ↔ deploy/smoke.ps1",
+      "what": "Два minor'а первого цикла остались нетронутыми (git diff по loadtest/k6 и deploy/smoke.* пуст) — это правомерно, оба были must_fix: false, но фиксирую, что они открыты. (1) Порог oauth_refresh: p(95)<THRESHOLD_REFRESH_P95 по умолчанию 100 мс заведомо не выполняется уже на 1/10 нагрузки (отчёт: 242,4 мс), поэтому refresh_storm.js всегда завершается ненулевым кодом и в CI не ставится; README теперь честно пишет, что значение «согласованное», но в config.js оно прежнее. (2) Расхождение smoke.sh и smoke.ps1: bash ищет подстроку '\"status\":\"ok\"' без пробелов, ps1 — регулярку с \\s*, и bash не проверяет HTTP-код у /.well-known/opencode и /metrics.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "checked_ok": [
+    "Сходимость секретов (пункт 1). Скрипт отрендерил helm template для обоих чартов × default/pilot/prod, собрал множество secretKeyRef.name/key из Deployment, Job и initContainers и сверил с ключами, которые создаёт Secret/ExternalSecret. opencode-mcp-hub/prod: 10 ссылок, 9 ключей, 0 висящих. tag-mcp default/pilot/prod: 2/2/3 ссылки, 0 висящих. Единственный Secret на релиз (<release>-secrets), отдельных Secret'ов под БД, Redis и Keycloak чарты больше не ждут. Четыре *_OAUTH_CLIENT_SECRET подключены с optional: true — отсутствие ключа поду не мешает, это осознанное поведение «сервер не настроен».",
+    "Секреты не утекают. В ConfigMap каталога только ссылки ${*_OAUTH_CLIENT_ID} и env:*_OAUTH_CLIENT_SECRET; в values всех профилей значения секретов пусты; в Deployment открытым значением идут только несекретные переменные (проверено автоматически: единственные срабатывания эвристики — HUB_TOKEN_REFRESH_ENABLED=true и HUB_RATE_LIMIT_TOKEN=60); NOTES.txt печатает имена ключей и предупреждения, но не значения. Мёртвой заглушки __from_secret__ в values-pilot.yaml больше нет.",
+    "validateSecrets (пункт 2) — 7 негативных прогонов, все отбиты на этапе шаблона: ESO без HUB_SECRET_KEY / без HUB_ENCRYPTION_KEY / без HUB_DATABASE_URL / без KEYCLOAK_CLIENT_SECRET; webAuth=keycloak при secrets.create=false и выключенном ESO; secrets.create вместе с externalSecret.enabled; пустой catalog.content. Тексты называют и ключ, и причину, и способ починки. Положительный контроль: secrets.create=false + secrets.existingSecret рендерится штатно. В tag-mcp работают свои проверки: ESO без MM_OAUTH_CLIENT_SECRET и полное отсутствие адреса Redis отбиваются.",
+    "OAuth-креды каталога (пункт 4). Соответствие alias → переменные сверено с боевым catalog.yaml построчно: gitlab → GITLAB_OAUTH_CLIENT_ID/SECRET, gitlab-platform → GITLAB_PLATFORM_*, jira → JIRA_*, confluence → CONFLUENCE_*, нативный tag → ${TAG_MCP_URL} (задан в hub.env как http://tag-mcp.mcp-hub.svc/mcp, OAuth-креды живут в чарте tag-mcp) — таблица в deploy/helm/README.md верна. helm template values-prod.yaml с настоящим каталогом и без единого клиента рендерится успешно: переменных *_OAUTH_CLIENT_ID в Deployment нет (guard на пустое значение), четыре плейсхолдера остаются в ConfigMap, client_secret'ы подключены optional. С --set catalogOAuth.servers.jira.clientId=… переменная появляется. Поведение «сервер не настроен» подтверждено на живом стенде: hubi3 работает без единого выданного приложения, smoke даёт 10 OK / 0 FAIL, catalog.py:568 помечает запись unconfigured, oauth.py:158 и catalog.py:321 её просто не публикуют.",
+    "backup.sh (пункт 5) прогнан на живом стенде hubi3 (BACKUP_PROJECT=hubi3, BACKUP_COMPOSE_FILES=docker-compose.yml, дампы в scratchpad, стенд не тронут). Дамп 31 729 байт, права -rw------- у .dump и у env-*.bak, pg_restore -l внутри контейнера читает архив: 97 TOC-записей, Format CUSTOM, 11 таблиц с данными. Ротация проверена на подложенных копиях: KEEP=3 оставил три свежих .dump и три .bak, KEEP=1 — по одному, порядок лексикографический и он же хронологический. Ошибки: postgres не запущен → exit 1 с подсказкой команды ps; несуществующий файл compose → exit 1; BACKUP_KEEP=abc → exit 1; pg_dump упал (несуществующая БД) → exit 1, .part удалён trap'ом, предыдущая годная копия не пострадала. Пароль нигде не печатается (pg_dump ходит внутрь контейнера через docker compose exec -U, PGPASSWORD не используется); .env копируется с правами 600. deploy/backups/ добавлен в .gitignore, файл исполняемый (100755) — строчка планировщика ./backup.sh рабочая.",
+    "backup.ps1 прочитан. Логика эквивалентна bash-версии; правильно обойдена главная ловушка Windows — дамп пишется внутрь контейнера через -f и забирается docker compose cp, а не перенаправлением вывода PowerShell (которое испортило бы двоичный файл). Проверка сигнатуры PGDMP, удаление испорченного файла, ротация срезом $files[$Keep..], exit 1 через stderr на всех ошибках, требование pwsh 7 зафиксировано в README-windows (строка 160) — Get-Content -AsByteStream именно оттуда.",
+    "check_no_prod.sh и seed.py (пункт 6) проверены в обе стороны, см. gates. Дыра с ! -name \"*.json\" закрыта: подсунутый в loadtest/ файл cfg.json с боевым адресом ловится обеими линиями (шаблон домена и allow-list хостов), хост вне allow-list без корпоративного домена — второй линией; артефакты summary-*.json и seed.json по-прежнему исключены; чистый контур даёт exit 0. seed.py::_check_no_prod теперь покрывает все четыре адреса, `if not url: continue` не даёт упасть на незаданном Redis. Рабочее дерево после проверок чистое.",
+    "loadtest/README.md шаг 3 рабочий: с перечисленным набором export'ов seed.py доходит до соединения с Postgres (ConfigError HUB_LITELLM_BASE_URL не возникает). Шаг 4 теперь кладёт --summary-export в reports/loadtest-<дата>/ — замечание первого цикла про непроверяемость отчёта по артефактам закрыто.",
+    "Прочие minor'ы первого цикла закрыты: HUB_SITE_ADDRESS и HUB_HTTPS_PORT добавлены в deploy/.env.example с комментарием; предусловие trustProxy зафиксировано и в values.yaml, и в values-prod.yaml, и в README, а сочетание istio.enabled + trustProxy печатает предупреждение в NOTES.txt; заглушка external.postgres.url в пилоте убрана, для redis в комментарии явно сказано, что URL с паролем идёт только через Secret.",
+    "runbook.md §8 дополнен таблицей «где задаются переменные facade-серверов» для стенда и для k8s со ссылкой на таблицу alias'ов в deploy/helm/README.md — симптом «сервер исчез после выкатки» теперь ведёт к конкретному месту настройки."
+  ],
+  "notes": [
+    "Для пилота (secrets.create=true) hook на обычном Secret тоже означает delete+create на upgrade, но оба действия делает сам Helm в рамках одной операции, окно — миллисекунды и без участия внешнего оператора; отдельным замечанием не оформляю.",
+    "Живой стенд hubi3 не тронут: дампы снимались в scratchpad, временный файл в контейнере postgres удалён, временных compose-контуров не поднималось."
+  ],
+  "backlog": [
+    "Полный прогон S-07 (30 000 VU, ~5 000 вызовов/с) перед релизом.",
+    "Согласовать порог p95 для /oauth/token и внести в THRESHOLD_REFRESH_P95, иначе refresh_storm.js не поставить в CI.",
+    "Свести семантику smoke.sh и smoke.ps1; сверять alias'ы с каталогом, чтобы SKIP не маскировал сломанные метаданные.",
+    "Метрики hub_circuit_breaker_state и gauge числа подключений по alias.",
+    "helm --dry-run/установка в настоящий namespace с установленным external-secrets — только там проверяется реальное поведение hook-схемы и creationPolicy.",
+    "Хотя бы один прогон backup.ps1 на Windows с pwsh 7."
+  ],
+  "dispute_resolutions": []
+}
