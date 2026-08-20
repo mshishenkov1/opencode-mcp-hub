@@ -21,17 +21,16 @@ import os
 import secrets
 import sys
 import uuid
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from hub.app import create_app  # noqa: E402
-from hub.broker import STATUS_CONNECTED, UpstreamTokens  # noqa: E402
-from hub.db import ApiKey, User  # noqa: E402
-from hub.login import sha256_hex  # noqa: E402
+from hub.app import create_app
+from hub.broker import STATUS_CONNECTED, UpstreamTokens
+from hub.db import ApiKey, User
+from hub.login import sha256_hex
 
 ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1", "hub", "mock-upstream", "postgres", "redis")
 
