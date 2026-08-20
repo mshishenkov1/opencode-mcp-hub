@@ -31,8 +31,14 @@ hub:
   # (migrations.enabled). Advisory-блокировка в коде (R-M1) позволяет и true,
   # но при выкатке волнами предсказуемее отдельный шаг.
   autoMigrate: false
-  # HUB_TRUST_PROXY: за ingress/istio адрес соединения одинаков у всех клиентов,
+  # HUB_TRUST_PROXY: за ingress адрес соединения одинаков у всех клиентов,
   # поэтому rate-limit по IP имеет смысл только с доверенным X-Forwarded-For (R-T1).
+  # ПРЕДУСЛОВИЕ: значение true допустимо, только пока граничный прокси ПЕРЕЗАПИСЫВАЕТ
+  # X-Forwarded-For (nginx-ingress по умолчанию — да; с use-forwarded-headers: true —
+  # уже нет). Envoy в istio заголовок ДОПОЛНЯЕТ, и левый элемент задаёт клиент,
+  # то есть HUB_RATE_LIMIT_REGISTER/HUB_RATE_LIMIT_TOKEN обходятся подделкой заголовка:
+  # при istio.enabled=true оставляйте trustProxy: false, пока у Gateway не настроен
+  # numTrustedHops. Значение задаётся профилем — см. values-pilot/values-prod.
   trustProxy: true
   # HUB_WEB_AUTH: keycloak | litellm
   webAuth: keycloak
@@ -60,43 +66,105 @@ hub:
     HUB_MAX_SSE_PER_USER: "4"
     HUB_UPSTREAM_TIMEOUT: "30.0"
     HUB_TOKEN_REFRESH_ENABLED: "true"
+    # ${TAG_MCP_URL} из catalog.yaml (нативный сервер ТЭГ, чарт tag-mcp).
+    # Без этой переменной alias tag остаётся «ненастроенным» и в каталог не попадает.
+    TAG_MCP_URL: http://tag-mcp.mcp-hub.svc/mcp
 
 # --- внешние хранилища ------------------------------------------------------
-# Postgres и Redis в этом чарте не разворачиваются (subchart вне объёма I-6):
-#   external.postgres.url / external.redis.url — значение попадает в управляемый Secret;
-#   external.postgres.existingSecret — готовый Secret с ключом, значение в чарт не копируется.
+# Postgres и Redis этот чарт не разворачивает (subchart вне объёма I-6).
+# Адреса БД и Redis — секреты, поэтому лежат в ТОМ ЖЕ Secret, что и остальные
+# секреты Hub (см. секцию secrets): одна схема для Deployment и для Job миграций.
+# external.*.existingSecret нужен только тогда, когда БД/Redis заводит отдельный
+# оператор со своим Secret — тогда ключ читается оттуда, а не из общего Secret.
 external:
   postgres:
-    url: ""
     existingSecret:
-      name: opencode-mcp-hub-db
+      name: ""
       key: url
   redis:
+    # Redis без пароля можно задать открытым значением — оно попадёт в манифест
+    # Deployment. Redis С ПАРОЛЕМ задавайте только через secrets.redisUrl
+    # (общий Secret) или existingSecret, иначе пароль окажется в манифесте.
     url: ""
     existingSecret:
       name: ""
       key: url
 
 # --- секреты ----------------------------------------------------------------
+# Все секретные переменные Hub лежат в ОДНОМ Secret: secrets.existingSecret,
+# либо (по умолчанию) <release>-secrets. Ровно один источник наполнения:
+#   secrets.create=true         — Secret создаёт чарт из значений ниже (пилот/тест);
+#   secrets.create=false        — Secret заведён вне чарта (kubectl/оператор);
+#   externalSecret.enabled=true — Secret наполняет external-secrets из Vault.
+# Перечень обязательных ключей — deploy/helm/README.md, раздел «Секреты».
 secrets:
-  # create: true — чарт создаёт Secret из значений ниже (для пилота/теста).
-  # Для продуктива: create=false + existingSecret, либо externalSecret.enabled=true.
   create: true
   existingSecret: ""
+  # Имена ключей внутри Secret. По умолчанию совпадают с именами переменных
+  # окружения Hub; менять имеет смысл только при переиспользовании чужого Secret.
+  keys:
+    secretKey: HUB_SECRET_KEY
+    encryptionKey: HUB_ENCRYPTION_KEY
+    adminToken: HUB_ADMIN_TOKEN
+    keycloakClientSecret: KEYCLOAK_CLIENT_SECRET
+    databaseUrl: HUB_DATABASE_URL
+    redisUrl: HUB_REDIS_URL
+  # Значения ниже используются только при secrets.create=true и в git не коммитятся:
+  # подставляются через --set/-f при установке.
   # HUB_SECRET_KEY — подпись JWT Hub
   secretKey: ""
   # HUB_ENCRYPTION_KEY — ключ Fernet (44 символа urlsafe-base64) для токенов систем
   encryptionKey: ""
   # HUB_ADMIN_TOKEN — включает POST /admin/catalog/reload; пусто — эндпоинт выключен
   adminToken: ""
+  # KEYCLOAK_CLIENT_SECRET — обязателен при hub.webAuth=keycloak (R-T2)
   keycloakClientSecret: ""
-  # Секреты OAuth-приложений целевых систем: имя переменной → значение
-  oauth: {}
-  #  GITLAB_OAUTH_CLIENT_SECRET: ""
-  #  JIRA_OAUTH_CLIENT_SECRET: ""
+  # HUB_DATABASE_URL, напр. postgresql+asyncpg://hub:пароль@postgres.svc:5432/hub
+  databaseUrl: ""
+  # HUB_REDIS_URL, напр. redis://:пароль@redis-master.svc:6379/0
+  redisUrl: ""
+  # Secret нужен Job'у миграций, а тот — hook pre-install/pre-upgrade и создаётся
+  # раньше обычных ресурсов релиза. preInstallHook=true вешает на Secret
+  # (и на ExternalSecret) тот же hook с весом -10, чтобы к запуску Job он уже был.
+  # Плата: hook-ресурс не входит в манифест релиза, `helm uninstall` его не удаляет.
+  preInstallHook: true
+
+# --- OAuth-приложения целевых систем каталога (D6-07) -----------------------
+# Боевой catalog.yaml подставляет client_id из ${<ALIAS>_OAUTH_CLIENT_ID}, а
+# client_secret читает из env:<ALIAS>_OAUTH_CLIENT_SECRET. Здесь задаётся то и другое:
+# client_id — обычная переменная окружения (не секрет), client_secret — ключ общего
+# Secret (значение при secrets.create=true, иначе externalSecret.data).
+# Пока переменные сервера не заданы, он ШТАТНО считается «ненастроенным»:
+# Hub стартует, сервер не попадает ни в каталог, ни в /.well-known/opencode,
+# ни в метаданные OAuth (catalog.yaml: status=beta). Это не ошибка выкатки.
+catalogOAuth:
+  servers:
+    gitlab:
+      idVar: GITLAB_OAUTH_CLIENT_ID
+      secretVar: GITLAB_OAUTH_CLIENT_SECRET
+      clientId: ""
+      clientSecret: ""
+    gitlab-platform:
+      idVar: GITLAB_PLATFORM_OAUTH_CLIENT_ID
+      secretVar: GITLAB_PLATFORM_OAUTH_CLIENT_SECRET
+      clientId: ""
+      clientSecret: ""
+    jira:
+      idVar: JIRA_OAUTH_CLIENT_ID
+      secretVar: JIRA_OAUTH_CLIENT_SECRET
+      clientId: ""
+      clientSecret: ""
+    confluence:
+      idVar: CONFLUENCE_OAUTH_CLIENT_ID
+      secretVar: CONFLUENCE_OAUTH_CLIENT_SECRET
+      clientId: ""
+      clientSecret: ""
 
 # Заготовка ExternalSecret (external-secrets.io/v1beta1). Значения секретов
 # в git не попадают — чарт лишь описывает, какие ключи из какого хранилища тянуть.
+# Целевой Secret — тот же самый (secrets.existingSecret либо <release>-secrets),
+# поэтому secretKey обязан совпадать с именами ключей из secrets.keys и
+# catalogOAuth.servers.*.secretVar.
 externalSecret:
   enabled: false
   apiVersion: external-secrets.io/v1beta1
@@ -104,7 +172,7 @@ externalSecret:
   secretStoreRef:
     name: corp-vault
     kind: ClusterSecretStore
-  # Каждый элемент: secretKey — ключ в итоговом Secret, remoteKey/property — путь в хранилище
+  # Каждый элемент: secretKey — ключ в итоговом Secret, remoteRef — путь в хранилище
   data:
     - secretKey: HUB_SECRET_KEY
       remoteRef:
@@ -122,6 +190,26 @@ externalSecret:
       remoteRef:
         key: ailab/opencode-mcp-hub
         property: redis_url
+    - secretKey: KEYCLOAK_CLIENT_SECRET
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: keycloak_client_secret
+    - secretKey: GITLAB_OAUTH_CLIENT_SECRET
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: gitlab_oauth_client_secret
+    - secretKey: GITLAB_PLATFORM_OAUTH_CLIENT_SECRET
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: gitlab_platform_oauth_client_secret
+    - secretKey: JIRA_OAUTH_CLIENT_SECRET
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: jira_oauth_client_secret
+    - secretKey: CONFLUENCE_OAUTH_CLIENT_SECRET
+      remoteRef:
+        key: ailab/opencode-mcp-hub
+        property: confluence_oauth_client_secret
 
 # --- каталог ----------------------------------------------------------------
 catalog:

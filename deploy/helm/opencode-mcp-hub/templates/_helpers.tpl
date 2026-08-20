@@ -54,6 +54,52 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{/*
+Есть ли ключ в списке externalSecret.data. Аргумент: dict "ctx" $ "key" "ИМЯ".
+Пустая строка — нет, "1" — есть.
+*/}}
+{{- define "hub.esoHasKey" -}}
+{{- $key := .key -}}
+{{- $found := "" -}}
+{{- if .ctx.Values.externalSecret.enabled -}}
+{{- range .ctx.Values.externalSecret.data -}}
+{{- if eq .secretKey $key -}}{{- $found = "1" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $found -}}
+{{- end -}}
+
+{{/*
+Проверки согласованности источника секретов (D6-06).
+Все секретные ключи Hub живут в одном Secret (hub.secretName); при
+externalSecret.enabled=true единственный источник — externalSecret.data,
+поэтому отсутствие обязательного ключа видно уже на этапе шаблона, а не
+CrashLoopBackOff'ом пода.
+*/}}
+{{- define "hub.validateSecrets" -}}
+{{- $keys := .Values.secrets.keys -}}
+{{- if .Values.externalSecret.enabled }}
+{{- if and (not .Values.external.postgres.existingSecret.name) (not (include "hub.esoHasKey" (dict "ctx" . "key" $keys.databaseUrl))) }}
+{{- fail (printf "externalSecret.enabled=true, но ключа %s нет ни в externalSecret.data, ни в external.postgres.existingSecret: Hub и Job миграций останутся без адреса БД" $keys.databaseUrl) }}
+{{- end }}
+{{- if not (include "hub.esoHasKey" (dict "ctx" . "key" $keys.secretKey)) }}
+{{- fail (printf "externalSecret.enabled=true, но ключа %s нет в externalSecret.data" $keys.secretKey) }}
+{{- end }}
+{{- if not (include "hub.esoHasKey" (dict "ctx" . "key" $keys.encryptionKey)) }}
+{{- fail (printf "externalSecret.enabled=true, но ключа %s нет в externalSecret.data" $keys.encryptionKey) }}
+{{- end }}
+{{- end }}
+{{- if eq .Values.hub.webAuth "keycloak" }}
+{{- if .Values.externalSecret.enabled }}
+{{- if not (include "hub.esoHasKey" (dict "ctx" . "key" $keys.keycloakClientSecret)) }}
+{{- fail (printf "hub.webAuth=keycloak: %s обязателен (settings.py, R-T2), но его нет в externalSecret.data" $keys.keycloakClientSecret) }}
+{{- end }}
+{{- else if not (or .Values.secrets.create .Values.secrets.existingSecret) }}
+{{- fail (printf "hub.webAuth=keycloak: %s обязателен (R-T2), но источник секретов не задан — включите secrets.create, secrets.existingSecret или externalSecret.enabled" $keys.keycloakClientSecret) }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{/* Имя ConfigMap с каталогом */}}
 {{- define "hub.catalogConfigMapName" -}}
 {{- if .Values.catalog.existingConfigMap -}}
@@ -105,100 +151,115 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: {{ $name }}
   value: {{ $value | quote }}
 {{- end }}
+{{- /* client_id OAuth-приложений каталога — не секрет, обычные переменные окружения.
+       Пустое значение не подставляем: сервер останется «ненастроенным». */}}
+{{- range $alias, $srv := .Values.catalogOAuth.servers }}
+{{- if and $srv.idVar $srv.clientId }}
+- name: {{ $srv.idVar }}
+  value: {{ $srv.clientId | quote }}
+{{- end }}
+{{- end }}
 {{- include "hub.secretEnv" . }}
 {{- end -}}
 
-{{/* HUB_DATABASE_URL и HUB_REDIS_URL: из отдельного Secret или из управляемого чартом */}}
+{{/*
+HUB_DATABASE_URL и HUB_REDIS_URL. Источник по умолчанию — общий Secret Hub
+(hub.secretName), ключи из secrets.keys. Отдельный Secret (external.*.existingSecret)
+используется, только если БД/Redis заводит свой оператор.
+*/}}
 {{- define "hub.dbEnv" -}}
-{{- with .Values.external.postgres }}
-{{- if .existingSecret.name }}
+{{- $keys := .Values.secrets.keys }}
 - name: HUB_DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .existingSecret.name }}
-      key: {{ .existingSecret.key }}
-{{- else if .url }}
-- name: HUB_DATABASE_URL
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "hub.secretName" $ }}
-      key: HUB_DATABASE_URL
+{{- if .Values.external.postgres.existingSecret.name }}
+      name: {{ .Values.external.postgres.existingSecret.name }}
+      key: {{ .Values.external.postgres.existingSecret.key }}
+{{- else }}
+      name: {{ include "hub.secretName" . }}
+      key: {{ $keys.databaseUrl }}
 {{- end }}
-{{- end }}
-{{- with .Values.external.redis }}
-{{- if .existingSecret.name }}
+{{- if .Values.external.redis.existingSecret.name }}
 - name: HUB_REDIS_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .existingSecret.name }}
-      key: {{ .existingSecret.key }}
-{{- else if .url }}
+      name: {{ .Values.external.redis.existingSecret.name }}
+      key: {{ .Values.external.redis.existingSecret.key }}
+{{- else if or .Values.secrets.redisUrl (include "hub.esoHasKey" (dict "ctx" . "key" $keys.redisUrl)) }}
 - name: HUB_REDIS_URL
-  value: {{ .url | quote }}
-{{- end }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "hub.secretName" . }}
+      key: {{ $keys.redisUrl }}
+{{- else if .Values.external.redis.url }}
+- name: HUB_REDIS_URL
+  value: {{ .Values.external.redis.url | quote }}
 {{- end }}
 {{- end -}}
 
 {{/* Секретные переменные: всегда из Secret, значений в манифестах нет */}}
 {{- define "hub.secretEnv" }}
+{{- $keys := .Values.secrets.keys }}
 - name: HUB_SECRET_KEY
   valueFrom:
     secretKeyRef:
       name: {{ include "hub.secretName" . }}
-      key: HUB_SECRET_KEY
+      key: {{ $keys.secretKey }}
 - name: HUB_ENCRYPTION_KEY
   valueFrom:
     secretKeyRef:
       name: {{ include "hub.secretName" . }}
-      key: HUB_ENCRYPTION_KEY
-{{- if .Values.secrets.adminToken }}
+      key: {{ $keys.encryptionKey }}
+{{- if or .Values.secrets.adminToken (include "hub.esoHasKey" (dict "ctx" . "key" $keys.adminToken)) }}
 - name: HUB_ADMIN_TOKEN
   valueFrom:
     secretKeyRef:
       name: {{ include "hub.secretName" . }}
-      key: HUB_ADMIN_TOKEN
+      key: {{ $keys.adminToken }}
 {{- end }}
 {{- if eq .Values.hub.webAuth "keycloak" }}
+{{- /* Обязателен: без него Hub не стартует (R-T2). Наличие источника проверено
+       в hub.validateSecrets, поэтому optional здесь не ставим — отсутствие ключа
+       должно быть видно как ошибка запуска пода, а не как молчаливый CrashLoop. */}}
 - name: KEYCLOAK_CLIENT_SECRET
   valueFrom:
     secretKeyRef:
       name: {{ include "hub.secretName" . }}
-      key: KEYCLOAK_CLIENT_SECRET
-      optional: true
+      key: {{ $keys.keycloakClientSecret }}
 {{- end }}
-{{- range $name, $_ := .Values.secrets.oauth }}
-- name: {{ $name }}
+{{- /* client_secret OAuth-приложений каталога: optional — пара id/secret выдаётся
+       вместе, и до выдачи сервер штатно остаётся «ненастроенным» (см. catalogOAuth). */}}
+{{- range $alias, $srv := .Values.catalogOAuth.servers }}
+{{- if $srv.secretVar }}
+- name: {{ $srv.secretVar }}
   valueFrom:
     secretKeyRef:
       name: {{ include "hub.secretName" $ }}
-      key: {{ $name }}
+      key: {{ $srv.secretVar }}
       optional: true
+{{- end }}
 {{- end }}
 {{- end -}}
 
 {{/*
 Окружение Job миграций. Job — hook pre-install/pre-upgrade, то есть создаётся ДО
-ConfigMap каталога и управляемого чартом Secret. Поэтому здесь только то, что нужно
-команде `mcp-hub db upgrade`: адрес БД и корпоративный CA. Адрес БД берётся из
-существующего Secret (external.postgres.existingSecret) — так он не попадает в манифест;
-если задан только external.postgres.url, он подставится значением в открытом виде.
+обычных ресурсов релиза. Адрес БД он берёт из ТОГО ЖЕ Secret, что и Deployment,
+чтобы миграция шла ровно в ту же базу; чтобы Secret к этому моменту существовал,
+secrets.preInstallHook вешает на Secret/ExternalSecret тот же hook с весом -10.
 */}}
 {{- define "hub.migrateEnv" -}}
+{{- $keys := .Values.secrets.keys }}
 - name: HUB_LOG_LEVEL
   value: {{ .Values.hub.logLevel | quote }}
-{{- with .Values.external.postgres }}
-{{- if .existingSecret.name }}
 - name: HUB_DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .existingSecret.name }}
-      key: {{ .existingSecret.key }}
-{{- else if .url }}
-- name: HUB_DATABASE_URL
-  value: {{ .url | quote }}
+{{- if .Values.external.postgres.existingSecret.name }}
+      name: {{ .Values.external.postgres.existingSecret.name }}
+      key: {{ .Values.external.postgres.existingSecret.key }}
 {{- else }}
-{{- fail "миграции включены, но не задан ни external.postgres.existingSecret.name, ни external.postgres.url" }}
-{{- end }}
+      name: {{ include "hub.secretName" . }}
+      key: {{ $keys.databaseUrl }}
 {{- end }}
 {{- if .Values.hub.caBundle.enabled }}
 - name: SSL_CERT_FILE
@@ -206,6 +267,20 @@ ConfigMap каталога и управляемого чартом Secret. По
 - name: REQUESTS_CA_BUNDLE
   value: /etc/ssl/certs/corp-ca.pem
 {{- end }}
+{{- end -}}
+
+{{/*
+Аннотации hook'а для Secret/ExternalSecret: ресурс должен существовать раньше
+Job'а миграций (hook-weight -5). before-hook-creation нужен, чтобы upgrade не
+падал на «уже существует».
+*/}}
+{{- define "hub.secretHookAnnotations" -}}
+{{- if and .Values.secrets.preInstallHook .Values.migrations.enabled -}}
+annotations:
+  "helm.sh/hook": pre-install,pre-upgrade
+  "helm.sh/hook-weight": "-10"
+  "helm.sh/hook-delete-policy": before-hook-creation
+{{- end -}}
 {{- end -}}
 
 {{- define "hub.caVolume" -}}

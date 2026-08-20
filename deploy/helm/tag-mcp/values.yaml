@@ -34,22 +34,35 @@ tag:
   # Прочие переменные MM_*/TAG_MCP_* (имя → значение). Секреты — в secrets.*
   env: {}
 
-# Внешний Redis: URL либо из values, либо из существующего Secret.
+# Внешний Redis. Redis БЕЗ пароля можно задать открытым значением — оно попадёт
+# в манифест Deployment. Redis С ПАРОЛЕМ идёт только через общий Secret
+# (secrets.redisUrl) либо через готовый Secret оператора (existingSecret).
 redis:
   url: redis://redis-master.mcp-hub.svc:6379/1
   existingSecret:
     name: ""
     key: url
 
+# Все секретные переменные лежат в ОДНОМ Secret: secrets.existingSecret либо
+# (по умолчанию) <release>-secrets. Источник наполнения — ровно один:
+# secrets.create=true (значения ниже), готовый Secret, либо externalSecret.
 secrets:
   create: true
   existingSecret: ""
+  # Имена ключей внутри Secret (совпадают с именами переменных окружения).
+  keys:
+    mmOauthClientId: MM_OAUTH_CLIENT_ID
+    mmOauthClientSecret: MM_OAUTH_CLIENT_SECRET
+    redisUrl: TAG_MCP_REDIS_URL
   # MM_OAUTH_CLIENT_ID / MM_OAUTH_CLIENT_SECRET — OAuth-приложение Mattermost
   mmOauthClientId: ""
   mmOauthClientSecret: ""
+  # TAG_MCP_REDIS_URL с паролем, напр. redis://:ПАРОЛЬ@redis-master.svc:6379/1
+  redisUrl: ""
   # Дополнительные секретные переменные (имя → значение)
   extra: {}
 
+# Целевой Secret тот же самый, поэтому secretKey обязан совпадать с secrets.keys.
 externalSecret:
   enabled: false
   apiVersion: external-secrets.io/v1beta1
@@ -66,6 +79,10 @@ externalSecret:
       remoteRef:
         key: ailab/magnit-tag-mcp
         property: mm_oauth_client_secret
+    - secretKey: TAG_MCP_REDIS_URL
+      remoteRef:
+        key: ailab/magnit-tag-mcp
+        property: redis_url
 
 containerPort: 8000
 

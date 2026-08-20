@@ -6,15 +6,18 @@ tag:
   mattermostUrl: https://tag.magnit.ru
   httpAuth: oauth
 
+# Адрес Redis приходит из того же Secret, что и OAuth-креды (<release>-secrets,
+# наполняется ExternalSecret'ом), ключ TAG_MCP_REDIS_URL. Отдельного Secret под
+# Redis чарт не ждёт и не создаёт.
 redis:
   url: ""
   existingSecret:
-    name: tag-mcp-redis
+    name: ""
     key: url
 
 secrets:
   create: false
-  existingSecret: tag-mcp-secrets
+  existingSecret: ""
 
 externalSecret:
   enabled: true

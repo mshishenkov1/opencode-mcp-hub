@@ -11,6 +11,9 @@ hub:
   publicUrl: https://hub.corp.tander.ru
   logLevel: INFO
   autoMigrate: false      # только Job-hook, чтобы схема менялась одним контролируемым шагом
+  # Допустимо, пока перед Hub стоит nginx-ingress с перезаписью X-Forwarded-For.
+  # При переезде на istio (istio.enabled=true) поставить false до настройки
+  # numTrustedHops у Gateway — иначе лимиты обходятся подделкой заголовка.
   trustProxy: true
   webAuth: keycloak
   consent: always
@@ -27,27 +30,48 @@ hub:
     HUB_CB_RESET: "30"
     HUB_TOKEN_REFRESH_ENABLED: "true"
 
+# Адреса БД и Redis приходят из того же Secret, что и остальные секреты
+# (<release>-secrets, наполняется ExternalSecret'ом): ключи HUB_DATABASE_URL и
+# HUB_REDIS_URL. Отдельных Secret'ов под БД и Redis чарт не ждёт и не создаёт.
 external:
   postgres:
-    url: ""                       # значение не хранится в git
     existingSecret:
-      name: opencode-mcp-hub-db
+      name: ""
       key: url
   redis:
     url: ""
     existingSecret:
-      name: opencode-mcp-hub-redis
+      name: ""
       key: url
 
+# Продуктив: значения секретов чарт не видит вовсе — Secret наполняет
+# external-secrets из Vault. Имя Secret — <release>-secrets.
 secrets:
   create: false
-  existingSecret: opencode-mcp-hub-secrets
+  existingSecret: ""
 
 externalSecret:
   enabled: true
   secretStoreRef:
     name: corp-vault
     kind: ClusterSecretStore
+  # Полный перечень ключей — в values.yaml (externalSecret.data): секреты Hub,
+  # адреса БД и Redis, KEYCLOAK_CLIENT_SECRET и client_secret OAuth-приложений
+  # каталога. Отсутствие обязательного ключа отбивается {{ fail }} в шаблоне.
+
+# client_id OAuth-приложений целевых систем — не секреты, задаются здесь по мере
+# выдачи приложений администраторами. Пока пара id/secret не выдана, сервер штатно
+# остаётся «ненастроенным» и в каталоге не публикуется.
+catalogOAuth:
+  servers:
+    gitlab:
+      clientId: ""            # --set catalogOAuth.servers.gitlab.clientId=...
+    gitlab-platform:
+      clientId: ""
+    jira:
+      clientId: ""
+    confluence:
+      clientId: ""
 
 resources:
   requests:

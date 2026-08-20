@@ -12,6 +12,8 @@ hub:
   publicUrl: https://hub-pilot.corp.tander.ru
   logLevel: INFO
   autoMigrate: false
+  # nginx-ingress перезаписывает X-Forwarded-For (use-forwarded-headers не включён),
+  # поэтому левый адрес заголовка доверенный — см. комментарий в values.yaml.
   trustProxy: true
   webAuth: litellm       # пилот идёт по CLI-SSO LiteLLM, Keycloak-клиент ещё не выдан
   env:
@@ -21,14 +23,22 @@ hub:
 
 external:
   postgres:
-    # in-cluster Postgres пилота
-    url: postgresql+asyncpg://hub:__from_secret__@postgres.mcp-hub-pilot.svc:5432/hub
+    # in-cluster Postgres пилота. По умолчанию адрес БД (вместе с паролем) лежит
+    # в общем Secret релиза — задайте его при установке:
+    #   --set secrets.databaseUrl='postgresql+asyncpg://hub:ПАРОЛЬ@postgres.mcp-hub-pilot.svc:5432/hub'
+    # Если Postgres развёрнут оператором и уже отдаёт свой Secret с готовым URL,
+    # укажите его здесь — тогда общий Secret ключ HUB_DATABASE_URL не содержит.
     existingSecret:
-      name: hub-postgres
+      name: ""
       key: url
   redis:
+    # Пилотный Redis без пароля — открытое значение допустимо.
+    # С паролем URL идёт только через secrets.redisUrl или existingSecret.
     url: redis://redis-master.mcp-hub-pilot.svc:6379/0
 
+# Пилот: Secret создаёт чарт. Значения подставляются при установке, например:
+#   --set secrets.secretKey=... --set secrets.encryptionKey=... \
+#   --set secrets.databaseUrl=...
 secrets:
   create: true
   existingSecret: ""
