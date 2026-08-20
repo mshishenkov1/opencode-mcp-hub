@@ -210,6 +210,23 @@ class CircuitBreaker:
             + float(self.settings.cb_probe_grace)
         )
 
+    def _state_ttl(self, open_until: float, now: float) -> float:
+        """TTL записи состояния ``cb:<alias>``.
+
+        Базовый TTL — ``HUB_CB_RESET`` × 2 (R-M4): столько живёт закрытое состояние и счётчик
+        ещё не набранных ошибок. Но запись с **открытым** окном обязана пережить не только само
+        окно, но и пробу, которая будет захвачена по его истечении: право на пробу живёт
+        ``_probe_ttl()`` (до ``HUB_UPSTREAM_SSE_IDLE_TIMEOUT``), и если состояние истекает раньше,
+        ``state()`` отдаёт нули, ``check()`` считает выключатель закрытым и пропускает запросы на
+        лежащий upstream мимо ещё живого ключа пробы (BUG-I3-001, AC-157). Отсюда для открытого
+        окна TTL = «сколько осталось до ``open_until``» + ``_probe_ttl()``: запись гарантированно
+        переживает пробу, захваченную сразу по истечении окна.
+        """
+        base = float(self.settings.cb_reset) * 2
+        if open_until <= 0.0:
+            return base
+        return max(base, (open_until - now) + self._probe_ttl())
+
     async def state(self, alias: str) -> dict[str, Any]:
         record = await self.kv.get(self._key(alias))
         if not isinstance(record, dict):
@@ -253,7 +270,7 @@ class CircuitBreaker:
         await self.kv.set(
             self._key(alias),
             {"failures": 0, "open_until": 0.0},
-            ttl=self.settings.cb_reset * 2,
+            ttl=self._state_ttl(0.0, self.clock.time()),
         )
 
     async def record_failure(self, alias: str) -> None:
@@ -274,7 +291,7 @@ class CircuitBreaker:
         await self.kv.set(
             self._key(alias),
             {"failures": failures, "open_until": open_until},
-            ttl=self.settings.cb_reset * 2,
+            ttl=self._state_ttl(open_until, now),
         )
 
 
