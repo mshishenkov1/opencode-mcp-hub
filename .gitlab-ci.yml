@@ -39,9 +39,11 @@ gates:
   before_script:
     - python -m venv .venv
     - .venv/bin/pip install --quiet -e ".[dev]"
-    # G2 сравнивает с origin/main: при GIT_DEPTH=0 ветка уже в клоне,
-    # но локального ref может не быть — run_gates.py умеет брать origin/main.
-    - git fetch --quiet origin main || true
+    # GitLab CI выкачивает только текущую ссылку, поэтому origin/main в клоне
+    # отсутствует и G2 не с чем сравнивать. `git fetch origin main` создаёт лишь
+    # FETCH_HEAD — нужен явный refspec, создающий remote-tracking ветку.
+    - git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main || true
+    - 'git rev-parse --verify --quiet origin/main >/dev/null && echo "база для G2 найдена" || echo "ВНИМАНИЕ - origin/main недоступна, G2 упадёт"'
   script:
     - .venv/bin/python scripts/run_gates.py --run-id "gl-$CI_PIPELINE_IID" --ci
   artifacts:
@@ -68,6 +70,7 @@ gates:
 
 bats:
   stage: installers
+  needs: []
   extends: .installers-changed
   image:
     name: "${REGISTRY_PREFIX}bats/bats:1.11.0"
@@ -81,6 +84,7 @@ pester:
   # здесь помечаются Set-ItResult -Skipped — это ожидаемо и не считается
   # подтверждением Windows-требований.
   stage: installers
+  needs: []
   extends: .installers-changed
   image: "${PWSH_IMAGE}"
   interruptible: true
@@ -98,6 +102,7 @@ pester:
 
 lint-shell:
   stage: installers
+  needs: []
   extends: .installers-changed
   image:
     name: "${REGISTRY_PREFIX}koalaman/shellcheck-alpine:stable"
@@ -124,6 +129,7 @@ lint-shell:
 
 lint-powershell:
   stage: installers
+  needs: []
   extends: .installers-changed
   image: "${PWSH_IMAGE}"
   interruptible: true
@@ -141,6 +147,7 @@ lint-powershell:
 
 release-dry-run:
   stage: installers
+  needs: []
   extends: .installers-changed
   image: "${REGISTRY_PREFIX}debian:12-slim"
   interruptible: true
