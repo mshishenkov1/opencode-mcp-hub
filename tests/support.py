@@ -367,6 +367,39 @@ async def dump_all_tables(app: Any) -> str:
     return "\n".join(chunks)
 
 
+DB_TABLES = (
+    "users",
+    "api_keys",
+    "connections",
+    "audit_log",
+    "oauth_clients",
+    "oauth_codes",
+    "refresh_tokens",
+    "upstream_tokens",
+    "sessions",
+    "consents",
+)
+
+
+async def dump_database(app: Any, *, tables: tuple[str, ...] = DB_TABLES) -> str:
+    """Все строки всех таблиц схемы, включая ``upstream_tokens`` (поиск утечек токена, R-U9)."""
+    chunks = []
+    for table in tables:
+        rows = await fetch_rows(app, f"SELECT * FROM {table}")
+        chunks.append(f"{table}: " + json.dumps(rows, default=str, ensure_ascii=False))
+    return "\n".join(chunks)
+
+
+def dump_kv(app: Any) -> str:
+    """Все живые записи KeyValueStore приложения как одна строка (R-U9)."""
+    store = app.state.kv
+    data = getattr(store, "_data", None)
+    assert data is not None, "KeyValueStore без in-memory хранилища: дамп KV недоступен"
+    return json.dumps(
+        {key: value for key, (value, _ttl) in data.items()}, default=str, ensure_ascii=False
+    )
+
+
 # ---------------------------------------------------------------------------
 # Логи
 # ---------------------------------------------------------------------------
@@ -471,10 +504,18 @@ GITLAB_AS = "https://gitlab.test"
 JIRA_AS = "https://jira.test"
 OIDC_ISSUER = "https://kc.test/realms/corp"
 
+# I-4: ТЭГ-MCP в режиме сквозной передачи токена и адрес проверки токена (R-U3, R-U10).
+TAG_UPSTREAM = "https://mcp-tag.internal.test/mcp"
+VERIFY_URL = "https://tag.test/api/v4/users/me"
+# Адрес проверки из текста R-U10 (запись каталога приводится в спеке дословно).
+TAG_SPEC_VERIFY_URL = "https://tag.magnit.ru/api/v4/users/me"
+
 GL_SECRET = "gl-secret"
 GL_STATIC = "st-1"
 JIRA_SECRET = "jira-secret"
 CATALOG_ENV = {"GL_SECRET": GL_SECRET, "GL_STATIC": GL_STATIC, "JIRA_SECRET": JIRA_SECRET}
+# Окружение каталога I-4: то же плюс переменные записи 'tag' из R-U10.
+TAG_ENV = {**CATALOG_ENV, "TAG_MCP_URL": TAG_UPSTREAM}
 
 UPSTREAM_ACCESS = "ups-access-1"
 UPSTREAM_REFRESH = "ups-refresh-1"
@@ -863,13 +904,66 @@ class MockOIDC:
         return httpx.Response(200, json=body)
 
 
+class MockVerify:
+    """Мок адреса проверки пользовательского токена (R-U3).
+
+    Отвечает 200 и телом ``{account_field: account}``; сценарий задаётся очередью (``push``):
+    готовым ``httpx.Response``, исключением (сетевая ошибка, таймаут) или функцией.
+    Считает полученные запросы — негативы R-U4 обязаны не доходить до целевой системы.
+    """
+
+    def __init__(
+        self,
+        *urls: str,
+        account_field: str = "username",
+        account: str = "m.ivanov",
+    ) -> None:
+        self.urls = set(urls) or {VERIFY_URL}
+        self.account_field = account_field
+        self.account = account
+        self.requests: list[RecordedRequest] = []
+        self.queue: list[Any] = []
+
+    @property
+    def calls(self) -> int:
+        return len(self.requests)
+
+    def last(self) -> RecordedRequest:
+        assert self.requests, "адрес проверки токена не получил ни одного запроса"
+        return self.requests[-1]
+
+    def reset(self) -> None:
+        self.requests.clear()
+        self.queue.clear()
+
+    def push(self, response: Any) -> None:
+        self.queue.append(response)
+
+    def matches(self, request: httpx.Request) -> bool:
+        return str(request.url).split("?")[0] in self.urls
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        recorded = _record(request)
+        self.requests.append(recorded)
+        if self.queue:
+            item = self.queue.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            if callable(item):
+                return item(recorded)
+            return item
+        return httpx.Response(200, json={self.account_field: self.account})
+
+
 class MockNetwork:
     """Единая точка перехвата исходящих HTTP-запросов Hub (кроме LiteLLM)."""
 
     def __init__(self) -> None:
+        self.verify = MockVerify(VERIFY_URL, TAG_SPEC_VERIFY_URL)
         self.upstreams: dict[str, MockUpstream] = {
             "gitlab": MockUpstream(GITLAB_UPSTREAM, prefix="up"),
             "jira": MockUpstream(JIRA_UPSTREAM, prefix="jira"),
+            "tag": MockUpstream(TAG_UPSTREAM, prefix="tag"),
         }
         self.providers: dict[str, MockProviderAS] = {
             "gitlab": MockProviderAS(GITLAB_AS),
@@ -892,7 +986,7 @@ class MockNetwork:
         return self.providers["gitlab"]
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        for mock in (*self.upstreams.values(), *self.providers.values(), self.oidc):
+        for mock in (*self.upstreams.values(), *self.providers.values(), self.oidc, self.verify):
             if mock.matches(request):
                 return mock.handle(request)
         self.unmatched.append(f"{request.method} {request.url}")
@@ -1028,6 +1122,175 @@ def i3_catalog(*, extra: bool = False, version: int = 1) -> dict[str, Any]:
     if extra:
         servers += [unconfigured_facade("u"), restricted_facade("b")]
     return catalog_doc(servers, version=version)
+
+
+# ---------------------------------------------------------------------------
+# Каталоги I-4: способы подключения (R-U1, R-U2, R-U3, R-U10)
+# ---------------------------------------------------------------------------
+
+TAG_TOOLS = [
+    {"name": "whoami", "description": "Кто я"},
+    {"name": "search_posts", "description": "Поиск сообщений"},
+    {"name": "get_thread", "description": "Тред"},
+    {"name": "create_post", "description": "Написать сообщение"},
+    {"name": "update_post", "description": "Изменить сообщение"},
+]
+
+TAG_TOOL_FILTER = {
+    "kind": "tool_filter",
+    "presets": {
+        "readonly": {
+            "tools": [
+                "whoami", "server_*", "resolve_channel", "get_*", "list_*", "search_*",
+                "browse_public_channels", "summarize_*", "download_file",
+            ]
+        },
+        "readwrite": {"tools": ["*"]},
+    },
+}  # fmt: skip
+
+
+def user_token_method(method_id: str = "session_token", **overrides: Any) -> dict[str, Any]:
+    """Способ подключения ``type: user_token`` (R-U1, R-U2, R-U3)."""
+    method: dict[str, Any] = {
+        "id": method_id,
+        "title": "Токен сессии ТЭГ",
+        "type": "user_token",
+        "field": {
+            "label": "Токен сессии ТЭГ",
+            "hint": "ТЭГ → Профиль → Настройки безопасности → Личные токены доступа",
+            "docs_url": "https://docs.test/tag#токен",
+            "secret": True,
+        },
+        "verify": {
+            "url": VERIFY_URL,
+            "method": "GET",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "account_field": "username",
+        },
+    }
+    method.update(overrides)
+    return method
+
+
+def oauth_method(
+    method_id: str = "corp_oauth",
+    *,
+    available: bool = False,
+    as_base: str = GITLAB_AS,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Способ ``type: oauth2`` в списке ``auth_methods`` (по умолчанию — недоступный, R-U10).
+
+    ``as_base`` выбирает мок authorization server: отдельный адрес нужен там, где счётчик его
+    запросов доказывает, что к ``token_url``/``revoke_url`` обращений не было (R-U5, R-U6).
+    """
+    method: dict[str, Any] = {
+        "id": method_id,
+        "title": "Корпоративная авторизация ТЭГ",
+        "type": "oauth2",
+        "available": available,
+        "authorize_url": f"{as_base}/oauth/authorize",
+        "token_url": f"{as_base}/oauth/token",
+        "revoke_url": f"{as_base}/oauth/revoke",
+        "client_id": "tag-client-id",
+        "client_secret": "env:GL_SECRET",
+        "pkce": True,
+        "scopes": {"readonly": [], "readwrite": []},
+    }
+    if not available:
+        method["unavailable_reason"] = "OAuth-приложение ТЭГ ещё не выдано администраторами"
+    method.update(overrides)
+    return method
+
+
+def user_token_facade(
+    alias: str = "tag", *, methods: list[dict[str, Any]] | None = None, **overrides: Any
+) -> dict[str, Any]:
+    """facade-сервер со способами подключения вместо прежнего блока ``auth`` (R-U1)."""
+    server = facade_server(
+        alias,
+        title="ТЭГ (Mattermost)",
+        description="Сообщения, каналы, треды, поиск, файлы корпоративного мессенджера ТЭГ.",
+        upstream_url=TAG_UPSTREAM,
+        credential_headers={"Authorization": "Bearer {{access_token}}"},
+        static_headers={},
+        permission_model=copy.deepcopy(TAG_TOOL_FILTER),
+    )
+    server.pop("auth")  # R-U1: auth и auth_methods взаимоисключающи
+    server["auth_methods"] = copy.deepcopy(
+        methods if methods is not None else [oauth_method(), user_token_method()]
+    )
+    server.update(overrides)
+    return server
+
+
+def tag_spec_server() -> dict[str, Any]:
+    """Запись каталога коннектора ``tag`` дословно по R-U10 (AC-191..AC-193)."""
+    return {
+        "alias": "tag",
+        "title": "ТЭГ (Mattermost)",
+        "description": "Сообщения, каналы, треды, поиск, файлы корпоративного мессенджера ТЭГ.",
+        "owner": "Мирослав Шишенков",
+        "contact": "https://tag.magnit.ru",
+        "docs_url": "https://github.com/mshishenkov1/magnit-tag-mcp",
+        "status": "beta",
+        "audience": ["all"],
+        "mode": "facade",
+        "upstream_url": "${TAG_MCP_URL}",
+        "auth_methods": [
+            {
+                "id": "corp_oauth",
+                "title": "Корпоративная авторизация ТЭГ",
+                "type": "oauth2",
+                "available": False,
+                "unavailable_reason": "OAuth-приложение ТЭГ ещё не выдано администраторами",
+                "authorize_url": "https://tag.magnit.ru/oauth/authorize",
+                "token_url": "https://tag.magnit.ru/oauth/access_token",
+                "client_id": "${TAG_OAUTH_CLIENT_ID}",
+                "client_secret": "env:TAG_OAUTH_CLIENT_SECRET",
+                "pkce": True,
+                "scopes": {"readonly": [], "readwrite": []},
+            },
+            {
+                "id": "session_token",
+                "title": "Токен сессии ТЭГ",
+                "type": "user_token",
+                "field": {
+                    "label": "Токен сессии ТЭГ",
+                    "hint": "ТЭГ → Профиль → Настройки безопасности → Личные токены доступа; "
+                    "либо значение cookie MMAUTHTOKEN",
+                    "docs_url": "https://github.com/mshishenkov1/magnit-tag-mcp#токен",
+                    "secret": True,
+                },
+                "verify": {
+                    "url": TAG_SPEC_VERIFY_URL,
+                    "method": "GET",
+                    "headers": {"Authorization": "Bearer {{access_token}}"},
+                    "account_field": "username",
+                },
+            },
+        ],
+        "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+        "permission_model": copy.deepcopy(TAG_TOOL_FILTER),
+    }
+
+
+async def connect_with_token(
+    hub: Any,
+    *,
+    alias: str = "tag",
+    token: str = "usr-tok-1",
+    key: str = "sk-ok",
+    body: dict[str, Any] | None = None,
+    **fields: Any,
+) -> Any:
+    """``POST /api/me/connections/{alias}/token`` Bearer-ключом LiteLLM (R-U4)."""
+    payload: dict[str, Any] = {"token": token} if body is None else dict(body)
+    payload.update(fields)
+    return await hub.client.post(
+        f"/api/me/connections/{alias}/token", json=payload, headers=bearer(key)
+    )
 
 
 # ---------------------------------------------------------------------------
