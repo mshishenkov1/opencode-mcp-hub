@@ -121,7 +121,8 @@ docker compose -f loadtest/docker-compose.loadtest.yml -p hubload down -v
 3. **Проверка во время запуска.** `assertLocal()` в `k6/lib/config.js` падает на этапе
    инициализации, если `HUB_BASE`/`MOCK_URL` указывают не на разрешённый хост;
    `_check_no_prod()` в `tools/seed.py` делает то же для `HUB_PUBLIC_URL`,
-   `HUB_DATABASE_URL`, `HUB_REDIS_URL` и `HUB_LITELLM_BASE_URL`.
+   `HUB_DATABASE_URL`, `HUB_REDIS_URL` и `HUB_LITELLM_BASE_URL`; в тексте ошибки
+   пароль в URL маскируется (`user:***@`), чтобы не утечь в stderr и в лог CI.
 
 Allow-list: `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, `hub`, `proxy`,
 `mock-upstream`, `postgres`, `redis`, `example.invalid`.

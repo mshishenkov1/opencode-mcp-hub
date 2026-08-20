@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import secrets
 import sys
 import uuid
@@ -35,6 +36,18 @@ from hub.login import sha256_hex
 ALLOWED_HOSTS = ("localhost", "127.0.0.1", "::1", "hub", "mock-upstream", "postgres", "redis")
 
 
+def _mask(url: str) -> str:
+    """Пароль из URL наружу не показываем: сообщение уходит в stderr и в лог CI.
+
+    postgresql+asyncpg://hub:pw@postgres:5432/hub → postgresql+asyncpg://hub:***@postgres:5432/hub
+    redis://:pw@redis.corp:6379/0                 → redis://:***@redis.corp:6379/0
+
+    Скрывается всё между «имя:» и ПОСЛЕДНИМ «@» до начала пути: пароль с
+    незакодированным «@» внутри иначе утёк бы хвостом.
+    """
+    return re.sub(r"(://[^/\s@]*:)[^/\s]*(@)", r"\1***\2", url)
+
+
 def _check_no_prod(settings: Any) -> None:
     """Страховка D6-10: сеять данные можно только против локального стенда."""
     from urllib.parse import urlparse
@@ -50,7 +63,8 @@ def _check_no_prod(settings: Any) -> None:
         host = urlparse(url.replace("postgresql+asyncpg", "postgresql")).hostname
         if host and host not in ALLOWED_HOSTS:
             raise SystemExit(
-                f"{name}={url}: хост {host} не входит в список разрешённых {ALLOWED_HOSTS}. "
+                f"{name}={_mask(url)}: хост {host} не входит в список разрешённых "
+                f"{ALLOWED_HOSTS}. "
                 "Нагрузочные данные разрешено сеять только в локальный стенд."
             )
 
