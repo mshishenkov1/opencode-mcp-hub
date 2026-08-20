@@ -241,6 +241,8 @@ function Test-Sha256Value {
 }
 
 # Путь внутри пакета: относительный, без "..", без буквы диска, без обратного слэша (N5-P3).
+# Отвергаются также ".", "./x", "x/." и завершающий "/" — формы, при которых "<каталог>/<значение>"
+# схлопывается в сам каталог (паритет с is_safe_pkg_path в common/install-posix.sh).
 function Test-PackagePath {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return $false }
@@ -248,6 +250,23 @@ function Test-PackagePath {
     if ($Value.Contains('\')) { return $false }
     if ($Value.Contains('..')) { return $false }
     if ($Value -match '^[A-Za-z]:') { return $false }
+    if ($Value -eq '.') { return $false }
+    if ($Value.StartsWith('./')) { return $false }
+    if ($Value.EndsWith('/')) { return $false }
+    if ($Value.EndsWith('/.')) { return $false }
+    return $true
+}
+
+# Имя приложения (artifacts[].app_name): одно имя без разделителей пути и самоссылок и без
+# подстановочных символов — значение участвует в сопоставлении записей реестра (-like) и в путях,
+# поэтому проверяется строже пути внутри пакета (N5-P4, N5-R1). Паритет с is_safe_app_name.
+function Test-AppName {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    if (-not (Test-PackagePath $Value)) { return $false }
+    if ($Value.Contains('/')) { return $false }
+    if ($Value.IndexOfAny([char[]]@('*', '?', '[', ']')) -ge 0) { return $false }
     return $true
 }
 
@@ -354,10 +373,15 @@ function Read-Manifest {
             }
         } elseif ($kind -eq 'desktop') {
             $desktopCount++
-            # app_name проходит ту же проверку пути, что file/install_name (запрет "..", ведущего
-            # "/", буквы диска): вторая линия защиты параллельно POSIX-установщику (N5-P4).
+            # app_name проверяется строже пути внутри пакета: одно имя без разделителей,
+            # самоссылок и подстановочных символов. Для installer_type="dmg" поле обязательно и
+            # непусто — паритет с common/install-posix.sh, где пустое значение означало бы
+            # rm -rf каталога /Applications целиком (N5-P4).
             $appName = Get-Prop $item 'app_name'
-            if (-not [string]::IsNullOrEmpty($appName) -and -not (Test-PackagePath $appName)) {
+            if ((Get-Prop $item 'installer_type') -eq 'dmg' -and [string]::IsNullOrWhiteSpace($appName)) {
+                Invoke-ManifestFieldFailure -Path $manifestPath -Field ("artifacts.$i.app_name") -Reason $script:MsgErrFieldRequired
+            }
+            if (-not [string]::IsNullOrEmpty($appName) -and -not (Test-AppName $appName)) {
                 Invoke-ManifestFieldFailure -Path $manifestPath -Field ("artifacts.$i.app_name") -Reason ($script:MsgErrFieldPath -f $appName)
             }
         }
@@ -875,9 +899,16 @@ function Get-DesktopUninstallEntry {
         return $null
     }
     $appName = Get-Prop $desktop 'app_name'
-    if ([string]::IsNullOrEmpty($appName)) {
+    if ([string]::IsNullOrWhiteSpace($appName)) {
         $appName = 'OpenCode'
     }
+    $needle = $appName.Replace('.app', '')
+    if ([string]::IsNullOrWhiteSpace($needle)) {
+        return $null
+    }
+    # Подстановочные символы в app_name экранируются: иначе значение вида "*" совпало бы с ПЕРВОЙ
+    # записью Uninstall, и её UninstallString был бы запущен со silent_args из манифеста (N5-R1).
+    $pattern = '*' + [System.Management.Automation.WildcardPattern]::Escape($needle) + '*'
     $roots = @(
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
@@ -888,7 +919,7 @@ function Get-DesktopUninstallEntry {
             $props = Get-ItemProperty -LiteralPath $item.PSPath -ErrorAction SilentlyContinue
             $displayName = Get-Prop $props 'DisplayName'
             if ([string]::IsNullOrEmpty($displayName)) { continue }
-            if ($displayName -like ('*' + $appName.Replace('.app', '') + '*')) {
+            if ($displayName -like $pattern) {
                 $installLocation = Get-Prop $props 'InstallLocation'
                 # Для строк контракта (--check «путь», отчёт удаления) предпочитаем путь установки,
                 # если он в реестре есть; иначе — отображаемое имя. Значение одно и то же в обоих
