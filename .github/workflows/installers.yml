@@ -61,23 +61,21 @@ jobs:
   # Две оболочки на Windows: встроенный Windows PowerShell 5.1 — целевая версия install.ps1
   # (#Requires -Version 5.1, N5-T5), pwsh 7 — среда, в которой набор гоняется на Linux.
   # Расхождение между ними ловится до пользователя.
-  pester:
-    name: pester (${{ matrix.os }}, ${{ matrix.shell }})
+  # Оболочку нельзя выбирать выражением: `shell: ${{ matrix.shell }}` GitHub отвергает целиком —
+  # workflow падает на старте, без единого задания и без внятной ошибки в API (проверено пробными
+  # прогонами 2026-08-20: варианты с выражением падают, вариант с явной оболочкой стартует).
+  # Поэтому три нужные комбинации разведены по двум заданиям с захардкоженной оболочкой.
+  pester-pwsh:
+    name: pester (${{ matrix.os }}, pwsh)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            shell: pwsh
             forbid_skips: 'false'
-          # powershell — встроенный Windows PowerShell 5.1 хостед-раннера
+          # pwsh 7 предустановлен на windows-раннере
           - os: windows-latest
-            shell: powershell
-            forbid_skips: 'true'
-          # pwsh — PowerShell 7, предустановлен на том же раннере
-          - os: windows-latest
-            shell: pwsh
             forbid_skips: 'true'
     steps:
       # До checkout: на Windows-раннере git настроен с core.autocrlf=true и подменил бы LF на
@@ -90,10 +88,10 @@ jobs:
           git config --global core.eol lf
       - uses: actions/checkout@v4
       - name: Версия оболочки
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: $PSVersionTable | Format-List | Out-String | Write-Output
       - name: Установить Pester 5.x
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: |
           if ($PSVersionTable.PSEdition -eq 'Desktop') {
             # Windows PowerShell 5.1: PSGallery отвечает только по TLS 1.2, а провайдера NuGet
@@ -105,7 +103,7 @@ jobs:
           Install-Module -Name Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 `
             -Force -Scope CurrentUser -SkipPublisherCheck -AllowClobber
       - name: Прогон Pester
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: |
           # Явный импорт: в Windows PowerShell 5.1 рядом лежит встроенный Pester 3.4.0,
           # синтаксис Invoke-Pester у которого несовместим с набором.
@@ -121,6 +119,57 @@ jobs:
           # На Windows ветки с буквальным '\' обязаны выполняться, а не пропускаться —
           # ради этого матрица и заведена (AC-143).
           if ('${{ matrix.forbid_skips }}' -eq 'true' -and $result.SkippedCount -gt 0) {
+            foreach ($t in ($result.Tests | Where-Object { $_.Result -eq 'Skipped' })) {
+              "Пропущен на Windows-раннере: $($t.ExpandedPath)" | Write-Output
+            }
+            "На Windows пропусков быть не должно: Windows-ветка AC-143 обязана подтверждаться прогоном" | Write-Output
+            exit 1
+          }
+
+  pester-ps51:
+    name: pester (windows-latest, powershell 5.1)
+    runs-on: windows-latest
+    steps:
+      # До checkout: на Windows-раннере git настроен с core.autocrlf=true и подменил бы LF на
+      # CRLF, а Encoding.Tests.ps1 (AC-134) требует *.sh без символов CR.
+      - name: Сохранить переводы строк как в репозитории
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+      - name: Версия оболочки
+        shell: powershell
+        run: $PSVersionTable | Format-List | Out-String | Write-Output
+      - name: Установить Pester 5.x
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            # Windows PowerShell 5.1: PSGallery отвечает только по TLS 1.2, а провайдера NuGet
+            # в чистом профиле пользователя нет.
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          }
+          Install-Module -Name Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 `
+            -Force -Scope CurrentUser -SkipPublisherCheck -AllowClobber
+      - name: Прогон Pester
+        shell: powershell
+        run: |
+          # Явный импорт: в Windows PowerShell 5.1 рядом лежит встроенный Pester 3.4.0,
+          # синтаксис Invoke-Pester у которого несовместим с набором.
+          Import-Module -Name Pester -MinimumVersion 5.0.0 -Force
+          $result = Invoke-Pester -Path installers/tests/pester -PassThru
+          "Pester $((Get-Module Pester).Version): passed=$($result.PassedCount) failed=$($result.FailedCount) skipped=$($result.SkippedCount)" | Write-Output
+          if ($result.FailedCount -gt 0) { exit 1 }
+          # Пустой прогон (не нашлись файлы, оболочка не та) обязан быть красным, а не зелёным.
+          if ($result.PassedCount -lt 1) {
+            "Ни одного выполненного теста: путь installers/tests/pester не дал набора" | Write-Output
+            exit 1
+          }
+          # На Windows ветки с буквальным '\' обязаны выполняться, а не пропускаться —
+          # ради этого матрица и заведена (AC-143).
+          if ('true' -eq 'true' -and $result.SkippedCount -gt 0) {
             foreach ($t in ($result.Tests | Where-Object { $_.Result -eq 'Skipped' })) {
               "Пропущен на Windows-раннере: $($t.ExpandedPath)" | Write-Output
             }
@@ -200,7 +249,7 @@ jobs:
   installers-required:
     name: installers-required
     runs-on: ubuntu-latest
-    needs: [bats, pester, lint, release-dry-run]
+    needs: [bats, pester-pwsh, pester-ps51, lint, release-dry-run]
     steps:
       - name: Итог
         run: echo "Все обязательные задания установщиков зелёные"
