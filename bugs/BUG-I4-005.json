@@ -1,0 +1,19 @@
+{
+  "id": "BUG-I4-005",
+  "related_ac": "AC-175",
+  "severity": "major",
+  "title": "Токен с не-ASCII символами роняет подключение: UnicodeEncodeError и 500 вместо 400 token_rejected",
+  "repro_steps": [
+    "Поднять стенд (docker compose -p hubi3), коннектор tag со способом session_token",
+    "POST /api/me/connections/tag/token с телом {\"token\": \"zzzz-заведомо-неверный-zzzz\", \"method\": \"session_token\"}",
+    "Наблюдать код ответа и логи Hub"
+  ],
+  "expected": "400 token_rejected либо 400 invalid_request: значение непригодно как заголовок и должно отвергаться проверкой до обращения к целевой системе",
+  "actual": "500 Internal Server Error. В логах: UnicodeEncodeError: 'ascii' codec can't encode characters in position 12-19: ordinal not in range(128), src/hub/broker.py:279 (verify_user_token), вызов из src/hub/routes/api.py:211",
+  "failing_test": "(нет — в тестах используются ASCII-токены)",
+  "suspected_area": "src/hub/broker.py:279 — формирование заголовков verify.headers из значения токена. Значение подставляется в HTTP-заголовок, а httpx кодирует заголовки в latin-1/ascii. Нужна проверка пригодности значения (только печатные ASCII без управляющих символов) в _validated_token (src/hub/routes/api.py) до сетевого обращения",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "сквозная проверка коннектора на стенде 2026-08-21",
+  "notes": "Пользователь вставляет токен вручную и легко занесёт кириллицу из буфера обмена. Пятисотка вместо внятного отказа выглядит как поломка Hub, а не как ошибка ввода"
+}
