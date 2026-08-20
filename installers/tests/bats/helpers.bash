@@ -22,9 +22,14 @@ OM_APP_NAME='OpenCode Magnit.app'
 export OM_APP_NAME
 
 # Утилиты, из которых собирается урезанный PATH (см. min_path_dir).
-OM_TOOL_LIST="bash sh awk sed grep egrep fgrep cat cp mv rm mkdir rmdir chmod mktemp uname id \
+OM_TOOL_LIST="bash sh awk sed grep egrep fgrep cat cp mv rm mkdir rmdir chmod chown mktemp uname id \
 find head tail cmp diff dirname basename wc sort ls date touch stat tr env printenv sudo \
-shasum sha256sum openssl unzip zip tar gzip defaults hdiutil ditto python3 xxd od"
+logname getent dscl shasum sha256sum openssl unzip zip tar gzip defaults hdiutil ditto python3 xxd od"
+
+# Утилиты, без которых установщик не запускается вовсе: если их нет в урезанном PATH, тест
+# получит код 127 вместо ожидаемого кода выхода и «упадёт не о том». Раскладка каталогов
+# отличается между macOS, Debian и Alpine, поэтому отсутствие проверяется явно (см. min_path_dir).
+OM_ESSENTIAL_TOOLS="bash env sed awk grep cat cp rm mkdir chmod mktemp uname id"
 
 # ------------------------------------------------------------------ базовые утилиты
 
@@ -63,6 +68,13 @@ mtime_of() {
   else
     stat -c '%Y' "$1"
   fi
+}
+
+# Прогон от имени root (контейнеры CI). Часть проверок под root теряет смысл: root пишет в
+# каталог без бита записи, а --system ставит в настоящий /usr/local/bin. Такие тесты обязаны
+# явно пропускаться с причиной, а не давать ложно-зелёный результат.
+is_root() {
+  [ "$(id -u)" -eq 0 ]
 }
 
 host_os() {
@@ -138,17 +150,32 @@ assert_no_forbidden_calls() {
 # Урезанный PATH: только перечисленные в OM_TOOL_LIST утилиты, кроме указанных в аргументах.
 # Печатает путь к созданному каталогу.
 min_path_dir() {
-  local dir="$BATS_TEST_TMPDIR/minbin.$$.$RANDOM" tool src skip excluded=" $* "
+  local dir="$BATS_TEST_TMPDIR/minbin.$$.$RANDOM" tool src skip excluded=" $* " missing=""
   mkdir -p "$dir"
+  # Поиск ведётся и по текущему PATH: раскладка каталогов на macOS, Debian и Alpine разная
+  # (bash бывает и в /bin, и в /usr/local/bin, и в /opt/homebrew/bin), а ловушки sudo/curl
+  # из install_trap_stubs обязаны сохраниться и в урезанном PATH.
   for tool in $OM_TOOL_LIST; do
     case $excluded in
       *" $tool "*) continue ;;
     esac
     skip=0
-    src=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" command -v "$tool" 2>/dev/null) || skip=1
+    src=$(PATH="$PATH:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin" \
+      command -v "$tool" 2>/dev/null) || skip=1
     [ "$skip" -eq 0 ] || continue
     ln -sf "$src" "$dir/$tool"
   done
+  # Предусловие: без базовых утилит установщик не стартует и тест проверил бы не то, что заявлено.
+  for tool in $OM_ESSENTIAL_TOOLS; do
+    case $excluded in
+      *" $tool "*) continue ;;
+    esac
+    [ -e "$dir/$tool" ] || missing="$missing $tool"
+  done
+  if [ -n "$missing" ]; then
+    printf 'Урезанный PATH собран без базовых утилит:%s\n' "$missing" >&2
+    return 1
+  fi
   printf '%s' "$dir"
 }
 

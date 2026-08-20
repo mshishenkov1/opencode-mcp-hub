@@ -41,6 +41,9 @@ teardown() {
 }
 
 @test "AC-99: --dry-run --system показывает /usr/local/bin и не вызывает sudo" {
+  if is_root; then
+    skip "прогон под root без SUDO_USER: --system обязан отказать кодом 5 (N5-I14), план не печатается; ветка --system под root проверяется тестами AC-149/AC-151 с ловушками id/getent"
+  fi
   run bash "$PKG/install.sh" --dry-run --system
   assert_status 0
   assert_output_contains "/usr/local/bin/opencode"
@@ -165,6 +168,9 @@ teardown() {
 }
 
 @test "AC-53: нет права записи в bin_dir → код 5 с именем каталога, sudo не вызывался" {
+  if is_root; then
+    skip "прогон под root: снятый бит записи (chmod 0555) root не останавливает, отказа кодом 5 быть не может — нужен обычный пользователь"
+  fi
   mkdir -p "$(bin_dir_path)"
   write_fake_binary "$(bin_dir_path)/opencode" "1.17.9-magnit.0"
   local before
@@ -179,6 +185,9 @@ teardown() {
 }
 
 @test "AC-54: --system без sudo и не под root → код 5 с подсказкой про root и \$HOME/.local/bin" {
+  if is_root; then
+    skip "прогон под root: ветка «не под root и без sudo» не воспроизводится, а --system под root писал бы в настоящий /usr/local/bin — нужен обычный пользователь"
+  fi
   local saved=$PATH
   PATH=$(min_path_dir sudo)
   run bash "$PKG/install.sh" --system --no-launch
