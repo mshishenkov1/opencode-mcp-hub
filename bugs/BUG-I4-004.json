@@ -1,0 +1,21 @@
+{
+  "id": "BUG-I4-004",
+  "related_ac": "AC-132, AC-133 (частично), S-A11a",
+  "severity": "medium",
+  "title": "Переменная OPENCODE_CORP_MODEL_BASE_URL не реализована: адрес корпоративной модели нельзя переопределить на собранном бинарнике, а corp status не печатает строку «Модель: …»",
+  "repro_steps": [
+    "Задать OPENCODE_CORP_CONFIG с provider.magnit_prod.options.baseURL = https://llmlite.ailab-copilot-prod.corp.tander.ru/v1",
+    "Задать OPENCODE_CORP_MODEL_BASE_URL=https://llm.test/v1",
+    "Собрать конфиг через Config.Service.get() без слоёв выше корп-слоя и прочитать provider.magnit_prod.options.baseURL",
+    "Повторить с OPENCODE_CORP_MODEL_BASE_URL=не-url и проверить, попало ли предупреждение в лог",
+    "Отдельно: запустить `opencode corp status --hub <мок>` с тем же OPENCODE_CORP_CONFIG"
+  ],
+  "expected": "S-C4a/AC-132: действующий baseURL = первое непустое из (слой выше корп-слоя; OPENCODE_CORP_MODEL_BASE_URL; значение из корп-конфига). Пустая строка и строка из пробелов — «не задано»; значение, не являющееся абсолютным http/https-URL, отбрасывается с предупреждением в лог, называющим имя переменной и полученное значение. S-A11a: `corp status` всегда печатает строку «Модель: <model> на <действующий baseURL по S-C4a>» сразу после строки «Hub: …».",
+  "actual": "Переменная OPENCODE_CORP_MODEL_BASE_URL нигде не читается (grep по packages/opencode/src, packages/core/src даёт ноль вхождений): действующий baseURL всегда равен значению из корп-конфига, предупреждения о непригодном значении нет. `opencode corp status` строку «Модель: …» не печатает вовсе — в выводе есть только Hub, доступность Hub, корпоративный ключ, пользователь, тип ключа, каталог. Переопределить адрес LiteLLM на уже собранном бинарнике (случай, ради которого введено D-20) невозможно.",
+  "failing_test": "packages/opencode/src/corp/config.test.ts::corp — действующий адрес модели (AC-132, AC-133) > AC-132: OPENCODE_CORP_MODEL_BASE_URL подменяет адрес внутри корп-слоя; ::AC-132: не-URL отбрасывается с предупреждением в лог, загрузка конфига не падает; ::AC-133: без записи в конфиге пользователя действует переменная окружения; packages/opencode/src/corp/cli.test.ts::opencode corp status — адрес модели и конфликты личного конфига (AC-136, AC-137) > S-A11a: строка «Модель: <model> на <baseURL>» печатается всегда (AC-132)",
+  "stacktrace": "(fail) corp — действующий адрес модели (AC-132, AC-133) > AC-132: OPENCODE_CORP_MODEL_BASE_URL подменяет адрес внутри корп-слоя\nerror: expect(received).toBe(expected)\nExpected: \"https://llm.test/v1\"\nReceived: \"https://llmlite.ailab-copilot-prod.corp.tander.ru/v1\"\n\n(fail) opencode corp status … > S-A11a: строка «Модель: <model> на <baseURL>» печатается всегда (AC-132)\nerror: expect(received).toContain(expected)\nExpected to contain: \"Модель: magnit_prod/MagnitCopilot на https://llm.test/v1\"\nReceived: \"Hub: http://127.0.0.1:50195\\nДоступность Hub: доступен (ok)\\nКорпоративный ключ: есть\\nПользователь: u@m.ru u1\\nТип ключа: persistent\\nКаталог: кэша нет\\n\"",
+  "suspected_area": "packages/opencode/src/corp/config.ts (configText() отдаёт текст корп-слоя без подстановки адреса — по S-C4a подмена должна происходить внутри корп-слоя до слияния, чтобы любой слой выше её перебивал) и packages/opencode/src/cli/cmd/corp.ts (обработчик CorpStatusCommand не читает Config и не печатает строку «Модель: …»). Гипотеза, не приговор: три теста из шести в группе AC-132/AC-133 уже зелёные — умолчание из корп-конфига и приоритет пользовательского слоя работают сами собой, добавить нужно только чтение переменной и её валидацию.",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "TEST-AGENT, тесты ревизии 1.5 спеки (S-C4a, D-20)"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "BUG-I4-005",
+  "related_ac": "AC-135",
+  "severity": "high",
+  "title": "Без ключа в auth-store запрос к модели всё равно уходит в LiteLLM — без заголовка Authorization; причина не названа, `opencode run` завершается кодом 0",
+  "repro_steps": [
+    "Поднять мок LiteLLM на 127.0.0.1, записывающий все обращения и заголовок Authorization",
+    "Собрать корп-слой OPENCODE_CORP_CONFIG с provider.magnit_prod.options.baseURL = <мок>/v1 и model = magnit_prod/MagnitCopilot",
+    "Взять пустой auth-store (записи magnit_prod нет — пользователь не входил), в окружении задать MAGNIT_COPILOT_KEY=sk-env-must-not-be-used",
+    "Запустить `opencode run \"скажи привет\"` (и отдельно — обратиться к модели через POST /session/:id/message работающего `opencode serve`)",
+    "Посмотреть журнал обращений мока LiteLLM, вывод команды и код выхода"
+  ],
+  "expected": "S-C4b/AC-135: к LiteLLM не отправлено ни одного запроса. Показано сообщение, называющее причину — «Вход через корпоративный SSO не выполнен: нет ключа для Magnit Copilot» — и действие «Войти через корпоративный SSO», открывающее корп-экран входа. В `opencode run` дополнительно печатается подсказка «выполните opencode corp login», код выхода 1. Значение MAGNIT_COPILOT_KEY как ключ не используется.",
+  "actual": "Запрос уходит: мок LiteLLM получает два POST /v1/chat/completions с model=MagnitCopilot и заголовком Authorization = null (заголовок не отправлен вовсе). Сообщения о невыполненном входе нет ни в выводе `opencode run`, ни в ответе роута сообщения сессии. Код выхода `opencode run` — 0. На живом контуре такой запрос вернул бы 401 от LiteLLM, и пользователь увидел бы ошибку сервиса вместо «вы не вошли». Часть требования про MAGNIT_COPILOT_KEY выполняется: значение переменной ключом не подставляется (после коммита d7c9865 apiKey из корп-конфига убран).",
+  "failing_test": "packages/opencode/src/corp/model.test.ts::корп-модель без ключа (AC-135) > AC-135: без записи в auth-store к LiteLLM не уходит ни одного запроса, названа причина; ::AC-135: `opencode run` печатает причину и подсказку, код выхода 1, MAGNIT_COPILOT_KEY не ключ",
+  "stacktrace": "(fail) корп-модель без ключа (AC-135) > AC-135: без записи в auth-store к LiteLLM не уходит ни одного запроса, названа причина\nerror: к LiteLLM ушёл запрос без ключа\nExpected length: 0\nReceived length: 2\n      at packages/opencode/src/corp/model.test.ts:361:60\n\n(fail) корп-модель без ключа (AC-135) > AC-135: `opencode run` печатает причину и подсказку, код выхода 1, MAGNIT_COPILOT_KEY не ключ\nerror: к LiteLLM ушёл запрос без ключа\nExpected length: 0\nReceived length: 2\n      at packages/opencode/src/corp/model.test.ts:389:60",
+  "suspected_area": "packages/opencode/src/provider/provider.ts (строка ~1669: `if (options[\"apiKey\"] === undefined && provider.key) options[\"apiKey\"] = provider.key` — при отсутствии записи auth-store apiKey остаётся undefined и провайдер идёт в сеть без ключа) и корп-слой: по S-C4b проверка наличия записи magnit_prod должна выполняться до обращения к модели. Гипотеза, не приговор.",
+  "impact": "Целевой сценарий заказчика деградирует до непонятной ошибки: пользователь, не прошедший вход, получает не «войдите через SSO», а ответ сервиса ключей (401) или, как в тесте с моком, обычный ответ модели. На стороне LiteLLM это неучтённые запросы без ключа.",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "TEST-AGENT, тесты ревизии 1.5 спеки (S-C4b, D-21)"
+}
