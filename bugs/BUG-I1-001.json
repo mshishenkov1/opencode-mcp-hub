@@ -14,6 +14,7 @@
   "stacktrace": "asyncpg.exceptions.ForeignKeyViolationError ... INSERT INTO api_keys (key_sha256, user_id, key_kind, key_alias, client, created_at, expires_at)",
   "suspected_area": "src/hub/login.py (завершение входа: upsert users + insert api_keys), src/hub/db.py (модели/транзакция). Возможные причины: upsert пользователя не выполняется или выполняется в отдельной транзакции/сессии; расхождение ключа (user_id vs email); порядок операций",
   "iteration": 1,
-  "status": "open",
-  "found_by": "живая проверка входа на стенде PostgreSQL 2026-08-20"
+  "status": "fixed_pending_verification",
+  "found_by": "живая проверка входа на стенде PostgreSQL 2026-08-20",
+  "fix": "Причина: SQLAlchemy упорядочивает INSERT по мапперам, а не по FK (связи relationship между User и ApiKey нет), поэтому api_keys вставлялся раньше users. Исправление: session.flush() после upsert User внутри той же транзакции (src/hub/login.py); дополнительно включён PRAGMA foreign_keys=ON для SQLite (src/hub/db.py). Коммиты 2abc688, d37216e в ветке pipeline/i3-hub-oauth-facade-proxy. Подтверждено на живом PostgreSQL: users+api_keys+audit_log создаются, /api/me по выданному ключу отвечает 200. Полный вход с реальным SSO пользователем ещё не повторяли."
 }
