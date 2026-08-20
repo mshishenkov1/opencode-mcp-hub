@@ -159,18 +159,82 @@ setup() {
   assert_output_contains "Все критерии типа unit/integration покрыты."
 }
 
-@test "AC-128: ci/installers.yml содержит задания bats, pester, lint и release-dry-run" {
-  local f="$INSTALLERS_ROOT/ci/installers.yml"
-  assert_file_contains "$f" "  bats:"
+@test "AC-128: состав заданий ci/installers.yml — bats, pester-pwsh, pester-ps51, lint, release-dry-run, installers-required" {
+  local f="$INSTALLERS_ROOT/ci/installers.yml" job
+  # Ревизия 1.5 (N5-T4): единого задания pester больше нет — три комбинации Pester разведены
+  # по двум заданиям, потому что оболочку в GitHub Actions нельзя задать выражением.
+  for job in "  bats:" "  pester-pwsh:" "  pester-ps51:" "  lint:" "  release-dry-run:" \
+    "  installers-required:"; do
+    assert_file_contains "$f" "$job"
+  done
+  # Единого задания pester в файле быть не должно (строка целиком, а не префикс pester-*).
+  if grep -q -E '^  pester:[[:space:]]*$' "$f"; then
+    printf 'В %s осталось единое задание pester:\n' "$f" >&2
+    return 1
+  fi
+  # Площадки: bats — ubuntu и macOS; pester-pwsh — ubuntu и windows; pester-ps51 — windows.
   assert_file_contains "$f" "ubuntu-latest, macos-latest"
-  assert_file_contains "$f" "  pester:"
-  assert_file_contains "$f" "  lint:"
-  assert_file_contains "$f" "  release-dry-run:"
+  assert_file_contains "$f" "runs-on: windows-latest"
   assert_file_contains "$f" "shellcheck"
   assert_file_contains "$f" "Invoke-ScriptAnalyzer"
-  assert_file_contains "$f" "required"
+  # Агрегирующее задание ждёт все пять.
+  assert_file_contains "$f" "needs: [bats, pester-pwsh, pester-ps51, lint, release-dry-run]"
   run grep -c 'required: true' "$f"
   [ "$output" -ge 4 ]
+}
+
+@test "AC-128: значение shell в каждом задании — литерал pwsh/powershell/bash" {
+  local f="$INSTALLERS_ROOT/ci/installers.yml" bad
+  bad=$(grep -n -E '^[[:space:]]*shell:' "$f" | grep -v -E 'shell: (pwsh|powershell|bash)$' || true)
+  [ -z "$bad" ] || { printf 'Нелитеральная оболочка в %s:\n%s\n' "$f" "$bad" >&2; return 1; }
+  # Три комбинации Pester: ubuntu/pwsh, windows/pwsh, windows/powershell 5.1.
+  assert_file_contains "$f" "shell: powershell"
+  assert_file_contains "$f" "shell: pwsh"
+}
+
+@test "AC-128: подстроки «shell: \${{» в installers.yml нет ни разу" {
+  # `shell: ${{ matrix.shell }}` GitHub отвергает вместе со всем workflow: прогон падает на
+  # старте и не создаёт ни одного задания. AC-128 требует ноль вхождений подстроки в файле —
+  # без исключений для комментариев, чтобы отвергнутая форма не возвращалась копипастой.
+  local f="$INSTALLERS_ROOT/ci/installers.yml" n
+  n=$(grep -F -c 'shell: ${{' "$f" || true)
+  if [ "$n" != "0" ]; then
+    printf 'В %s найдена подстрока «shell: ${{» (%s раз):\n' "$f" "$n" >&2
+    grep -n -F 'shell: ${{' "$f" >&2
+    return 1
+  fi
+}
+
+@test "AC-128, AC-152: оба Windows-задания отвергают прогон с пропусками (SkippedCount > 0)" {
+  local f="$INSTALLERS_ROOT/ci/installers.yml" n
+  # Ветка отказа обязана быть в pester-pwsh (windows-ветка матрицы) и в pester-ps51.
+  n=$(grep -F -c 'SkippedCount -gt 0' "$f" || true)
+  [ "$n" -ge 2 ] || { printf 'Проверок SkippedCount > 0 найдено %s, нужно не меньше двух\n' "$n" >&2; return 1; }
+  # Пустой прогон тоже красный — во всех трёх комбинациях.
+  n=$(grep -F -c 'PassedCount -lt 1' "$f" || true)
+  [ "$n" -ge 2 ] || { printf 'Проверок PassedCount < 1 найдено %s\n' "$n" >&2; return 1; }
+  assert_file_contains "$f" "ExpandedPath"
+  assert_file_contains "$f" "На Windows пропусков быть не должно"
+}
+
+@test "AC-153: .gitlab-ci.yml — нет заданий Windows и macOS, Pester только под pwsh" {
+  local f="$REPO_ROOT/.gitlab-ci.yml" job
+  [ -f "$f" ] || { printf 'Нет файла %s\n' "$f" >&2; return 1; }
+  for job in "^gates:" "^bats:" "^pester:" "^lint-shell:" "^lint-powershell:" "^release-dry-run:"; do
+    grep -q -E "$job" "$f" || { printf 'В %s нет задания %s\n' "$f" "$job" >&2; return 1; }
+  done
+  # Ни одного задания на Windows- и macOS-раннерах: ни образа, ни тега, ни имени площадки.
+  local bad
+  bad=$(grep -n -i -E 'windows-latest|macos-latest|macos|windowsservercore|tags:.*(windows|macos)' "$f" \
+    | grep -v -i -E '^[0-9]+:[[:space:]]*#' || true)
+  [ -z "$bad" ] || { printf 'Найдены Windows/macOS-площадки в %s:\n%s\n' "$f" "$bad" >&2; return 1; }
+  # Pester гоняется только под pwsh в Linux-образе, пропуски в нём допустимы.
+  assert_file_contains "$f" "PWSH_IMAGE"
+  assert_file_contains "$f" "pwsh -NoProfile -Command"
+  refute_file_contains "$f" "SkippedCount -gt 0"
+  # Спецификация прямо называет источник подтверждения Windows-веток (N5-T4).
+  local spec="$INSTALLERS_ROOT/docs/spec.md"
+  assert_file_contains "$spec" "Windows- и macOS-раннеров там нет"
 }
 
 @test "AC-130: shellcheck -s bash проходит на всех installers/**/*.sh без ошибок" {
