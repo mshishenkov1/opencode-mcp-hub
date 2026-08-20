@@ -4,7 +4,9 @@
   auto_https off
 }
 
-https://localhost:8443 {
+# Адрес сайта: HUB_SITE_ADDRESS (DNS-имя стенда), по умолчанию localhost:8443.
+# Сертификат и ключ должны быть выписаны на это же имя (см. deploy/README-windows.md).
+https://{$HUB_SITE_ADDRESS:localhost:8443} {
   tls /certs/server.crt /certs/server.key
   handle_path /tag/* {
     reverse_proxy tag-mcp:8000

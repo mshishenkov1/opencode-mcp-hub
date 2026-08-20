@@ -1,0 +1,60 @@
+# Override для Windows-стенда (D6-02). Накладывается поверх docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.windows.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.windows.yml --profile tag up -d
+#
+# Отличия от базового файла (подробности — deploy/README-windows.md):
+#   * HUB_PUBLIC_URL / TAG_MCP_PUBLIC_URL и адрес сайта Caddy берутся из .env со
+#     значением по умолчанию «DNS-имя ноутбука-сервера», а не localhost: к стенду
+#     ходят снаружи, и публичные адреса обязаны совпадать с именем в сертификате;
+#   * порт 443 пробрасывается дополнительно к 8443 (443 на Windows часто занят
+#     службой «Общий доступ к Интернету», IIS или Veeam — тогда HUB_HTTPS_PORT);
+#   * restart: unless-stopped — стенд поднимается сам после перезагрузки ноутбука
+#     и запуска Docker Desktop;
+#   * bind-mount'ы остаются read-only (на NTFS через WSL2 права каталога всё равно
+#     0777, менять их изнутри контейнера бессмысленно), а данные Postgres/Redis
+#     лежат в named volume внутри WSL2: на bind-mount с NTFS Postgres теряет
+#     производительность и падает на fsync;
+#   * HUB_REPLICAS по умолчанию 1: Docker Desktop без swarm игнорирует
+#     deploy.replicas, несколько реплик поднимаются через
+#     `docker compose ... up -d --scale hub=2` (общий Redis для этого уже есть).
+services:
+  hub:
+    restart: unless-stopped
+    environment:
+      HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://mcp-hub.corp.tander.ru}
+      # На стенде нет отдельного балансировщика: X-Forwarded-For проставляет caddy,
+      # других источников заголовка снаружи нет — лимиты считаются по реальному IP.
+      HUB_TRUST_PROXY: ${HUB_TRUST_PROXY:-true}
+    volumes:
+      - ../catalog.yaml:/app/catalog.yaml:ro
+      - ./ca/tander-ca-bundle.pem:/etc/ssl/certs/tander-ca-bundle.pem:ro
+    deploy:
+      replicas: ${HUB_REPLICAS:-1}
+
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  tag-mcp:
+    restart: unless-stopped
+    environment:
+      TAG_MCP_PUBLIC_URL: ${TAG_MCP_PUBLIC_URL:-https://mcp-hub.corp.tander.ru/tag}
+    volumes:
+      - ./ca/tander-ca-bundle.pem:/etc/ssl/certs/tander-ca-bundle.pem:ro
+
+  proxy:
+    restart: unless-stopped
+    environment:
+      # Имя сайта в Caddyfile; должно совпадать с CN/SAN сертификата в ./caddy/certs.
+      HUB_SITE_ADDRESS: ${HUB_SITE_ADDRESS:-mcp-hub.corp.tander.ru:8443}
+    ports:
+      - "8443:8443"
+      # 443 наружу; если порт занят — HUB_HTTPS_PORT=8444 и ходить по нему
+      - "${HUB_HTTPS_PORT:-443}:8443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - caddydata:/data
