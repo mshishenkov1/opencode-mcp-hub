@@ -847,7 +847,7 @@ function Invoke-Check {
     } else {
         $registered = Get-DesktopUninstallEntry -Manifest $Manifest
         if ($null -ne $registered) {
-            Write-Line ($script:MsgCheckDesktopOk -f $registered.DisplayName)
+            Write-Line ($script:MsgCheckDesktopOk -f $registered.DisplayTarget)
         } else {
             Write-Line $script:MsgCheckDesktopNone
             $diff = $true
@@ -889,11 +889,65 @@ function Get-DesktopUninstallEntry {
             $displayName = Get-Prop $props 'DisplayName'
             if ([string]::IsNullOrEmpty($displayName)) { continue }
             if ($displayName -like ('*' + $appName.Replace('.app', '') + '*')) {
-                return @{ DisplayName = $displayName; UninstallString = (Get-Prop $props 'UninstallString') }
+                $installLocation = Get-Prop $props 'InstallLocation'
+                # Для строк контракта (--check «путь», отчёт удаления) предпочитаем путь установки,
+                # если он в реестре есть; иначе — отображаемое имя. Значение одно и то же в обоих
+                # местах, чтобы вывод был консистентным.
+                $displayTarget = $displayName
+                if (-not [string]::IsNullOrEmpty($installLocation)) {
+                    $displayTarget = $installLocation
+                }
+                return @{
+                    DisplayName          = $displayName
+                    DisplayTarget        = $displayTarget
+                    UninstallString      = (Get-Prop $props 'UninstallString')
+                    QuietUninstallString = (Get-Prop $props 'QuietUninstallString')
+                    InstallLocation      = $installLocation
+                }
             }
         }
     }
     return $null
+}
+
+# Разбор строки деинсталляции реестра на исполняемый файл и аргументы (N5-R1).
+# UninstallString бывает вида "C:\...\uninstall.exe" /S либо MsiExec.exe /X{GUID}.
+function ConvertFrom-UninstallString {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    $trimmed = $Command.Trim()
+    $path = $trimmed
+    $rest = ''
+    if ($trimmed.StartsWith('"')) {
+        $end = $trimmed.IndexOf('"', 1)
+        if ($end -gt 0) {
+            $path = $trimmed.Substring(1, $end - 1)
+            $rest = $trimmed.Substring($end + 1).Trim()
+        } else {
+            $path = $trimmed.Trim('"')
+        }
+    } else {
+        $space = $trimmed.IndexOf(' ')
+        if ($space -gt 0) {
+            $path = $trimmed.Substring(0, $space)
+            $rest = $trimmed.Substring($space + 1).Trim()
+        }
+    }
+    $arguments = @()
+    if (-not [string]::IsNullOrEmpty($rest)) {
+        $arguments = @($rest -split '\s+')
+    }
+    return @{ Path = $path; Arguments = $arguments }
+}
+
+# Запуск штатного деинсталлятора и ожидание завершения; в тестах подменяется моком (N5-T2).
+function Invoke-UninstallProcess {
+    param([Parameter(Mandatory = $true)][string]$Path, [string[]]$Arguments)
+    if ($null -eq $Arguments -or $Arguments.Count -eq 0) {
+        $process = Start-Process -FilePath $Path -Wait -PassThru
+    } else {
+        $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
+    }
+    return $process.ExitCode
 }
 
 # =====================================================================================
@@ -1043,6 +1097,7 @@ function Invoke-ObjectRemoval {
 
 function Invoke-Uninstall {
     param($Manifest, $Layout, [bool]$WithPurge)
+    $desktopFailed = $false
     Write-Say ($script:MsgUninstallHead -f (Get-Prop $Manifest 'version'))
     Invoke-ObjectRemoval -Label $script:ObjBin -Path $Layout.BinTarget
     Invoke-ObjectRemoval -Label $script:ObjBinBak -Path $Layout.BinBackup
@@ -1078,11 +1133,38 @@ function Invoke-Uninstall {
     if ($null -eq $desktop) {
         Write-Say $script:MsgDesktopNone
     } else {
+        # N5-R1: если штатный деинсталлятор зарегистрирован — запускаем его (тихо, если у нас есть
+        # QuietUninstallString или silent_args в манифесте), ждём и отражаем фактический результат.
+        # Если деинсталлятора нет — честное сообщение «удалите вручную», без ложного «удалён».
         $registered = Get-DesktopUninstallEntry -Manifest $Manifest
-        if ($null -ne $registered -and -not [string]::IsNullOrEmpty($registered.UninstallString)) {
-            Write-Say ($script:MsgUninstallRemoved -f $script:ObjDesktop, $registered.DisplayName)
-        } else {
+        $command = ''
+        $isQuiet = $false
+        if ($null -ne $registered) {
+            if (-not [string]::IsNullOrEmpty($registered.QuietUninstallString)) {
+                $command = $registered.QuietUninstallString
+                $isQuiet = $true
+            } elseif (-not [string]::IsNullOrEmpty($registered.UninstallString)) {
+                $command = $registered.UninstallString
+            }
+        }
+        if ([string]::IsNullOrEmpty($command)) {
             Write-Say $script:MsgDesktopManualRemove
+        } else {
+            $parsed = ConvertFrom-UninstallString -Command $command
+            $arguments = @($parsed.Arguments)
+            if (-not $isQuiet) {
+                $silent = Get-Prop $desktop 'silent_args'
+                if ($null -ne $silent -and @($silent).Count -gt 0) {
+                    $arguments = @($arguments) + @($silent)
+                }
+            }
+            $code = Invoke-UninstallProcess -Path $parsed.Path -Arguments $arguments
+            if ($code -eq 0) {
+                Write-Say ($script:MsgUninstallRemoved -f $script:ObjDesktop, $registered.DisplayTarget)
+            } else {
+                Write-Say ($script:MsgDesktopError -f $code)
+                $desktopFailed = $true
+            }
         }
     }
 
@@ -1099,6 +1181,11 @@ function Invoke-Uninstall {
         }
     }
     Write-Line $script:MsgUninstallDone
+    # Провал штатного деинсталлятора Desktop отражается кодом выхода (как N5-I10 для установки):
+    # удаление CLI/CA уже выполнено и не откатывается.
+    if ($desktopFailed) {
+        return $script:ExitFail
+    }
     return $script:ExitOk
 }
 
