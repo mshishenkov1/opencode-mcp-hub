@@ -1,0 +1,112 @@
+{
+  "verdict": "request_changes",
+  "iteration": "I-5",
+  "scope": {
+    "spec": "installers/docs/spec.md (N5-*; раздел §12 H5-* вне объёма ревью)",
+    "criteria": "installers/docs/acceptance-criteria.yaml (AC-01…AC-134)",
+    "code_commits": "e4f9722..3164184",
+    "tests_commit": "7854976",
+    "test_report": "reports/test-report-i5.md"
+  },
+  "verification": {
+    "bats": "140/140 ok (bats 1.14, bash 3.2, macOS); прогон воспроизведён дважды",
+    "shellcheck": "чист (тест AC-130 зелёный)",
+    "trace_ac": "134 AC, все unit/integration покрыты; 15 manual и 2 ci (AC-124, AC-129) без автотестов — согласовано спекой",
+    "pester": "не запускался — pwsh в среде отсутствует; оценён чтением (38 тестов, моки только на границах среды: Get-HostOsArch, Get-UserEnvironmentVariable, Get-UserPathEntry, Write-UserPathEntry, Publish-EnvironmentChange, Invoke-DesktopInstaller, Write-Line)",
+    "offline_check": "грепом по common/install-posix.sh, windows/install.ps1, install.bat, лончерам и release.sh: ни одного curl/wget/nc/Invoke-WebRequest/Invoke-RestMethod/WebClient/git/npm/brew/apt/winget/choco; eval и Invoke-Expression отсутствуют; единственный Add-Type — константный литерал P/Invoke для SendMessageTimeout",
+    "mutation_testing": {
+      "method": "10 мутаций через bash с откатом git checkout -- installers; дерево после прогона чистое",
+      "result": "10 из 10 убиты",
+      "cases": [
+        {"id": "M1", "mutation": "verify_hash() → return 0 (проверка sha256 отключена)", "failed_tests": 4, "killers": "AC-13, AC-14, AC-98, AC-52"},
+        {"id": "M2", "mutation": "добавлен флаг --skip-hash-check, обходящий verify_package", "failed_tests": 2, "killers": "AC-17 (×2)"},
+        {"id": "M3", "mutation": "--check при расхождениях выходит с 0 вместо 7", "failed_tests": 8, "killers": "AC-102…AC-110, AC-84"},
+        {"id": "M4", "mutation": "из is_safe_pkg_path убрана ветка, запрещающая '..'", "failed_tests": 1, "killers": "AC-11"},
+        {"id": "M5", "mutation": "блок профиля всегда дописывается (без замены существующего)", "failed_tests": 3, "killers": "AC-42, AC-43, AC-79"},
+        {"id": "M6", "mutation": "purge_path_is_safe перестал требовать «внутри $HOME»", "failed_tests": 2, "killers": "AC-90 (×2)"},
+        {"id": "M7", "mutation": "prepare_privileges включает sudo без --system", "failed_tests": 27, "killers": "AC-53 и весь блок установки/проверки"},
+        {"id": "M8", "mutation": "release.sh: selfcheck_package() → return 0", "failed_tests": 2, "killers": "AC-115 (×2)"},
+        {"id": "M9", "mutation": "release.sh: отсутствующий CLI-артефакт → молчаливый пропуск цели", "failed_tests": 1, "killers": "AC-119"},
+        {"id": "M10", "mutation": "неизвестный аргумент → код 1 вместо 2", "failed_tests": 3, "killers": "AC-25, AC-17 (×2)"}
+      ]
+    },
+    "tautology_check": "тавтологичности не найдено: тесты сверяются с литеральными строками контракта, а не с переменными реализации; source_installer используется только в AC-36 (normalize_os/normalize_arch); ни одна константа MSG_*/EX_*/OM_* в тестах не переопределяется; sha256 в фикстурных манифестах считаются на лету от фактических файлов (захардкожены только заведомо неверные)",
+    "ci_consistency": "ci/installers.yml согласован с тестами: задания bats (ubuntu+macos, `bats installers/tests/bats`), pester (`installers/tests/pester`), lint (shellcheck по `installers/**/*.sh`, Invoke-ScriptAnalyzer, проверка кодировок, оффлайн-греп), release-dry-run (release.sh + --dry-run + sha256sum -c). Оффлайн-паттерн CI проверен локально — ложных срабатываний на installers/**/*.sh|ps1|bat нет",
+    "docs_consistency": "install-user.md и install-admin.md соответствуют фактическому поведению (пути, коды выхода 0–7, .bak-политика, purge, границы release.sh). Единственное расхождение — строка «Desktop … удаляется / деинсталлятор» в таблице install-admin.md §3: на Windows деинсталлятор не запускается (см. находку 2)"
+  },
+  "findings": [
+    {
+      "severity": "blocker",
+      "where": "installers/common/install-posix.sh:1036-1038,1225-1237,1413-1419 (install_desktop, find_installed_desktop, do_uninstall)",
+      "what": "Path traversal через поле манифеста artifacts[].app_name → удаление произвольного каталога. Поле app_name — единственная строка манифеста, участвующая в файловых операциях и НЕ проходящая is_safe_pkg_path (в отличие от ca.file, ca.install_name, artifacts[].file, artifacts[].install_name). Оно подставляется в rm -rf: install_desktop делает `run_priv rm -rf \"$dest/$MF_desktop_app\"`, а find_installed_desktop/do_uninstall — `remove_object \"$OBJ_DESKTOP\" \"/Applications/$app\"`. Подтверждено PoC: манифест с \"app_name\": \"../..<abs>/victim\" и запуск `install.sh --uninstall` удалили каталог вне /Applications и напечатали «Desktop: удалён (/Applications/../../tmp/.../victim)», код выхода 0. Путь --uninstall достижим безусловно (verify_package до него не выполняется, хеши не сверяются). При --system удаление выполняется через sudo (do_uninstall:1405-1407 и run_priv), то есть произвольное `sudo rm -rf` от подменённого манифеста. Требуется: валидировать app_name (запрет '..', ведущего '/', обратного слэша и разделителей пути — по смыслу N5-P4/N5-P3 это имя приложения, а не путь) с отказом кодом 2 до любых изменений; заодно закрыть аналогичную подстановку в installers/windows/install.ps1 (там app_name используется только для сопоставления DisplayName, но проверка не помешает).",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/windows/install.ps1:1071-1081 (Invoke-Uninstall)",
+      "what": "Правило N5-R1 «на Windows — запуск штатного деинсталлятора, если он зарегистрирован» не реализовано: код находит запись Uninstall в реестре, но UninstallString никогда не запускается — при непустом UninstallString просто печатается «Desktop: удалён (<DisplayName>)». Отчёт сообщает о выполненном удалении, которого не было (install-admin.md §3 обещает «удаляется / деинсталлятор»). Либо запускать деинсталлятор, либо, если запуск сознательно вне объёма, печатать MsgDesktopManualRemove и зафиксировать решение в spec.md — но не печатать «удалён».",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/10-manifest.bats, installers/docs/acceptance-criteria.yaml (AC-11), installers/tests/pester/Install.Tests.ps1",
+      "what": "Пробел в наборе тестов, из-за которого находка 1 не была поймана: AC-11 и тесты проверяют путь только для полей file (bin/opencode, certs/…), но ни один тест не подаёт небезопасное значение в install_name и app_name. Нужен регрессионный тест: манифест с artifacts[].app_name = '../../<путь>' (и отдельно ca.install_name = '../x') → код 2, ничего не удалено, каталог-жертва на месте; проверить это и для install.sh --uninstall, и для install.sh --uninstall --dry-run. Также отсутствует критерий/тест на N5-R1 в части Windows-деинсталлятора Desktop (находка 2): в acceptance-criteria.yaml нет ни одного AC про запуск деинсталлятора — добавить AC (тип manual для запуска + unit/Pester на выбор ветки).",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/manifest.schema.json (definitions.artifact.properties.app_name)",
+      "what": "app_name описан как {\"type\":\"string\",\"minLength\":1}, тогда как file и install_name используют definitions.pkgPath (запрет '..', ведущего '/', букв дисков). Схема — вторая линия защиты для находки 1 и должна быть выровнена (pkgPath или более строгий шаблон имени без разделителей).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:1171-1181 (do_check) и installers/docs/spec.md N5-C2",
+      "what": "Поведение шире спеки: --check печатает «PATH: содержит <bin_dir>», если bin_dir найден не в $PATH, а в блоке профиля. Спека даёт такую поблажку явно только для строки NODE_EXTRA_CA_CERTS («если блок есть, переменная считается заданной»); для PATH таблица N5-C2 говорит только про $PATH. AC-100 фиксирует расширенное поведение (проверка сразу после установки в свежем процессе), так что расхождение — в тексте спеки, а не в тестах. Уточнить N5-C2, чтобы код и спека совпадали.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/windows/install.ps1:842-848 (Invoke-Check)",
+      "what": "Строка контракта N5-C2 «Desktop: установлен (<путь>)» на Windows печатается с DisplayName из реестра, а не с путём. Формулировки --check объявлены частью контракта; либо печатать путь (InstallLocation/UninstallString), либо зафиксировать в спеке, что на Windows подставляется отображаемое имя.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/release.sh:244-309 (write_manifest), 87-108 (разбор аргументов)",
+      "what": "Значения --hub-url, --version и имя desktop-файла подставляются в JSON манифеста без экранирования: кавычка или обратный слэш в аргументе даёт синтаксически битый манифест (сборка при этом всё же падает на самопроверке N5-B2, поэтому severity minor). Кроме того, --version не проверяется на формат из manifest.schema.json (^[0-9]+\\.[0-9]+\\.[0-9]+-magnit\\.[0-9]+$) — пакет с версией, не проходящей собственную схему, соберётся молча. Рекомендуется валидировать --version и --hub-url на входе.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:811-857 (apply_profile_block)",
+      "what": "Если в файле профиля уже оказалось два маркированных блока (например, после ручного копирования), повторный запуск установщика не схлопывает их: awk обрабатывает каждый маркер начала независимо и оставляет два блока. Проверено экспериментально (1 → ручное дублирование → 2 → после повторного запуска по-прежнему 2). Букву N5-I5 («второй блок не добавляется») это не нарушает, но гарантия N5-U1 «в профиле ровно один маркированный блок» держится только при отсутствии внешних правок. Достаточно вырезать все блоки и дописать один.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:799-809 (profile_foreign_env_line)",
+      "what": "Признак чужого присваивания — подстрока NODE_EXTRA_CA_CERTS в любой строке вне блока, включая комментарии и строки вида `# NODE_EXTRA_CA_CERTS больше не нужен`. Даёт ложное предупреждение (N5-I5 говорит именно о присваивании). Достаточно требовать шаблон export/set/присваивания в начале строки.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "acknowledged_good": [
+    "N5-P5 выдержано строго: флага пропуска проверки хеша нет ни в parse_args, ни в справке, ни в исходниках (AC-17 ловит и появление флага, и мутацию verify_hash)",
+    "N5-P6: сетевых вызовов нет ни в одном установщике; в тестах оффлайновость проверяется наблюдаемо — ловушки curl/wget/nc/git/npm/brew/apt/winget/choco/gh/sudo в PATH пишут в файл, assert_no_forbidden_calls его читает",
+    "N5-I7: sudo включается исключительно при --system (мутация M7 убивается 27 тестами); установка по умолчанию проверена на отсутствие вызовов sudo",
+    "N5-R2: список purge_paths валидируется целиком до первого удаления, '..' отвергается и в сыром, и в раскрытом виде, требуется строгое вложение в $HOME, сам $HOME запрещён",
+    "awk-парсер JSON безопасен: значения манифеста никогда не становятся форматом printf (все шаблоны — константы файла), heredoc в mf_get не выполняет повторного раскрытия результата $MANIFEST_KV, табуляции и переводы строк в ключах и значениях нормализуются в emit()",
+    "install.ps1: BOM EF BB BF на месте, Invoke-Expression отсутствует, User PATH читается с DoNotExpandEnvironmentNames и пишется обратно с сохранением RegistryValueKind, Machine-переменные не трогаются; install.bat — чистый ASCII и только запуск ps1 с пробросом ERRORLEVEL",
+    "Изоляция тестов (N5-T1) реальная: HOME/TMPDIR/prefix/SHELL подменяются, снимки ФС сравниваются побайтово, sudo и сеть заглушены; хешей в манифестах не захардкожено"
+  ],
+  "dispute_resolutions": []
+}
