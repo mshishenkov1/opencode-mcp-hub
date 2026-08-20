@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    event,
     make_url,
     select,
     text,
@@ -218,14 +219,34 @@ class Consent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 
+def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+    """SQLite по умолчанию не проверяет внешние ключи — включаем на каждое соединение.
+
+    Без этого поведение SQLite (тесты, локальный запуск) расходится с PostgreSQL, где
+    ограничения включены всегда, и нарушения FK остаются незамеченными.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+
 def build_engine(database_url: str) -> AsyncEngine:
     url = make_url(database_url)
     kwargs: dict[str, Any] = {"future": True}
-    if url.get_backend_name() == "sqlite":
+    is_sqlite = url.get_backend_name() == "sqlite"
+    if is_sqlite:
         kwargs["connect_args"] = {"check_same_thread": False}
         if not url.database or url.database == ":memory:":
             kwargs["poolclass"] = StaticPool
-    return create_async_engine(database_url, **kwargs)
+    engine = create_async_engine(database_url, **kwargs)
+    if is_sqlite:
+        _enable_sqlite_foreign_keys(engine)
+    return engine
 
 
 class Database:
