@@ -1,0 +1,19 @@
+{
+  "id": "BUG-I1-001",
+  "related_ac": "AC-44",
+  "severity": "critical",
+  "title": "Вход не завершается: api_keys вставляется без записи в users (нарушение внешнего ключа в PostgreSQL)",
+  "repro_steps": [
+    "Поднять стенд на PostgreSQL (deploy/docker-compose.yml, проект hubi3)",
+    "Из клиента выполнить вход: POST /cli/start, пройти корпоративный SSO в браузере, дождаться poll",
+    "Наблюдать логи hub"
+  ],
+  "expected": "Пользователь и ключ сохраняются одной транзакцией (spec R-L8), клиент получает постоянный ключ",
+  "actual": "sqlalchemy.exc.IntegrityError: ForeignKeyViolationError: insert or update on table \"api_keys\" violates foreign key constraint \"api_keys_user_id_fkey\"; DETAIL: Key (user_id)=(shishenkov_ma) is not present in table \"users\". Вход не завершается, ключ не выдан",
+  "failing_test": "(нет — тесты идут на SQLite, где enforcement внешних ключей выключен по умолчанию; на PostgreSQL включён)",
+  "stacktrace": "asyncpg.exceptions.ForeignKeyViolationError ... INSERT INTO api_keys (key_sha256, user_id, key_kind, key_alias, client, created_at, expires_at)",
+  "suspected_area": "src/hub/login.py (завершение входа: upsert users + insert api_keys), src/hub/db.py (модели/транзакция). Возможные причины: upsert пользователя не выполняется или выполняется в отдельной транзакции/сессии; расхождение ключа (user_id vs email); порядок операций",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "живая проверка входа на стенде PostgreSQL 2026-08-20"
+}
