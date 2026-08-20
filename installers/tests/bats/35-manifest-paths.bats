@@ -226,3 +226,81 @@ assert_no_file_changes() {
   assert_status 2
   assert_output_contains "недопустимый путь: ../y"
 }
+
+# ------------------------------------------------------------------ «схлопывающиеся» пути в пакете
+#
+# Значения, при которых "<каталог>/<значение>" схлопывается в сам каталог, а не в объект внутри
+# него: ".", "./x", "x/." и завершающий "/". Для install_name это дало бы цели вида
+# "<bin_dir>/." и "<config_dir>/opencode/" — не то намерение, которое описывает манифест (N5-P3).
+
+@test "AC-11, AC-135: ca.install_name=\".\" и \"./x\" → код 2, каталог конфига не тронут" {
+  manifest_edit 's|"install_name": "tander-ca-bundle.pem"|"install_name": "."|'
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле ca.install_name"
+  assert_output_contains "недопустимый путь: ."
+  assert_no_file_changes
+  PKG_DESKTOP=1 make_pkg
+  manifest_edit 's|"install_name": "tander-ca-bundle.pem"|"install_name": "./ca.pem"|'
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "недопустимый путь: ./ca.pem"
+  [ ! -e "$(config_dir_path)/ca.pem" ]
+}
+
+@test "AC-11, AC-135: artifacts[].install_name с завершающим слэшем и \"x/.\" → код 2" {
+  manifest_edit 's|"install_name": "opencode"|"install_name": "opencode/"|'
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле artifacts.0.install_name"
+  assert_output_contains "недопустимый путь: opencode/"
+  assert_no_file_changes
+  PKG_DESKTOP=1 make_pkg
+  manifest_edit 's|"install_name": "opencode"|"install_name": "sub/."|'
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "недопустимый путь: sub/."
+  [ ! -e "$(bin_dir_path)/opencode" ]
+}
+
+@test "AC-11, AC-135: ca.file и artifacts[].file со «схлопывающимся» путём → код 2" {
+  manifest_edit 's|"file": "certs/tander-ca-bundle.pem"|"file": "certs/"|'
+  snapshot_state before
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле ca.file"
+  assert_output_contains "недопустимый путь: certs/"
+  assert_no_file_changes
+  PKG_DESKTOP=1 make_pkg
+  manifest_edit 's|"file": "bin/opencode"|"file": "bin/."|'
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле artifacts.0.file"
+  assert_output_contains "недопустимый путь: bin/."
+}
+
+@test "AC-135: is_safe_pkg_path и is_safe_app_name — таблица допустимых и запрещённых значений" {
+  source_installer
+  local v
+  # Внутри пакета допустимо: относительный путь с разделителем "/".
+  for v in "opencode" "bin/opencode" "certs/tander-ca-bundle.pem" "a/b/c.pem" "OpenCode.app"; do
+    is_safe_pkg_path "$v" || { printf 'Отвергнут допустимый путь: %s\n' "$v" >&2; return 1; }
+  done
+  # Запрещено для любого пути внутри пакета.
+  for v in "" "." ".." "./x" "x/." "x/" "/etc/passwd" "../x" "a/../b" "a/.." "C:/x" 'a\b'; do
+    if is_safe_pkg_path "$v"; then
+      printf 'Принят недопустимый путь пакета: [%s]\n' "$v" >&2
+      return 1
+    fi
+  done
+  # Имя приложения строже: разделителей пути быть не может вовсе.
+  is_safe_app_name "OpenCode.app" || return 1
+  for v in "" "." ".." "./OpenCode.app" "OpenCode.app/" "sub/OpenCode.app" "../victim" "/Applications"; do
+    if is_safe_app_name "$v"; then
+      printf 'Принято недопустимое имя приложения: [%s]\n' "$v" >&2
+      return 1
+    fi
+  done
+}
