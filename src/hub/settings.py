@@ -151,6 +151,8 @@ class Settings(BaseSettings):
     tools_cache_ttl: int = Field(default=300, gt=0)
     cb_failures: int = Field(default=5, gt=0)
     cb_reset: float = Field(default=30.0, gt=0)
+    # Запас к TTL права на пробу поверх самого долгого возможного запроса (H5-1).
+    cb_probe_grace: float = Field(default=5.0, gt=0)
     connection_cache_ttl: float = Field(default=60.0, gt=0)
 
     # --- I-3: брокер токенов целевых систем ---

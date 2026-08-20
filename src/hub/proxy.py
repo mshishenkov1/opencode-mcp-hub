@@ -181,6 +181,23 @@ class CircuitBreaker:
     def _probe_key(self, alias: str) -> str:
         return CB_PREFIX + alias + CB_PROBE_SUFFIX
 
+    def _probe_ttl(self) -> float:
+        """TTL права на пробу — дольше самого долгого возможного запроса (H5-1).
+
+        Пробный запрос живёт до ``HUB_UPSTREAM_TIMEOUT`` (обычный ответ) или до
+        ``HUB_UPSTREAM_SSE_IDLE_TIMEOUT`` (SSE-поток); если бы право истекало раньше, второй
+        запрос захватил бы его и отправил на лежащий upstream ещё одну пробу. Восстановление
+        длинный TTL не задерживает: право снимается сразу по завершении пробы.
+        """
+        return (
+            max(
+                float(self.settings.cb_reset),
+                float(self.settings.upstream_timeout),
+                float(self.settings.upstream_sse_idle_timeout),
+            )
+            + float(self.settings.cb_probe_grace)
+        )
+
     async def state(self, alias: str) -> dict[str, Any]:
         record = await self.kv.get(self._key(alias))
         if not isinstance(record, dict):
@@ -199,7 +216,7 @@ class CircuitBreaker:
         now = self.clock.time()
         if open_until > now:
             return open_until - now
-        probe_ttl = float(self.settings.cb_reset)
+        probe_ttl = self._probe_ttl()
         claimed = await self.kv.set_if_absent(
             self._probe_key(alias), {"until": now + probe_ttl}, ttl=probe_ttl
         )
