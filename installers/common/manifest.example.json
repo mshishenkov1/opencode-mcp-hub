@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "product": "opencode-magnit",
+  "version": "1.17.9-magnit.1",
+  "os": "darwin",
+  "arch": "arm64",
+  "hub_url": "https://mcp-hub.magnit.ru",
+  "built_at": "2026-08-18T09:41:07Z",
+  "source_release": "v1.17.9-magnit.1",
+  "ca": {
+    "file": "certs/tander-ca-bundle.pem",
+    "sha256": "3b1f2d4c5a6e7089b1c2d3e4f5061728394a5b6c7d8e9f001122334455667788",
+    "install_name": "tander-ca-bundle.pem"
+  },
+  "artifacts": [
+    {
+      "kind": "cli",
+      "file": "bin/opencode",
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "size": 94371840,
+      "install_name": "opencode"
+    },
+    {
+      "kind": "desktop",
+      "file": "desktop/OpenCode-1.17.9-magnit.1-arm64.dmg",
+      "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+      "size": 131072000,
+      "installer_type": "dmg",
+      "app_name": "OpenCode.app"
+    }
+  ],
+  "purge_paths": [
+    "${XDG_CONFIG_HOME}/opencode",
+    "${XDG_DATA_HOME}/opencode"
+  ]
+}

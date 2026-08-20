@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://magnit.tech/opencode/installers/manifest.schema.json",
+  "title": "opencode-magnit package manifest",
+  "description": "Единственный источник правды о содержимом пакета (installers/docs/spec.md, N5-P3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "product",
+    "version",
+    "os",
+    "arch",
+    "hub_url",
+    "built_at",
+    "source_release",
+    "ca",
+    "artifacts",
+    "purge_paths"
+  ],
+  "properties": {
+    "schema": {
+      "description": "Версия схемы манифеста; для I-5 ровно 1.",
+      "const": 1
+    },
+    "product": {
+      "description": "Имя продукта.",
+      "const": "opencode-magnit"
+    },
+    "version": {
+      "description": "Версия сборки в формате <upstream>-magnit.<N> (S-B1).",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+-magnit\\.[0-9]+$"
+    },
+    "os": {
+      "type": "string",
+      "enum": ["darwin", "linux", "windows"]
+    },
+    "arch": {
+      "type": "string",
+      "enum": ["arm64", "x64"]
+    },
+    "hub_url": {
+      "description": "Адрес Hub; печатается в отчёте и в --check, установщиком никуда не записывается.",
+      "type": "string",
+      "minLength": 1
+    },
+    "built_at": {
+      "description": "Момент сборки пакета, ISO-8601 UTC.",
+      "type": "string",
+      "minLength": 1
+    },
+    "source_release": {
+      "description": "Тег релиза форка, из которого взяты артефакты (S-B4).",
+      "type": "string",
+      "minLength": 1
+    },
+    "ca": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "install_name"],
+      "properties": {
+        "file": { "$ref": "#/definitions/pkgPath" },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "install_name": { "$ref": "#/definitions/pkgPath" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/artifact" },
+      "allOf": [
+        {
+          "description": "Ровно один артефакт kind=\"cli\".",
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "cli" } },
+            "required": ["kind"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "description": "Не более одного артефакта kind=\"desktop\".",
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "desktop" } },
+            "required": ["kind"]
+          },
+          "maxContains": 1
+        }
+      ]
+    },
+    "purge_paths": {
+      "description": "Пути, удаляемые при --purge (N5-R2). Допустимы подстановки ~, ${XDG_CONFIG_HOME}, ${XDG_DATA_HOME}, %USERPROFILE%, %LOCALAPPDATA%.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "definitions": {
+    "sha256": {
+      "description": "Ровно 64 символа [0-9a-f]; сравнение регистронезависимое.",
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "pkgPath": {
+      "description": "Путь относительно корня пакета: разделитель /, без ведущего /, без .. и без букв дисков.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\.\\.)[^\\\\]+$"
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["kind", "file", "sha256"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["cli", "desktop"] },
+        "file": { "$ref": "#/definitions/pkgPath" },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "size": { "type": "integer", "minimum": 0 },
+        "url": {
+          "description": "Справочное поле: установщик его никогда не запрашивает (N5-P6).",
+          "type": "string"
+        },
+        "install_name": { "$ref": "#/definitions/pkgPath" },
+        "installer_type": { "type": "string", "enum": ["dmg", "nsis", "msi"] },
+        "app_name": { "type": "string", "minLength": 1 },
+        "silent_args": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "description": "CLI-артефакт обязан содержать install_name.",
+          "if": {
+            "properties": { "kind": { "const": "cli" } },
+            "required": ["kind"]
+          },
+          "then": { "required": ["install_name"] }
+        },
+        {
+          "description": "Desktop-артефакт обязан содержать installer_type.",
+          "if": {
+            "properties": { "kind": { "const": "desktop" } },
+            "required": ["kind"]
+          },
+          "then": { "required": ["installer_type"] }
+        },
+        {
+          "description": "Для dmg обязательно app_name.",
+          "if": {
+            "properties": { "installer_type": { "const": "dmg" } },
+            "required": ["installer_type"]
+          },
+          "then": { "required": ["app_name"] }
+        }
+      ]
+    }
+  }
+}
