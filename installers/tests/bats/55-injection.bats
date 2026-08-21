@@ -75,6 +75,51 @@ OM_CONTROL_VALUES() {
   printf 'a\tb.app\n'
 }
 
+# ------------------------------------------------------------------ AC-145: посимвольный перечень
+#
+# Перечни выше проверяют ФОРМЫ атаки, и почти каждое значение в них несёт сразу несколько
+# запрещённых символов: 'pwn$(touch PWNED).pem' — это '$', '(', ')' и пробел, 'a.pem"; touch
+# BREAKOUT; x="' — двойная кавычка, ';' и пробел. Такой набор не отличает «белый список отверг
+# значение» от «белый список отверг ПОПУТНЫЙ символ»: если из набора is_safe_pkg_path выпадут
+# '$' и ';', все значения выше по-прежнему получат код 2 — по скобкам, кавычкам и пробелу, — и
+# ослабление ПЕРВОЙ линии защиты N5-I13 останется незамеченным (вторая линия, экранирование при
+# печати в профиль, при этом молча начнёт держать нагрузку, на которую не рассчитана).
+#
+# Поэтому ниже — ровно ОДИН запрещённый символ на значение. Каждое отличается от заведомо
+# принимаемого 'ab.pem' («AC-145: базовое значение посимвольного перечня…» ниже) единственным
+# символом, значит его отказ может объясняться только этим символом. Перечень покрывает
+# запрещённые символы spec.md N5-P3/N5-P4 поимённо, включая управляющие, 0x7f и байт >= 0x80.
+OM_SINGLE_CHAR_PATH_VALUES() {
+  local c
+  # printf с '%s', а не с готовым форматом: значение символа не должно попасть в строку формата
+  # (иначе '%' и '\' были бы истолкованы самим printf).
+  for c in '$' '`' '"' "'" ';' '&' '|' '<' '>' '(' ')' '{' '}' '[' ']' \
+           '*' '?' '!' '#' '~' '%' ':' '=' ',' '^' '@' '+' '\' ' '; do
+    printf 'a%sb.pem\n' "$c"
+  done
+  # Управляющие: табуляция (проходит через JSON-экранирование \t), вертикальная табуляция и
+  # 0x7f (доходят до белого списка сырым байтом), плюс кодовая точка >= 0x80.
+  printf 'a\tb.pem\n'
+  printf 'a\013b.pem\n'
+  printf 'a\177b.pem\n'
+  printf 'aйb.pem\n'
+}
+
+# Для app_name перечень отличается ровно двумя пунктами: пробел ВНУТРИ имени разрешён (N5-P3,
+# N5-P4 — «OpenCode Magnit.app»), поэтому из перечня исключён, а разделитель '/' в имени
+# приложения запрещён (это ровно одно имя каталога), поэтому в перечень добавлен.
+OM_SINGLE_CHAR_APP_VALUES() {
+  local c
+  for c in '$' '`' '"' "'" ';' '&' '|' '<' '>' '(' ')' '{' '}' '[' ']' \
+           '*' '?' '!' '#' '~' '%' ':' '=' ',' '^' '@' '+' '\' '/'; do
+    printf 'a%sb.app\n' "$c"
+  done
+  printf 'a\tb.app\n'
+  printf 'a\013b.app\n'
+  printf 'a\177b.app\n'
+  printf 'aйb.app\n'
+}
+
 # Шесть режимов запуска из AC-145.
 OM_MODES="--no-launch|--check|--dry-run|--uninstall|--dry-run --uninstall|--uninstall --purge"
 
@@ -135,6 +180,69 @@ VALUES
   return 0
 }
 
+# Прогон посимвольного перечня. Режим один — установка без флагов: именно в нём пропущенное
+# значение дошло бы до файла профиля, поэтому «код 0 вместо 2» здесь наблюдаем в самой сильной
+# форме (assert_field_rejected заодно требует, чтобы профиль не появился). Независимость проверки
+# от режима — отдельное измерение AC-145, и её держат перечни форм атаки выше, где каждое
+# значение проходит все шесть режимов; перемножать оба измерения смысла нет: белый список
+# применяется один раз при разборе манифеста, до ветвления по режиму.
+run_char_matrix() {
+  local field_kind=$1 values=$2 field=$3
+  local value before after
+  before="$BATS_TEST_TMPDIR/char.before"
+  after="$BATS_TEST_TMPDIR/char.after"
+  while IFS= read -r value; do
+    [ -n "$value" ] || continue
+    case $field_kind in
+      ca) ( PKG_CA_INSTALL_NAME=$value; export PKG_CA_INSTALL_NAME; make_pkg ) ;;
+      cli) ( PKG_CLI_INSTALL_NAME=$value; export PKG_CLI_INSTALL_NAME; make_pkg ) ;;
+      app) ( PKG_DESKTOP=1; PKG_APP_NAME=$value; export PKG_DESKTOP PKG_APP_NAME; make_pkg ) ;;
+      *) printf 'неизвестное поле фабрики: %s\n' "$field_kind" >&2; return 1 ;;
+    esac
+    snapshot_home "$before"
+    if ! assert_field_rejected "$field" --no-launch; then
+      # Шестнадцатеричный дамп: часть значений отличается непечатным байтом, и без дампа
+      # сообщение о падении было бы неотличимо от сообщения о соседнем значении.
+      printf 'Значение [%s], байты: %s\n' "$value" "$(printf '%s' "$value" | od -An -tx1 | tr -d '\n')" >&2
+      return 1
+    fi
+    snapshot_home "$after"
+    if ! diff "$before" "$after" >&2; then
+      printf 'Снимок $HOME изменился на значении [%s]\n' "$value" >&2
+      return 1
+    fi
+  done <<VALUES
+$($values)
+VALUES
+  return 0
+}
+
+@test "AC-145: базовое значение посимвольного перечня без запрещённых символов принимается" {
+  # Якорь перечня OM_SINGLE_CHAR_*_VALUES: 'ab.pem', 'ab' и 'ab.app' состоят только из
+  # разрешённых символов и принимаются. Значит каждое значение перечня отличается от принятого
+  # ровно одним символом, и его код 2 объясняется этим символом, а не формой имени.
+  PKG_DESKTOP=1 PKG_CA_INSTALL_NAME='ab.pem' PKG_CLI_INSTALL_NAME='ab' PKG_APP_NAME='ab.app' make_pkg
+  export SHELL=/bin/zsh
+  oc_run --no-launch --no-desktop
+  assert_status 0
+  refute_output_contains "недопустимый путь"
+  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS='$(config_dir_path)/ab.pem'"
+  [ -x "$(bin_dir_path)/ab" ]
+  assert_no_canaries
+}
+
+@test "AC-145: каждый запрещённый символ ПО ОТДЕЛЬНОСТИ в ca.install_name → код 2" {
+  run_char_matrix ca OM_SINGLE_CHAR_PATH_VALUES "ca.install_name"
+}
+
+@test "AC-145: каждый запрещённый символ ПО ОТДЕЛЬНОСТИ в artifacts[].install_name → код 2" {
+  run_char_matrix cli OM_SINGLE_CHAR_PATH_VALUES "artifacts.0.install_name"
+}
+
+@test "AC-145: каждый запрещённый символ ПО ОТДЕЛЬНОСТИ в artifacts[].app_name → код 2" {
+  run_char_matrix app OM_SINGLE_CHAR_APP_VALUES "artifacts.1.app_name"
+}
+
 @test "AC-145: метасимвол в ca.install_name → код 2 во всех шести режимах, канареек нет" {
   run_meta_matrix ca OM_META_PATH_VALUES "ca.install_name"
 }
@@ -185,6 +293,82 @@ VALUES
   oc_run --dry-run
   assert_status 2
   assert_output_contains "поле artifacts.0.install_name"
+}
+
+# ------------------------------------------------------------------ AC-145: JSON-экранирование \uXXXX
+#
+# Набор ПРИНЯТЫХ манифестов обязан совпадать на обеих платформах (N5-P4): install.ps1 разбирает
+# манифест через ConvertFrom-Json, который \uXXXX декодирует по кодовой точке. Значит и здесь
+# запись "tander-…" — это строка "tander-…", а не отдельное значение. Проверяется и обратное:
+# декодирование не отмывает запрещённый символ в разрешённый — вердикт по-прежнему выносит
+# белый список, и сообщение называет поле.
+
+@test "AC-145: \\uXXXX печатного ASCII декодируется — тот же манифест принимают обе платформы" {
+  # "tander-ca-bundle.pem" — корректная по RFC 8259 запись строки "tander-ca-bundle.pem".
+  manifest_edit 's|"install_name": "tander-ca-bundle.pem"|"install_name": "\\u0074ander-ca-bundle.pem"|'
+  # В самом манифесте лежит именно escape-запись, а не готовая строка.
+  assert_file_contains "$PKG/common/manifest.json" '"install_name": "\u0074ander-ca-bundle.pem"'
+  export SHELL=/bin/zsh
+  oc_run --no-launch
+  assert_status 0
+  refute_output_contains "поле ca.install_name"
+  [ -f "$(config_dir_path)/tander-ca-bundle.pem" ] || {
+    printf 'CA не установлен по декодированному имени\n' >&2
+    return 1
+  }
+  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS='$(config_dir_path)/tander-ca-bundle.pem'"
+  assert_no_canaries
+}
+
+@test "AC-145: \\u0020 в app_name — пробел ВНУТРИ имени, а не запрещённый символ" {
+  # Паритет с ConvertFrom-Json на разрешённом символе: "OpenCode Magnit.app" — та же строка,
+  # что и штатное имя бандла, и она обязана приниматься.
+  PKG_DESKTOP=1 make_pkg
+  # Имя берётся из $OM_APP_NAME, а не из литерала: подстановка sed по литералу имени после
+  # переименования бандла перестала бы срабатывать МОЛЧА (N5-T1, AC-154).
+  case $OM_APP_NAME in
+    *' '*) ;;
+    *) skip "в штатном имени бандла нет пробела — проверять декодирование \\u0020 не на чем" ;;
+  esac
+  # Четыре косые в исходнике — это две в значении переменной и одна в манифесте: подстановку
+  # обрабатывает сначала bash, потом sed (у sed "\\u" в замене на GNU означало бы «сделать
+  # следующий символ заглавным», поэтому косая обязана дойти до него экранированной).
+  local escaped_name=${OM_APP_NAME// /\\\\u0020}
+  manifest_edit "s|\"app_name\": \"$OM_APP_NAME\"|\"app_name\": \"$escaped_name\"|"
+  refute_file_contains "$PKG/common/manifest.json" '"app_name": "'"$OM_APP_NAME"'"'
+  oc_run --dry-run
+  assert_status 0
+  refute_output_contains "поле artifacts.1.app_name"
+  assert_output_contains "$OM_APP_NAME"
+}
+
+@test "AC-145: \\u0024 не отмывает \$ — код 2 с именем поля и декодированным значением" {
+  manifest_edit 's|"install_name": "tander-ca-bundle.pem"|"install_name": "\\u0024pwn.pem"|'
+  snapshot_home "$BATS_TEST_TMPDIR/home.before"
+  oc_run --no-launch
+  assert_status 2
+  assert_output_contains "поле ca.install_name"
+  assert_output_contains 'недопустимый путь: $pwn.pem'
+  snapshot_home "$BATS_TEST_TMPDIR/home.after"
+  diff "$BATS_TEST_TMPDIR/home.before" "$BATS_TEST_TMPDIR/home.after" >&2
+  assert_no_canaries
+}
+
+@test "AC-145: \\uXXXX вне 0x20-0x7e и некорректная запись escape → код 2" {
+  # Управляющая кодовая точка, 0x7f, не-ASCII и запись без четырёх шестнадцатеричных цифр
+  # остаются маркером ctl — байтом, запрещённым во всех путевых полях.
+  local esc
+  for esc in '\\u0009' '\\u0000' '\\u007f' '\\u043a' '\\u00e9' '\\uZZZZ'; do
+    make_pkg
+    manifest_edit "s|\"install_name\": \"tander-ca-bundle.pem\"|\"install_name\": \"a${esc}b.pem\"|"
+    # В манифесте обязана лежать ОДНА обратная косая: '\\u0009' — это уже не escape-запись,
+    # а буквальная косая с текстом, и код 2 объяснялся бы ею, а не разбором \uXXXX.
+    refute_file_contains "$PKG/common/manifest.json" '\\u'
+    oc_run --no-launch
+    assert_status 2 || { printf 'Значение [a%sb.pem]\n' "$esc" >&2; return 1; }
+    assert_output_contains "поле ca.install_name" || { printf 'Значение [a%sb.pem]\n' "$esc" >&2; return 1; }
+  done
+  assert_no_canaries
 }
 
 @test "AC-145: пробел ВНУТРИ app_name допустим — «OpenCode Magnit.app» принимается (N5-P3, N5-P4)" {
@@ -323,14 +507,41 @@ NAMES
 # В одинарных кавычках fish обрабатывает ровно два символа — обратный слэш и апостроф;
 # $, обратная кавычка, ';' и скобки специального смысла там не имеют и экранироваться не должны.
 
+# Таблица N5-I13 для fish: имя каталога → его форма ВНУТРИ одинарных кавычек профиля.
+# Правая колонка выписана ВРУЧНУЮ по правилу fish (внутри '…' обрабатываются ровно два символа:
+# обратный слэш и апостроф; '$', обратная кавычка, ';', '&', '"' и скобки специального смысла
+# там не имеют). Вычислять её выражением sed нельзя: такое выражение — вторая реализация того же
+# алгоритма, что и fish_quote_value, и ошибка, внесённая в алгоритм, воспроизвелась бы в
+# ожидании, оставив тест зелёным. Разделитель колонок — '|', ни в одном значении его нет.
+OM_FISH_TABLE() {
+  printf '%s\n' 'pre$(touch CANARY1)fix|pre$(touch CANARY1)fix'
+  printf '%s\n' 'pre`touch CANARY2`fix|pre`touch CANARY2`fix'
+  printf '%s\n' 'pre";touch CANARY3;x="fix|pre";touch CANARY3;x="fix'
+  printf '%s\n' 'pre fix|pre fix'
+  printf '%s\n' 'pre&fix|pre&fix'
+  # Апостроф: закрыть кавычку fish нельзя, поэтому перед ним ставится обратный слэш.
+  printf '%s\n' "pre'quote|pre\\'quote"
+  # Один обратный слэш → два; два → четыре.
+  printf '%s\n' 'pre\back|pre\\back'
+  printf '%s\n' 'pre\\two|pre\\\\two'
+  # Порядок замен: апостроф экранируется ПОСЛЕ удвоения слэшей, иначе добавленный слэш был бы
+  # удвоен второй заменой и значение вернулось бы из профиля другим.
+  printf '%s\n' "mix'\\end|mix\\'\\\\end"
+}
+
 @test "AC-147: fish-профиль — экранированы ровно \\\\ и ', прочие метасимволы оставлены как есть" {
-  local names name home_dir prefix f ca_actual
+  local row name want home_dir prefix f
+  # Ожидание — константа, склеенная с путём песочницы; если бы сам путь песочницы содержал
+  # обратный слэш или апостроф, его тоже пришлось бы экранировать, и константа перестала бы
+  # быть константой. Такой машины в проекте нет, но предусловие проверяется явно.
+  case $SANDBOX in
+    *\\*|*\'*) skip "путь песочницы содержит \\ или ' — ожидание нельзя выписать константой" ;;
+  esac
   export SHELL=/usr/local/bin/fish
-  names="$(OM_DIR_NAMES)
-pre\\back
-pre'quote"
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    name=${row%%|*}
+    want=${row#*|}
     home_dir="$SANDBOX/fh/$name"
     prefix="$SANDBOX/fp/$name/opt"
     mkdir -p "$home_dir"
@@ -340,13 +551,20 @@ pre'quote"
     assert_status 0 || { printf 'Каталог [%s]\n' "$name" >&2; return 1; }
     f="$home_dir/.config/fish/conf.d/opencode-magnit.fish"
     [ -f "$f" ] || { printf 'Не создан %s\n' "$f" >&2; return 1; }
-    ca_actual="$home_dir/.config/opencode/tander-ca-bundle.pem"
-    # Ожидаемая форма строки: значение в одинарных кавычках, '\' -> '\\', "'" -> "\'".
-    local escaped
-    escaped=$(printf '%s' "$ca_actual" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")
-    assert_file_contains "$f" "set -gx NODE_EXTRA_CA_CERTS '$escaped'"
-    escaped=$(printf '%s' "$prefix/bin" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")
-    assert_file_contains "$f" "fish_add_path '$escaped'"
+    # CA лежит по НЕэкранированному пути — иначе сверять было бы не с чем.
+    [ -f "$home_dir/.config/opencode/tander-ca-bundle.pem" ] || {
+      printf 'CA не установлен в [%s]\n' "$home_dir" >&2
+      return 1
+    }
+    assert_file_contains "$f" \
+      "set -gx NODE_EXTRA_CA_CERTS '$SANDBOX/fh/$want/.config/opencode/tander-ca-bundle.pem'" || {
+      printf 'Каталог [%s], ожидалась форма [%s]\n%s\n' "$name" "$want" "$(cat "$f")" >&2
+      return 1
+    }
+    assert_file_contains "$f" "fish_add_path '$SANDBOX/fp/$want/opt/bin'" || {
+      printf 'Каталог [%s], ожидалась форма [%s]\n%s\n' "$name" "$want" "$(cat "$f")" >&2
+      return 1
+    }
     # Двойных кавычек ВОКРУГ значения нет (сам путь двойную кавычку содержать может);
     # $ и обратная кавычка внутри одинарных кавычек fish НЕ экранируются.
     refute_file_contains "$f" 'NODE_EXTRA_CA_CERTS "'
@@ -355,9 +573,9 @@ pre'quote"
     refute_file_contains "$f" '\`'
     [ ! -e "$home_dir/.zshrc" ]
     assert_no_canaries
-  done <<NAMES
-$names
-NAMES
+  done <<TABLE
+$(OM_FISH_TABLE)
+TABLE
 }
 
 @test "AC-147: fish исполняет сгенерированный профиль — значение и bin_dir не расщеплены" {

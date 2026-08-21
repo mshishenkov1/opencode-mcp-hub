@@ -219,6 +219,31 @@ assert_no_file_changes() {
   [ ! -e "$PREFIX_DIR/bin/opencode" ]
 }
 
+@test "AC-11, AC-135: многосегментный ca.install_name — промежуточные каталоги создаёт установщик" {
+  # N5-P3 разрешает разделитель "/" внутри ca.install_name, и белый список такое значение
+  # принимает. Значит недостающие каталоги внутри каталога конфига обязан создать установщик:
+  # иначе cp обрывает установку кодом 1 и СИСТЕМНОЙ АНГЛИЙСКОЙ диагностикой
+  # "No such file or directory" — прямое нарушение N5-I1 (всё общение по-русски).
+  # Пакет пересобирается без артефакта desktop: фикстурный dmg — не образ, и шаг Desktop дал бы
+  # код не по теме теста.
+  PKG_CA_INSTALL_NAME='certs/corp/tander-ca-bundle.pem' make_pkg
+  export SHELL=/bin/zsh
+  oc_run --no-launch
+  assert_status 0
+  refute_output_contains "No such file"
+  refute_output_contains "поле ca.install_name"
+  local ca="$(config_dir_path)/certs/corp/tander-ca-bundle.pem"
+  [ -f "$ca" ] || { printf 'CA не установлен по многосегментному имени: %s\n' "$ca" >&2; return 1; }
+  # Цель осталась внутри каталога конфига, а не рядом с ним.
+  assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS='$ca'"
+  assert_output_contains "$ca"
+  # Повторный запуск на уже созданной цепочке каталогов проходит так же.
+  oc_run --no-launch
+  assert_status 0
+  oc_run --check
+  assert_status 0
+}
+
 @test "AC-11, AC-135: install_name и app_name проверяются до чтения файлов пакета" {
   # Хеш CLI-артефакта заведомо неверный: если бы проверка путей шла после сверки целостности,
   # код был бы 4. Ожидается 2 — разбор манифеста завершается раньше любых файловых операций.

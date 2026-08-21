@@ -93,6 +93,52 @@ assert_chowned() {
   return 0
 }
 
+# Обратный контроль: путь, существовавший ДО установки, владельца менять не должен — менять
+# владельца чужого каталога установщик не вправе.
+refute_chowned() {
+  local path=$1 owner=$2
+  if grep -F -x -q "$owner	$path" "$CHOWN_LOG"; then
+    printf 'chown затронул путь, существовавший до установки: %s\nЖурнал:\n%s\n' "$path" "$(chown_log)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Пути внутри каталога относительно него — для сравнения «было / стало».
+list_paths() {
+  ( cd "$1" && find . -print ) | LC_ALL=C sort
+}
+
+# Обратная формулировка проверки владельца (N5-I14). Точечный перечень assert_chowned отвечает
+# на вопрос «назначен ли владелец вот этому объекту», но НЕ ловит появление НОВОГО объекта без
+# владельца: ровно так в доме исходного пользователя оставались root-овыми <дом>/.config,
+# <дом>/.config/fish и opencode.json.bak — все три были созданы установщиком и ни один не входил
+# в перечень. Здесь требование сформулировано от обратного: среди путей, которых в доме до
+# установки не было, не должно остаться ни одного без вызова chown.
+# Аргументы: <дом> <файл со списком путей ДО установки> <владелец>.
+assert_new_paths_chowned() {
+  local root=$1 before=$2 owner=$3
+  local after="$BATS_TEST_TMPDIR/paths.after" p abs missing=""
+  list_paths "$root" >"$after"
+  while IFS= read -r p; do
+    [ "$p" != "." ] || continue
+    if grep -F -x -q -- "$p" "$before"; then
+      continue
+    fi
+    abs="$root/${p#./}"
+    if ! grep -F -x -q -- "$owner	$abs" "$CHOWN_LOG"; then
+      missing="$missing
+  $abs"
+    fi
+  done <"$after"
+  if [ -n "$missing" ]; then
+    printf 'Созданы установщиком в доме пользователя, но остались без chown %s:%s\nЖурнал chown:\n%s\n' \
+      "$owner" "$missing" "$(chown_log)" >&2
+    return 1
+  fi
+  return 0
+}
+
 # ------------------------------------------------------------------ AC-148: выбор пользователя
 
 write_resolver_driver() {
@@ -251,6 +297,7 @@ run_system_install() {
   # Профиль пользователя уже существует без нашего блока — появится резервная копия.
   printf 'export USER_ONE=1\n' >"$ALICE_HOME/.zshrc"
   snapshot_dir "$ROOT_HOME" "$BATS_TEST_TMPDIR/root.before"
+  list_paths "$ALICE_HOME" >"$BATS_TEST_TMPDIR/alice.paths.before"
 
   run_system_install
   assert_status 0
@@ -277,9 +324,14 @@ run_system_install() {
 
   # Владелец назначен ровно объектам пользовательской части.
   assert_chowned "$config_dir" "alice:staff"
+  assert_chowned "$ALICE_HOME/.config" "alice:staff"
   assert_chowned "$ca" "alice:staff"
   assert_chowned "$profile" "alice:staff"
   assert_chowned "$backup" "alice:staff"
+  # …и ни один созданный установщиком объект в доме alice не остался без владельца: точечный
+  # перечень выше не заметил бы появления НОВОГО объекта, не попавшего в перечень.
+  assert_new_paths_chowned "$ALICE_HOME" "$BATS_TEST_TMPDIR/alice.paths.before" "alice:staff"
+  refute_chowned "$ALICE_HOME" "alice:staff"
 
   # Ни один chown не относится к каталогу бинарника: /usr/local/bin остаётся root-овым.
   if grep -F -q "$FAKE_BIN" "$CHOWN_LOG"; then
@@ -289,6 +341,96 @@ run_system_install() {
   # Процесс уже root — привилегии поднимать не через что: ловушка sudo не вызывалась.
   assert_no_forbidden_calls
   [ -x "$FAKE_BIN/opencode" ]
+}
+
+@test "AC-149: SHELL=fish — владелец назначен всей цепочке созданных каталогов, включая .config и .config/fish" {
+  # Дом alice пуст, поэтому mkdir -p создаёт СРАЗУ ЦЕПОЧКУ каталогов, а не один лист:
+  # <дом>/.config, <дом>/.config/fish, <дом>/.config/fish/conf.d. Промежуточные звенья цепочки
+  # — такая же пользовательская часть, как и лист: root-овый <дом>/.config означает, что
+  # пользователь не может создать в собственном ~/.config ничего нового без sudo (N5-I14).
+  export FAKE_UID=0 FAKE_UNAME=root FAKE_GNAME=staff
+  export SUDO_USER=alice FAKE_DB_USER=alice FAKE_DB_HOME="$ALICE_HOME"
+  export HOME="$ROOT_HOME" SHELL=/usr/local/bin/fish
+  [ -z "$(list_paths "$ALICE_HOME" | grep -v '^\.$')" ] || {
+    printf 'Предусловие теста нарушено: дом alice не пуст\n' >&2
+    return 1
+  }
+  list_paths "$ALICE_HOME" >"$BATS_TEST_TMPDIR/alice.paths.before"
+
+  run_system_install
+  assert_status 0
+
+  local profile="$ALICE_HOME/.config/fish/conf.d/opencode-magnit.fish"
+  [ -f "$profile" ] || { printf 'Не создан fish-профиль: %s\n' "$profile" >&2; return 1; }
+
+  # Каждое звено цепочки, а не только лист.
+  assert_chowned "$ALICE_HOME/.config" "alice:staff"
+  assert_chowned "$ALICE_HOME/.config/fish" "alice:staff"
+  assert_chowned "$ALICE_HOME/.config/fish/conf.d" "alice:staff"
+  assert_chowned "$ALICE_HOME/.config/opencode" "alice:staff"
+  assert_chowned "$ALICE_HOME/.config/opencode/tander-ca-bundle.pem" "alice:staff"
+  assert_chowned "$profile" "alice:staff"
+  # Сам дом пользователя установщик не создавал — владельца ему не назначают.
+  refute_chowned "$ALICE_HOME" "alice:staff"
+  # И ни одного другого созданного объекта без владельца.
+  assert_new_paths_chowned "$ALICE_HOME" "$BATS_TEST_TMPDIR/alice.paths.before" "alice:staff"
+  assert_no_forbidden_calls
+}
+
+@test "AC-149: резервная копия opencode.json.bak принадлежит пользователю, а прежние каталоги владельца не меняют" {
+  # Дом alice уже обжит: каталог конфига и пользовательский opencode.json существуют ДО запуска.
+  # Тогда установщик создаёт ровно два новых объекта — CA-файл и opencode.json.bak (плюс профиль
+  # в корне дома). root-овая резервная копия в каталоге конфига пользователя неустранима без
+  # sudo, а следующий запуск уходит в ветку «резервная копия сохранена» и оставляет её навсегда.
+  export FAKE_UID=0 FAKE_UNAME=root FAKE_GNAME=staff
+  export SUDO_USER=alice FAKE_DB_USER=alice FAKE_DB_HOME="$ALICE_HOME"
+  export HOME="$ROOT_HOME" SHELL=/bin/zsh
+  local config_dir="$ALICE_HOME/.config/opencode"
+  mkdir -p "$config_dir"
+  printf '{ "theme": "user" }\n' >"$config_dir/opencode.json"
+  list_paths "$ALICE_HOME" >"$BATS_TEST_TMPDIR/alice.paths.before"
+
+  run_system_install
+  assert_status 0
+
+  local bak="$config_dir/opencode.json.bak"
+  [ -f "$bak" ] || { printf 'Нет резервной копии конфига: %s\n' "$bak" >&2; return 1; }
+  # Пользовательский конфиг не изменён (N5-I11) — копия побайтово равна оригиналу.
+  cmp "$config_dir/opencode.json" "$bak"
+  assert_chowned "$bak" "alice:staff"
+
+  # Обратный контроль: каталоги, существовавшие ДО установки, владельца не меняют, и сам
+  # пользовательский opencode.json тоже — он не наш объект.
+  refute_chowned "$ALICE_HOME/.config" "alice:staff"
+  refute_chowned "$config_dir" "alice:staff"
+  refute_chowned "$config_dir/opencode.json" "alice:staff"
+  assert_new_paths_chowned "$ALICE_HOME" "$BATS_TEST_TMPDIR/alice.paths.before" "alice:staff"
+  assert_no_forbidden_calls
+}
+
+@test "AC-149: многосегментный ca.install_name — промежуточные каталоги созданы и принадлежат пользователю" {
+  # N5-P3 разрешает разделитель "/" в ca.install_name, значит промежуточные каталоги создаёт
+  # установщик — и создаёт их тем же порядком, что и каталог конфига: с владельцем исходного
+  # пользователя (N5-I14).
+  export FAKE_UID=0 FAKE_UNAME=root FAKE_GNAME=staff
+  export SUDO_USER=alice FAKE_DB_USER=alice FAKE_DB_HOME="$ALICE_HOME"
+  export HOME="$ROOT_HOME" SHELL=/bin/zsh
+  PKG_CA_INSTALL_NAME='certs/corp/tander-ca-bundle.pem' make_pkg
+  list_paths "$ALICE_HOME" >"$BATS_TEST_TMPDIR/alice.paths.before"
+
+  run_system_install
+  assert_status 0
+
+  local config_dir="$ALICE_HOME/.config/opencode"
+  [ -f "$config_dir/certs/corp/tander-ca-bundle.pem" ] || {
+    printf 'CA не установлен по многосегментному имени\n' >&2
+    return 1
+  }
+  assert_chowned "$config_dir/certs" "alice:staff"
+  assert_chowned "$config_dir/certs/corp" "alice:staff"
+  assert_chowned "$config_dir/certs/corp/tander-ca-bundle.pem" "alice:staff"
+  assert_new_paths_chowned "$ALICE_HOME" "$BATS_TEST_TMPDIR/alice.paths.before" "alice:staff"
+  assert_no_forbidden_calls
 }
 
 @test "AC-149: --system не под root — операции с bin_dir идут через sudo, пользовательская часть нет" {
