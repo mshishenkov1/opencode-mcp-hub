@@ -1,0 +1,137 @@
+{
+  "iteration": "I-5",
+  "cycle": 5,
+  "final_review": true,
+  "branch": "pipeline/i1-hub-login-catalog-20260818",
+  "head_at_review_start": "e6b7bc1",
+  "head_at_review_end": "c804afa",
+  "installers_tree_unchanged_during_review": "git diff --stat e6b7bc1..c804afa -- installers/ пуст; сдвиг HEAD внесён другим агентом и касается только bugs/BUG-I4-*.json",
+  "worktree_dirty": "нет (git status --short пуст)",
+  "verdict": "request_changes",
+
+  "previous_findings_recheck": {
+    "blocker_1_shell_injection_in_profile": "ЗАКРЫТ. Собственные фикстуры (независимый сборщик пакета, не helpers.bash). Линия 1: ca.install_name = 'pwn$(touch /tmp/PWNED_REVIEW_I5).pem', 'pwn`touch /tmp/PWNED_BT`.pem', 'a.pem\"; touch /tmp/BREAKOUT; x=\"', \"a.pem'; touch /tmp/SQBREAK; x='\", 'a;b.pem', 'a b.pem', 'a\\nb.pem', 'ключ.pem', '~/x.pem', 'a*.pem', 'a\\tb.pem' → код 2, сообщение называет поле ca.install_name и путь к манифесту; ни одна канарейка в /tmp не создана. Контроль 'tander-ca-bundle.pem' → установка проходит. Линия 2: установка в HOME с именем \"ho'me$(touch <canary>/Y1)`touch <canary>/Y2`\" — код 0; блок печатается как export NODE_EXTRA_CA_CERTS='…ho'\\''me$(…)`…`…' ; исполнение профиля через /bin/bash, /bin/sh и /bin/zsh даёт NODE_EXTRA_CA_CERTS ПОБАЙТОВО равный фактическому пути CA, каталог канареек пуст. Ещё 7 форм имени каталога ($(), ``, \";\", ', \\, пробел, *?[ ]) — значение побайтово верное, канареек нет, PATH сохраняет прежнее значение хвостом.",
+    "blocker_2_test_gap": "ЗАКРЫТ ЧАСТИЧНО. Наборы installers/tests/bats/55-injection.bats (10 тестов) и 57-system-user.bats (12 тестов) добавлены, тавтологичности нет: ожидание NODE_EXTRA_CA_CERTS строится из данных теста ($HOME теста + .config/opencode/tander-ca-bundle.pem), а не из формулы реализации; профиль реально исполняется тремя оболочками; проверяются канарейки. Собственная мутация подтверждает нетавтологичность: sh_quote_value → no-op убивается AC-146 (2 not ok), fish_quote_value → no-op убивается AC-147, одинарные кавычки → двойные убиваются шестью тестами (AC-145, AC-146, AC-41, AC-42/AC-141, AC-149). ОСТАТОК — см. finding 3: в перечне значений AC-145 нет ни одного, у которого запрещён РОВНО ОДИН символ, поэтому чистый мутант белого списка выживает.",
+    "major_3_release_sh_uncommitted": "ЗАКРЫТ. Рабочее дерево чистое; installers/release.sh:373-378 содержит rm -f \"$archive\" в selfcheck_fail; AC-144 в прогоне bats зелёный.",
+    "major_4_ac128_vs_ci": "ЗАКРЫТ. installers/tests/bats/95-sources.bats:162-206 требует состав bats, pester-pwsh, pester-ps51, lint, release-dry-run, installers-required и отсутствие целого задания '  pester:'; фактические имена заданий в installers/ci/installers.yml — те же (строки 33, 68, 129, 181, 225, 249). diff installers/ci/installers.yml .github/workflows/installers.yml — файлы идентичны. Подстроки 'shell: ${{' в файле нет (BUG-I5-002).",
+    "major_5_system_ownership": "ЗАКРЫТ ЧАСТИЧНО. Проверено собственными ловушками (id -u → 0, dscl/getent, logname, chown, sudo, mkdir/cp/mv/chmod с запретом записи в /usr и /Applications; bin_dir подменён на временный каталог в копии скрипта). uid=0 + SUDO_USER пуст + logname пуст → код 5, сообщение по N5-I14, НИ ОДНОЙ файловой операции в журнале ловушек. uid=0 + SUDO_USER=testuser + HOME=<дом root> → CA, каталог конфига и профиль созданы в доме testuser (из dscl, а не из $HOME), дом root пуст (find даёт только сам каталог), выполнены chown testuser:staff для .config/opencode, CA-файла и файла профиля, chown каталога бинарника НЕ выполнен. ОСТАТОК — см. findings 1 и 2: промежуточные каталоги и opencode.json.bak остаются root-овыми.",
+    "minor_6_windows_parity": "ЗАКРЫТ. installers/windows/install.ps1:253-263 (Test-PackagePath) — белый список '\\A[A-Za-z0-9._/-]+\\z' плюс ПОСЕГМЕНТНАЯ проверка '.' и '..'; подстрочный $Value.Contains('..') убран, 'opencode..pem' теперь принимается обеими платформами. Test-AppName (270-279) — '\\A[A-Za-z0-9._ -]+\\z' плюс запрет краевого пробела, паритет с is_safe_app_name.",
+    "minor_7_tmpdir": "ЗАКРЫТ. require_tmpdir (install-posix.sh:1299) вызывается в main перед do_uninstall/do_install и после compute_layout; TMPDIR на несуществующий каталог → код 1 и русское сообщение 'Каталог временных файлов недоступен для записи: …'; --check и --dry-run предусловия не требуют (AC-52, два теста в 57-system-user.bats зелёные)."
+  },
+
+  "findings": [
+    {
+      "severity": "major",
+      "where": "installers/common/install-posix.sh:1287-1294 (make_user_dir), вызовы на 1122 (каталог файла профиля) и 1360 (каталог конфига)",
+      "what": "N5-I14 закрыт не полностью: при sudo --system в доме исходного пользователя остаются каталоги, принадлежащие root. make_user_dir делает mkdir -p (создаёт ВСЮ цепочку) и назначает владельца только ЛИСТУ. Наблюдаемо на собственном стенде (ловушки id→uid 0, dscl→дом alice, chown-журнал; дом alice изначально пуст): SHELL=/bin/zsh → mkdir -p <home>/.config/opencode, журнал chown содержит ровно <home>/.config/opencode, <home>/.config/opencode/tander-ca-bundle.pem, <home>/.zshrc — каталог <home>/.config создан процессом root и не chown-ится. SHELL=fish — то же в худшем виде: mkdir -p <home>/.config/fish/conf.d создаёт .config, .config/fish и .config/fish/conf.d, chown получает только conf.d и файл профиля; <home>/.config и <home>/.config/fish остаются root:wheel 0755. Следствие ровно то, против чего написано N5-I14: пользователь не может создать ничего нового в собственном ~/.config (в т.ч. каталоги других приложений) без sudo. На корпоративном macOS ~/.config по умолчанию отсутствует, то есть случай штатный, а не краевой. Предлагаемое действие: назначать владельца каждому каталогу, СОЗДАННОМУ установщиком в пределах дома исходного пользователя (запоминать, какие звенья цепочки не существовали до mkdir, и chown-ить их снизу вверх до первого уже существовавшего), и внести это в перечень N5-I14 «Владелец созданных файлов» явной строкой про промежуточные каталоги.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/common/install-posix.sh:1502-1514 (handle_user_config), строка 1509 — cp \"$cfg\" \"$bak\" без chown_user_path",
+      "what": "Второй пропуск того же класса: резервная копия пользовательского конфига opencode.json.bak создаётся при --system от имени root и владельца не меняет. Наблюдаемо: дом alice содержит .config/opencode/opencode.json ДО установки; sudo-сессия root, SUDO_USER=alice, --system --no-desktop --no-launch → код 0, в .config/opencode появляется opencode.json.bak, журнал chown содержит tander-ca-bundle.pem, .zshrc.opencode-magnit.bak и .zshrc, но НЕ содержит opencode.json.bak (журнал cp этот вызов содержит). Файл лежит в каталоге конфига пользователя, пользователь не может его перезаписать или удалить без sudo, а при следующем запуске срабатывает ветка 1506-1507 («резервная копия сохранена») и root-овый файл остаётся навсегда. Прямое нарушение N5-I14 («Каждый объект пользовательской части, созданный или изменённый установщиком, принадлежит исходному пользователю»); перечень в spec.md:826-829 opencode.json.bak не называет — перечень тоже требует дополнения. Предлагаемое действие: chown_user_path \"$bak\" после cp; в N5-I14 добавить opencode.json.bak в перечень объектов пользовательской части. Тот же пропуск, но недостижимый при --system, есть на installers/common/install-posix.sh:1464 (mkdir -p \"$dest\" для <дом>/Applications вместо make_user_dir) — привести к общему виду заодно.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/55-injection.bats:47-56 (OM_META_PATH_VALUES) и 60-68 (OM_META_APP_VALUES); проверяемая функция — installers/common/install-posix.sh:661-668 (is_safe_pkg_path)",
+      "what": "Белый список — единственная линия 1 защиты N5-I13 — проверяется набором, в котором НИ ОДНО значение не содержит ровно одного запрещённого символа: 'pwn$(touch PWNED).pem' содержит также '(' , ')' и пробел; 'pwn`touch PWNED`.pem' — обратную кавычку и пробел; 'a.pem\"; touch BREAKOUT; x=\"' — кавычку, ';' и пробел; 'a;touch BREAKOUT.pem' — ';' и пробел; \"a'b.pem\" — апостроф; 'a b.pem' — пробел; 'a\\tb.pem' — табуляцию. Поэтому ослабление белого списка ловится только по «попутным» символам. Собственный чистый мутант (синтаксис проверен bash -n): в набор is_safe_pkg_path добавлены '$' и ';'. Весь набор 55-injection.bats остаётся зелёным (0 not ok), при этом поведение изменено наблюдаемо: ca.install_name='a;b.pem' и ca.install_name='pwn$HOME.pem' на оригинале дают код 2, на мутанте — код 0 с записью значения в профиль. Исполнения команды при этом не происходит (линия 2 держит), но требование N5-I13 «манифест с метасимволом отвергается кодом 2, кодом 0 такая установка завершиться не может» перестаёт проверяться. Предлагаемое действие: добавить в OM_META_PATH_VALUES/OM_META_APP_VALUES значения с ЕДИНСТВЕННЫМ запрещённым символом — 'a$b.pem', 'a;b.pem', 'a&b.pem', 'a|b.pem', 'a>b.pem', 'a<b.pem', 'a(b.pem', 'a)b.pem', 'a{b.pem', 'a}b.pem', 'a[b.pem', 'a]b.pem', 'a!b.pem', 'a#b.pem', 'a~b.pem', 'a%b.pem', 'a:b.pem', 'a=b.pem', 'a,b.pem', 'a^b.pem', 'a?b.pem', 'a*b.pem', 'a\"b.pem', 'a\\\\b.pem' — то есть покрыть перечень запрещённых символов из spec.md:317-322 посимвольно.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "installers/tests/bats/57-system-user.bats:279-282 (AC-149, перечень assert_chowned)",
+      "what": "Тестовый пробел, из-за которого findings 1 и 2 не пойманы. AC-149 проверяет владельца только у четырёх объектов: config_dir, CA-файла, файла профиля и его .opencode-magnit.bak. Не проверяются: промежуточные каталоги, созданные mkdir -p в доме пользователя (<home>/.config, а для fish — <home>/.config/fish), и opencode.json.bak. В фикстуре теста дом alice создаётся пустым, значит <home>/.config гарантированно создаётся установщиком — случай воспроизводим без изменения окружения. Требуется: (а) прогон с SHELL=fish и проверка chown для <home>/.config и <home>/.config/fish; (б) прогон, где в доме alice заранее лежит .config/opencode/opencode.json, и проверка chown для .config/opencode/opencode.json.bak; (в) негативная формулировка — среди путей внутри дома исходного пользователя, созданных установщиком, не должно остаться НИ ОДНОГО без вызова chown (сравнение журнала mkdir/cp с журналом chown), иначе следующий пропуск такого же вида снова не будет пойман точечным перечнем.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:356-441 (json_flatten/pstring, ветка c == \"u\" на строке 394) против installers/windows/install.ps1:295 (ConvertFrom-Json)",
+      "what": "Расхождение паритета платформ на JSON-экранировании \\uXXXX. POSIX-парсер заменяет ЛЮБУЮ последовательность \\uXXXX маркером '?' независимо от кодовой точки, поэтому манифест с \"install_name\": \"\\u0074ander-ca-bundle.pem\" (корректная по RFC 8259 запись строки 'tander-ca-bundle.pem') отвергается кодом 2 с сообщением «недопустимый путь: ?ander-ca-bundle.pem» — проверено собственной фикстурой. install.ps1 использует ConvertFrom-Json, который \\u0074 декодирует в 't', и тот же пакет принимает. Спека (spec.md:322-324) требует обратного: «Обе платформы применяют один и тот же набор: то, что принято на macOS/Linux, обязано быть принято и на Windows, и наоборот». Безопасность не страдает (POSIX строже), release.sh таких последовательностей не печатает, поэтому must_fix не ставлю. Действие: либо декодировать \\uXXXX в ASCII-диапазоне 0x20-0x7e и подставлять маркер только для остальных, либо оговорить расхождение в N5-P4 как намеренное.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:1367 и 1373 (install_ca, cp без создания промежуточных каталогов)",
+      "what": "Многосегментное install_name разрешено спекой (spec.md:283-285 прямо допускает разделитель '/' в ca.install_name и artifacts[].install_name; is_safe_pkg_path и Test-PackagePath его принимают), но не обработано в рантайме. Собственная фикстура с ca.install_name = 'sub/dir/ca.pem': манифест валиден, установка обрывается кодом 1 и АНГЛИЙСКОЙ системной диагностикой 'cp: <config_dir>/sub/dir/ca.pem: No such file or directory' — каталоги sub/dir никто не создаёт. Нарушено N5-I1 (весь пользовательский вывод на русском) — тот же класс, что закрытая minor 7 про TMPDIR. Частичной установки здесь нет (CA — первый шаг), но для artifacts[].install_name того же вида отказ приходит уже после установки CA и даёт вводящее в заблуждение «Нет прав на запись в каталог». Действие: либо создавать недостающие каталоги (make_user_dir для родителя ca_target), либо запретить '/' в install_name правилом N5-P3 и привести обе платформы.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/tests/bats/55-injection.bats:326-361 (AC-147, строковая проверка fish) и 363-380 (AC-147, исполнение — skip)",
+      "what": "Экранирование для fish на этой машине проверено только против ПОВТОРНОЙ РЕАЛИЗАЦИИ того же правила: тест строит ожидание выражением sed -e 's/\\\\/\\\\\\\\/g' -e \"s/'/\\\\\\\\'/g\", то есть тем же алгоритмом, что и fish_quote_value. Единственный тест, который исполняет сгенерированный профиль настоящим fish, помечен skip (fish в системе отсутствует — подтверждено: command -v fish пусто, в прогоне 1 skip). Формула в тесте выписана по таблице N5-I13 и совпала с независимой проверкой: я вызвал fish_quote_value напрямую на 12 значениях и сверил результат с правилами fish вручную ('a\\'b → a\\\\\\'b, восемь обратных слэшей → шестнадцать, $ и ` не экранируются) — расхождений нет. Тем не менее строковая проверка не способна поймать ошибку, симметрично внесённую и в код, и в тест. Действие: добавить fish в CI-задание bats (installers/ci/installers.yml, ubuntu-latest) — тогда skip перестанет срабатывать и правило будет проверяться исполнением.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:1801-1812 (purge_path_is_safe), 1815-1835 (validate_purge_paths), 1837-1867 (purge_each); spec.md N5-R2",
+      "what": "Оценка остаточного риска, заявленного dev-агентом (пункт 4 задания). Проверено собственными фикстурами, 14 форм purge_paths в изолированном HOME с канарейками: '~', '${HOME}', '${HOME}//', '${HOME}/./', '/etc', '/', '${HOME}/sub/..', '${XDG_CONFIG_HOME}/../../..' → код 2, список отвергнут целиком, дом цел; '${XDG_CONFIG_HOME}/opencode' + '${XDG_DATA_HOME}/opencode' → код 0. Метасимволы в purge_paths к исполнению кода НЕ приводят: '~/$(touch /tmp/PG1)' и '~/a;touch /tmp/PG2' дают код 0 и трактуются как литеральные имена (файлы PG1/PG2 не созданы), '~/*' не раскрывается в glob (дом цел) — значение попадает только в rm -rf \"$normalized\" и в аргумент printf, но НЕ в генерируемый код оболочки, поэтому класс N5-I13 здесь неприменим. ВЫВОД: отсутствия белого списка символов достаточно — белый список не закрыл бы реальный риск и не добавил бы защиты. Реальный риск другой и он подтверждён: purge_paths = ['~/.ssh'] даёт код 0 и удаляет ~/.ssh/id_rsa (проверено, канарейка исчезла). Значение '.ssh' прошло бы ЛЮБОЙ разумный белый список символов, потому что состоит из разрешённых. Единственный действующий контроль — строгая вложенность в дом плюс явный флаг --purge. Оцениваю риск как принятый: пакеты пилота не подписаны (installers/docs/install-admin.md:254-260, release.sh:62), sha256 всех артефактов лежит в том же манифесте, поэтому противник, способный подменить purge_paths, способен подменить и сам бинарник — --purge новых возможностей ему не даёт. Если контроль всё же нужен, действенная форма — белый список МЕСТ, а не символов: разрешить только пути строго внутри config_dir и <data>/opencode. Действие не требуется в этой итерации; зафиксировать решение в N5-R2 одной фразой, чтобы риск был принят явно.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+
+  "new_defect_scan": {
+    "whitelist_bypass": "Не найдено. Собственные фикстуры: ca.install_name и artifacts[].install_name — 11 форм с метасимволами, управляющими символами, не-ASCII и '~' → код 2 во всех случаях; artifacts[].app_name — 11 форм: 'OpenCode Magnit.app', 'Open  Code.app', 'Open-Code_1.0.app' принимаются; ' OpenCode.app', 'OpenCode.app ', '   ', '..', 'sub/OpenCode.app', 'OpenCode.app/', './OpenCode.app', 'ОпенКод.app' отвергаются кодом 2. Раскрытые посимвольно диапазоны в case (без [A-Za-z]) исключают зависимость от локали.",
+    "windows_parity": "Сохранён по набору символов и по посегментной проверке '.'/'..' (install.ps1:253-263, 269-277). Единственное найденное расхождение — обработка \\uXXXX, см. finding 5.",
+    "fish_escaping": "Корректно по правилам fish. fish_quote_value вызван напрямую на 12 значениях: порядок замен (сначала '\\' → '\\\\', затем ''' → '\\''') верен, '$', '`', ';', '(' , ')' не экранируются — это и требует N5-I13. Исполнением не проверено (fish отсутствует), см. finding 7.",
+    "reinstall_uninstall": "Регрессии нет. В доме с именем \"it's $(x) `y` dir\": установка → код 0; повторная установка → sha256 профиля не изменился, ровно один маркированный блок; --check → код 7 (ожидаемо: пакет содержит desktop, установка шла с --no-desktop); --uninstall → код 0, блок из профиля удалён (файл пуст, 0 блоков), CA удалён, каталоги остались пустыми."
+  },
+
+  "gates": [
+    {"gate": "G1", "what": "тесты", "result": "зелёный", "detail": "bats installers/tests/bats — 1..257, ok 257, not ok 0, код 0; 1 skip (AC-147 «fish исполняет сгенерированный профиль» — fish в системе отсутствует). .venv/bin/python -m pytest -q -rs --tb=short — 408 passed."},
+    {"gate": "G2", "what": "coverage-diff", "result": "зелёный", "detail": ".venv/bin/python -m pytest --cov=src --cov-report=xml:reports/coverage.xml — TOTAL 1636 строк, 80 непокрытых, 95%. .venv/bin/diff-cover reports/coverage.xml --compare-branch=origin/main --fail-under=90 → Coverage 95%, код 0. Порог 90."},
+    {"gate": "G3", "what": "mutation", "result": "зелёный", "detail": "no_proxy='*' .venv/bin/mutmut run — 3040/3040: убито 2595, выжило 310, пропущено 135, таймаутов 0, подозрительных 0. Счёт 2595/2905 = 89,3% при пороге 70, код 0. Дополнительно — 4 ручные мутации по установщикам, см. mutation_log."},
+    {"gate": "G4", "what": "линт/типы", "result": "зелёный", "detail": ".venv/bin/ruff check src tests → All checks passed. .venv/bin/mypy src → Success: no issues found in 21 source files. find installers -name '*.sh' | xargs shellcheck -s bash → код 0, 0 замечаний."},
+    {"gate": "G5", "what": "ревью", "result": "красный", "detail": "Настоящий отчёт: 4 major (2 dev, 2 test) + 4 minor; must_fix = 4. Оба блокера прошлого вердикта закрыты, все три major и оба minor закрыты; новые находки — того же класса N5-I14 (владельцы) и тестовый пробел вокруг N5-I13."},
+    {"gate": "G6", "what": "покрытие AC", "result": "зелёный", "detail": "bash installers/tests/trace-ac.sh — код 0. Всего критериев AC-*: 154; с тестами: 137; «Все критерии типа unit/integration покрыты» (непокрытые — типа ci и manual)."}
+  ],
+
+  "not_verified_on_this_machine": [
+    {
+      "what": "Набор Pester installers/tests/pester (DesktopEntry, Encoding, Install, PathSafety, Uninstall — 5 файлов, все с BOM EF BB BF, суммарно 86 КБ)",
+      "why": "pwsh на машине ревью отсутствует (command -v pwsh пусто); Windows PowerShell 5.1 на darwin недоступен в принципе.",
+      "covered_by": "В корпоративном GitLab (.gitlab-ci.yml:91-105, задание pester) набор гоняется ТОЛЬКО под pwsh на Linux — там же, строка 12, это оговорено; ветки, требующие семантики путей Windows, там не исполняются. Windows-ветка подтверждается только GitHub Actions (installers/ci/installers.yml, задания pester-pwsh на windows-latest и pester-ps51 с Windows PowerShell 5.1), где прогоны сейчас ЗАБЛОКИРОВАНЫ лимитом расходов аккаунта. Следовательно AC-136, AC-137, AC-139, AC-140 и Windows-часть AC-135/AC-143 остаются подтверждёнными только чтением кода, как и в цикле 4.",
+      "read_only_conclusion": "Чтением install.ps1 расхождений с ревизией 1.5 не найдено: Test-PackagePath (253-262) и Test-AppName (270-279) — белые списки с посегментной проверкой '.'/'..' и запретом краевого пробела, паритетные POSIX-ветке; Invoke-Expression в файле отсутствует; аргументы внешних процессов передаются массивом. Генерации кода оболочки install.ps1 не выполняет, поэтому N5-I13 для него сводится к запрету такой генерации — запрет соблюдён."
+    },
+    {
+      "what": "Исполнение сгенерированного fish-профиля настоящей оболочкой fish (AC-147, второй тест)",
+      "why": "fish на машине ревью отсутствует; тест сам печатает skip.",
+      "covered_by": "Строковой проверкой AC-147 (первый тест) и моей прямой проверкой fish_quote_value на 12 значениях. Ни в installers/ci/installers.yml, ни в .gitlab-ci.yml fish не устанавливается — то есть в CI этот skip тоже срабатывает. См. finding 7."
+    },
+    {
+      "what": "Реальная смена владельца (chown) при --system",
+      "why": "Сессия ревью не root; chown на другого пользователя невозможен.",
+      "covered_by": "Ловушкой chown с журналированием: проверяется факт и аргументы каждого вызова, а также отсутствие вызовов там, где их быть не должно. Findings 1 и 2 сформулированы по отсутствию вызова chown для конкретных путей, а не по значению stat, поэтому от подмены не зависят."
+    }
+  ],
+
+  "mutation_log": [
+    {"id": "M1", "mutant": "sh_quote_value → printf '%s' \"$1\" (экранирование апострофа снято)", "result": "УБИТ: 55-injection.bats — not ok AC-146 (метасимволы в путях) и not ok AC-146 (апостроф закрыт по правилу POSIX)"},
+    {"id": "M2", "mutant": "fish_quote_value → printf '%s' \"$1\"", "result": "УБИТ: 55-injection.bats — not ok AC-147 (fish-профиль)"},
+    {"id": "M3", "mutant": "export %s='%s' → export %s=\"%s\" (одинарные кавычки заменены двойными)", "result": "УБИТ 6 тестами: AC-145 (контроль), AC-146 ×2, AC-41, AC-42/AC-141, AC-149"},
+    {"id": "M4", "mutant": "белый список is_safe_pkg_path расширен символами '$' и ';' (bash -n чист)", "result": "ВЫЖИЛ: 55-injection.bats 0 not ok. Поведение изменено наблюдаемо: ca.install_name='a;b.pem' и 'pwn$HOME.pem' — оригинал код 2, мутант код 0 с записью значения в профиль. См. finding 3."}
+  ],
+
+  "dispute_resolutions": [
+    {
+      "dispute": "disputes/test-dispute-I5-ac145-app-name-space.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Претензия dev-агента верна, тест подлежал правке. N5-P3/N5-P4 ревизии 1.5 (spec.md:283-285, 317-322) разрешают пробел U+0020 внутри app_name и запрещают его в ca.install_name и artifacts[].install_name. Проверено собственными фикстурами, независимо от тестов репозитория: app_name='OpenCode Magnit.app' → код 0, 'Open  Code.app' → код 0, ' OpenCode.app' и 'OpenCode.app ' → код 2, '   ' → код 2 («обязательное поле отсутствует или пусто»); ca.install_name='tander ca.pem' → код 2. Реализация (is_safe_app_name, install-posix.sh:675-690; Test-AppName, install.ps1:270-279) правилам соответствует; расходилась именно формулировка AC-145, задававшая единый перечень значений для трёх полей с разными правилами. Резолюция test-agent от 2026-08-21 (reports/test-dispute-I5-ac145-app-name-space.resolution.json) и внесённые правки тестов (55-injection.bats:47-68, 190-201) с этим согласны. Остаётся невыполненным пункт самой резолюции: формулировку AC-145 в acceptance-criteria.yaml так и не уточнили — сделать при следующей ревизии спеки (не must_fix)."
+    }
+  ],
+
+  "notes": [
+    "Все PoC выполнены на СОБСТВЕННЫХ фикстурах: независимый сборщик пакета (manifest.json + certs/bin/desktop, sha256 через shasum), а не installers/tests/bats/helpers.bash. Отчётам предыдущих ревью и тестам репозитория при перепроверке не доверялось.",
+    "Ни один PoC не выполнялся с правами root и не писал за пределы каталога сессии: uid 0 симулировался ловушкой id, а mkdir/cp/mv/chmod/rm в ловушках отказывались работать с путями под /usr и /Applications; sudo подменялся ловушкой. Для проверки --system использовалась КОПИЯ install-posix.sh в каталоге сессии с единственной правкой — bin_dir=\"/usr/local/bin\" заменён временным каталогом; файлы репозитория не изменялись.",
+    "За время ревью HEAD ветки сместился e6b7bc1 → c804afa другим агентом (коммиты по BUG-I4-004/006/007). Проверено: git diff e6b7bc1..c804afa -- installers/ пуст, изменены только bugs/*.json, поэтому выводы относятся к обоим состояниям.",
+    "Гейт G3 (mutmut) запускался с no_proxy='*', как предписано для macOS."
+  ]
+}
