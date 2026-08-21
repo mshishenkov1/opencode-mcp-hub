@@ -45,7 +45,9 @@ gates:
     - git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main || true
     - 'git rev-parse --verify --quiet origin/main >/dev/null && echo "база для G2 найдена" || echo "ВНИМАНИЕ - origin/main недоступна, G2 упадёт"'
   script:
-    - .venv/bin/python scripts/run_gates.py --run-id "gl-$CI_PIPELINE_IID" --ci
+    # Mutation вынесен в отдельное задание: вместе с остальными гейтами он не
+    # укладывается в лимит задания (на ветке I-3 прогон был оборван на часе).
+    - .venv/bin/python scripts/run_gates.py --run-id "gl-$CI_PIPELINE_IID" --skip G3 --ci
   artifacts:
     when: always
     paths:
@@ -57,6 +59,25 @@ gates:
         coverage_format: cobertura
         path: reports/coverage.xml
   coverage: '/^TOTAL.+?(\d+\%)$/'
+
+mutation:
+  # G3 отдельно и с большим лимитом: mutmut перебирает тысячи мутантов и на
+  # большом наборе идёт дольше часа. Задание не блокирует стадию установщиков.
+  stage: gates
+  image: "${REGISTRY_PREFIX}python:3.12-slim"
+  interruptible: true
+  timeout: 3h
+  needs: []
+  before_script:
+    - python -m venv .venv
+    - .venv/bin/pip install --quiet -e ".[dev]"
+  script:
+    - .venv/bin/python scripts/run_gates.py --run-id "gl-$CI_PIPELINE_IID-mut" --only G3 --ci
+  artifacts:
+    when: always
+    paths:
+      - reports/gates-*.json
+    expire_in: 30 days
 
 # --- Установщики (installers/docs/spec.md, N5-T4) ---
 

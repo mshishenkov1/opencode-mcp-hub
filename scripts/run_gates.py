@@ -41,12 +41,29 @@ def gate_g1_tests(cfg: dict) -> tuple[bool, str]:
     return True, f"все тесты зелёные, skip: {skipped}" + (" (обоснованы)" if skipped else "")
 
 
+def resolve_base(base: str) -> str | None:
+    """Ревизия базовой ветки, существующая в этом клоне.
+
+    На раннере actions/checkout создаёт только ветку прогона: даже при fetch-depth: 0
+    локальной `main` нет, и diff-cover падает на неразрешимой ревизии с пустым stdout
+    (гейт G2 был красным в CI и зелёным локально именно поэтому). Локально берём саму
+    ветку, в CI — `origin/main`.
+    """
+    for ref in (base, f"origin/{base}"):
+        if sh(f"git rev-parse --verify --quiet {ref}^{{commit}}").returncode == 0:
+            return ref
+    return None
+
+
 def gate_g2_coverage_diff(cfg: dict) -> tuple[bool, str]:
     r = sh(cfg["commands"]["coverage"])
     if r.returncode != 0:
         return False, f"прогон с coverage упал: {tail(r.stdout)}"
     threshold = cfg["thresholds"]["coverage_diff"]
-    base = cfg.get("base_branch", "main")
+    base = resolve_base(cfg.get("base_branch", "main"))
+    if base is None:
+        return False, (f"базовая ветка {cfg.get('base_branch', 'main')} недоступна ни локально, "
+                       "ни как origin/<ветка> — coverage-diff считать не от чего")
     cmd = cfg["commands"]["coverage_diff"].format(base=base, threshold=threshold)
     r = sh(cmd)
     m = re.search(r"Coverage: ([\d.]+)%", r.stdout)
@@ -54,8 +71,10 @@ def gate_g2_coverage_diff(cfg: dict) -> tuple[bool, str]:
     if "No lines with coverage information" in r.stdout:
         return True, "нет новых/изменённых строк логики относительно базовой ветки"
     if r.returncode != 0:
-        return False, f"coverage-diff {pct} < порога {threshold}%: {tail(r.stdout)}"
-    return True, f"coverage-diff {pct} >= {threshold}%"
+        # stderr важен: неразрешимая ревизия и отсутствие coverage.xml видны только там.
+        detail = tail(r.stdout) or tail(r.stderr)
+        return False, f"coverage-diff {pct} < порога {threshold}% (база {base}): {detail}"
+    return True, f"coverage-diff {pct} >= {threshold}% (база {base})"
 
 
 def gate_g3_mutation(cfg: dict) -> tuple[bool, str]:
@@ -115,6 +134,11 @@ def tail(text: str, n: int = 300) -> str:
 
 def main(argv: list[str]) -> int:
     run_id = argv[argv.index("--run-id") + 1] if "--run-id" in argv else "manual"
+    # Подмножество гейтов: `--only G1,G2` или `--skip G3`. Нужно, чтобы длинный
+    # mutation можно было вынести в отдельное задание CI — на большом наборе он
+    # не укладывается в часовой лимит задания вместе с остальными гейтами.
+    only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else None
+    skip = set(argv[argv.index("--skip") + 1].split(",")) if "--skip" in argv else set()
     cfg = yaml.safe_load((ROOT / "pipeline.config.yaml").read_text(encoding="utf-8"))
 
     gates = [
@@ -126,9 +150,17 @@ def main(argv: list[str]) -> int:
         ("G6", "AC-трассировка", gate_g6_traceability),
     ]
 
+    selected = [g for g in gates if (only is None or g[0] in only) and g[0] not in skip]
+    if not selected:
+        print("не выбрано ни одного гейта: проверь --only/--skip", file=sys.stderr)
+        return 2
+    if len(selected) != len(gates):
+        names = ", ".join(g[0] for g in selected)
+        print(f"прогон подмножества гейтов: {names}\n")
+
     results = {}
     all_ok = True
-    for gid, name, fn in gates:
+    for gid, name, fn in selected:
         try:
             ok, detail = fn()
         except Exception as e:
