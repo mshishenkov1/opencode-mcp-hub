@@ -1,0 +1,32 @@
+{
+  "run_id": "review-i5-6-nog3",
+  "ts": "2026-08-21T09:29:43",
+  "all_passed": false,
+  "gates": {
+    "G1": {
+      "name": "Тесты",
+      "passed": true,
+      "detail": "все тесты зелёные, skip: 0"
+    },
+    "G2": {
+      "name": "Coverage-diff",
+      "passed": true,
+      "detail": "coverage-diff 95% >= 90% (база main)"
+    },
+    "G4": {
+      "name": "Статанализ",
+      "passed": true,
+      "detail": "линтер и типизация чистые"
+    },
+    "G5": {
+      "name": "Ревью",
+      "passed": false,
+      "detail": "review-i5-5.json: verdict=request_changes"
+    },
+    "G6": {
+      "name": "AC-трассировка",
+      "passed": true,
+      "detail": "g_help_lists_validate_and_path, tests/test_cli.py::test_cli_serve_help_has_host_and_port, tests/test_cli.py::test_cli_serve_passes_host_and_port_to_uvicorn, tests/test_cli.py::test_cli_without_command_or_unknown_command_is_error, tests/test_cli.py::test_installed_entrypoint_mcp_hub_help, tests/test_cli.py::test_cli_serve_defaults_and_flags_passed_to_uvicorn |  | G6 OK: все 69 критериев покрыты тестами"
+    }
+  }
+}
