@@ -65,24 +65,31 @@ step "6. Инструменты ТЭГ работают через Hub от им
 # MCP-клиент авторизуется в Hub собственным токеном OAuth-фасада, а не ключом LiteLLM:
 # в приложении этот шаг проходит сам (с браузерным согласием), здесь токен выпускается напрямую.
 HUBC=$(docker ps --filter name=hubi3-hub -q | head -1)
-docker exec "$HUBC" python - <<'MINT' >/dev/null 2>&1
+# docker exec не пробрасывает stdin в этой среде — скрипт копируется файлом.
+cat > /tmp/mint-hub-token.py <<'MINT'
 import asyncio
 from hub.app import create_app
 from hub.crypto import random_token
+
 async def main():
     app = create_app()
     async with app.router.lifespan_context(app):
         st = app.state
         conn = await st.broker.load_connection("shishenkov_ma", "tag")
-        reg = await st.oauth.register_client({"client_name":"e2e","redirect_uris":["http://127.0.0.1:53682/cb"],
-            "grant_types":["authorization_code"],"response_types":["code"],
-            "token_endpoint_auth_method":"none"}, ip="127.0.0.1")
+        reg = await st.oauth.register_client(
+            {"client_name": "e2e", "redirect_uris": ["http://127.0.0.1:53682/cb"],
+             "grant_types": ["authorization_code"], "response_types": ["code"],
+             "token_endpoint_auth_method": "none"}, ip="127.0.0.1")
         cid = reg["client_id"] if isinstance(reg, dict) else reg
         toks = await st.oauth.issue_tokens(client_id=cid, user_id="shishenkov_ma", alias="tag",
-            connection_id=conn.id, scope="tag:readonly", chain_id=random_token())
-        open("/tmp/tok.txt","w").write(toks["access_token"])
+                                           connection_id=conn.id, scope="tag:readonly",
+                                           chain_id=random_token())
+        open("/tmp/tok.txt", "w").write(toks["access_token"])
+
 asyncio.run(main())
 MINT
+docker cp /tmp/mint-hub-token.py "$HUBC":/tmp/mint-hub-token.py >/dev/null
+docker exec "$HUBC" python /tmp/mint-hub-token.py >/dev/null 2>&1
 docker cp "$HUBC":/tmp/tok.txt /tmp/hubtok.txt >/dev/null 2>&1
 KEY=$(cat /tmp/hubtok.txt)
 H=$(mktemp)
