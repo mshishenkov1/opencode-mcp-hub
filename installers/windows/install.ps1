@@ -475,8 +475,14 @@ function Get-UserPathEntry {
     }
 }
 
+# [AllowEmptyString()] обязателен: при -Uninstall наш каталог может оказаться единственным элементом
+# User PATH, и после его вычёркивания остаётся пустая строка. По N5-R1 удаляется только то, что ставил
+# установщик, — то есть наша ЗАПИСЬ в PATH, а не сам параметр реестра (симметрично POSIX-ветке, где из
+# профиля вырезается наш блок, а файл профиля остаётся). Поэтому пустое значение записывается как
+# пустая строка с сохранением исходного RegistryValueKind (N5-I8), а не удаляется через DeleteValue:
+# удаление параметра потеряло бы его тип и вышло бы за границы «удаляем только своё».
 function Write-UserPathEntry {
-    param([Parameter(Mandatory = $true)][string]$Value, [string]$Kind = 'ExpandString')
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value, [string]$Kind = 'ExpandString')
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
     try {
         $valueKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
