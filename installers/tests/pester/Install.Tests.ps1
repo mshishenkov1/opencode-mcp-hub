@@ -25,7 +25,11 @@ BeforeAll {
             [string]$Root,
             [switch]$WithDesktop,
             [switch]$DesktopSilentArgs,
-            [string]$Version = '1.17.9-magnit.1'
+            [string]$Version = '1.17.9-magnit.1',
+            # ca.install_name спека допускает многосегментным (N5-P3) — параметр нужен тестам
+            # AC-155. Значение задаётся ЗДЕСЬ, в единственной фабрике фикстур: sed-подстановка
+            # по литералу штатного имени после его смены переставала бы срабатывать молча.
+            [string]$CaInstallName = 'tander-ca-bundle.pem'
         )
         $null = New-Item -ItemType Directory -Path (Join-Path $Root 'common') -Force
         $null = New-Item -ItemType Directory -Path (Join-Path $Root 'bin') -Force
@@ -78,7 +82,7 @@ BeforeAll {
             ca             = [ordered]@{
                 file         = 'certs/tander-ca-bundle.pem'
                 sha256       = $caSha
-                install_name = 'tander-ca-bundle.pem'
+                install_name = $CaInstallName
             }
             artifacts      = $artifacts
             purge_paths    = @('%USERPROFILE%\.config\opencode', '%USERPROFILE%\.local\share\opencode')
@@ -447,5 +451,90 @@ Describe 'Логика User PATH без реестра (N5-I8; сама запи
     It 'сравнение элементов PATH регистронезависимо и без завершающего слэша' {
         Test-UserPathContains -PathValue 'C:\Tools;C:\Users\u\AppData\Local\Programs\opencode\' -Directory 'C:\Users\u\AppData\Local\Programs\OpenCode' | Should -BeTrue
         Test-UserPathContains -PathValue 'C:\Tools' -Directory 'C:\Users\u\AppData\Local\Programs\opencode' | Should -BeFalse
+    }
+}
+
+Describe 'AC-155: многосегментный ca.install_name — промежуточные каталоги создаёт установщик (N5-I4, N5-P3, N5-I1)' {
+    # Паритет платформ. То же значение 'certs/corp/tander-ca-bundle.pem' проверяется POSIX-веткой
+    # в installers/tests/bats/35-manifest-paths.bats под тем же маркером AC-155. Test-PackagePath
+    # его принимает (разделитель '/' разрешён N5-P3), значит пакет, принятый одной платформой,
+    # обязан ставиться и на другой. Без создания недостающего родителя CaTarget Copy-Item
+    # выбрасывает непойманное исключение с английской системной диагностикой — это и код 1
+    # вместо 0, и нерусское сообщение (N5-I1).
+    #
+    # Прогон: Invoke-Pester installers/tests/pester. Тест не зависит от Windows-реестра и не
+    # ветвится по платформе — выполняется во всех трёх комбинациях заданий pester-pwsh и
+    # pester-ps51 (ubuntu+pwsh, windows+pwsh, windows+powershell 5.1) из installers/ci/installers.yml,
+    # без Set-ItResult -Skipped (на Windows-раннерах пропуски запрещены самим заданием).
+    BeforeEach {
+        $script:PkgRoot = New-TempDir
+        $script:HomeRoot = New-TempDir
+        $null = New-FixturePackage -Root $script:PkgRoot -CaInstallName 'certs/corp/tander-ca-bundle.pem'
+        Mock Get-UserProfileDir { return $script:HomeRoot }
+        Mock Get-LocalAppDataDir { return (Join-Path $script:HomeRoot 'AppData\Local') }
+        $script:SayLines = New-Object System.Collections.ArrayList
+        Mock Write-Line { param($Text) [void]$script:SayLines.Add($Text) }
+        Mock Write-Say { param($Text) [void]$script:SayLines.Add($Text) }
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:PkgRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:HomeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'AC-155: манифест с многосегментным ca.install_name проходит валидацию, CaTarget лежит внутри каталога конфига' {
+        Test-PackagePath 'certs/corp/tander-ca-bundle.pem' | Should -BeTrue
+        $manifest = Read-Manifest -PackageRoot $script:PkgRoot
+        (Get-Prop (Get-Prop $manifest 'ca') 'install_name') | Should -Be 'certs/corp/tander-ca-bundle.pem'
+        $layout = Get-Layout -Manifest $manifest -PackageRoot $script:PkgRoot -PrefixDir ''
+        $targetFull = [IO.Path]::GetFullPath($layout.CaTarget)
+        $configFull = [IO.Path]::GetFullPath($layout.ConfigDir)
+        $targetFull.StartsWith($configFull) | Should -BeTrue
+        $targetFull | Should -Not -Be $configFull
+    }
+
+    It 'AC-155: первый вызов создаёт оба недостающих каталога, Copy-Item не выбрасывает исключения, сообщение русское' {
+        $manifest = Read-Manifest -PackageRoot $script:PkgRoot
+        $layout = Get-Layout -Manifest $manifest -PackageRoot $script:PkgRoot -PrefixDir ''
+        $caParent = Split-Path -Parent $layout.CaTarget
+        $caGrandParent = Split-Path -Parent $caParent
+        # Предусловие: ни одного звена цепочки нет — иначе тест не отличал бы «создал установщик»
+        # от «каталог уже был».
+        (Test-Path -LiteralPath $layout.ConfigDir) | Should -BeFalse
+        (Test-Path -LiteralPath $caGrandParent) | Should -BeFalse
+        (Test-Path -LiteralPath $caParent) | Should -BeFalse
+
+        { Invoke-CaInstall -Layout $layout } | Should -Not -Throw
+
+        (Test-Path -LiteralPath $caGrandParent -PathType Container) | Should -BeTrue
+        (Test-Path -LiteralPath $caParent -PathType Container) | Should -BeTrue
+        (Test-Path -LiteralPath $layout.CaTarget -PathType Leaf) | Should -BeTrue
+        # Содержимое доехало целым: sha256 цели равен ca.sha256 манифеста.
+        (Get-FileHash -LiteralPath $layout.CaTarget -Algorithm SHA256).Hash.ToLowerInvariant() |
+            Should -Be $layout.CaSha
+        $text = $script:SayLines -join "`n"
+        $text | Should -Match 'CA: установлен'
+        $text | Should -Match ([regex]::Escape($layout.CaTarget))
+        $text | Should -Not -Match 'No such file'
+        $text | Should -Not -Match 'Could not find'
+        $text | Should -Not -Match 'DirectoryNotFound'
+    }
+
+    It 'AC-155: повторный вызов на созданной цепочке идемпотентен — «CA: уже установлен», состояние не меняется' {
+        $manifest = Read-Manifest -PackageRoot $script:PkgRoot
+        $layout = Get-Layout -Manifest $manifest -PackageRoot $script:PkgRoot -PrefixDir ''
+        Invoke-CaInstall -Layout $layout
+        $hashBefore = (Get-FileHash -LiteralPath $layout.CaTarget -Algorithm SHA256).Hash
+        $itemsBefore = @(Get-ChildItem -LiteralPath $layout.ConfigDir -Recurse | ForEach-Object { $_.FullName } | Sort-Object)
+        $script:SayLines.Clear()
+
+        { Invoke-CaInstall -Layout $layout } | Should -Not -Throw
+
+        ($script:SayLines -join "`n") | Should -Match 'CA: уже установлен'
+        (Get-FileHash -LiteralPath $layout.CaTarget -Algorithm SHA256).Hash | Should -Be $hashBefore
+        # Состав каталога конфига тот же: два промежуточных каталога и сам CA, ничего лишнего.
+        $itemsAfter = @(Get-ChildItem -LiteralPath $layout.ConfigDir -Recurse | ForEach-Object { $_.FullName } | Sort-Object)
+        ($itemsAfter -join "`n") | Should -Be ($itemsBefore -join "`n")
+        $itemsAfter.Count | Should -Be 3
     }
 }

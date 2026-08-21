@@ -219,7 +219,7 @@ assert_no_file_changes() {
   [ ! -e "$PREFIX_DIR/bin/opencode" ]
 }
 
-@test "AC-11, AC-135: многосегментный ca.install_name — промежуточные каталоги создаёт установщик" {
+@test "AC-11, AC-135, AC-155: многосегментный ca.install_name — промежуточные каталоги создаёт установщик, повторный запуск идемпотентен" {
   # N5-P3 разрешает разделитель "/" внутри ca.install_name, и белый список такое значение
   # принимает. Значит недостающие каталоги внутри каталога конфига обязан создать установщик:
   # иначе cp обрывает установку кодом 1 и СИСТЕМНОЙ АНГЛИЙСКОЙ диагностикой
@@ -228,17 +228,58 @@ assert_no_file_changes() {
   # код не по теме теста.
   PKG_CA_INSTALL_NAME='certs/corp/tander-ca-bundle.pem' make_pkg
   export SHELL=/bin/zsh
+  local config_dir
+  config_dir=$(config_dir_path)
+  # Ни одного звена цепочки до запуска нет — иначе тест не отличал бы «создал установщик»
+  # от «каталог уже был».
+  if [ -e "$config_dir/certs" ]; then
+    printf 'Предусловие нарушено: %s существует до установки\n' "$config_dir/certs" >&2
+    return 1
+  fi
   oc_run --no-launch
   assert_status 0
   refute_output_contains "No such file"
+  refute_output_contains "cp:"
   refute_output_contains "поле ca.install_name"
-  local ca="$(config_dir_path)/certs/corp/tander-ca-bundle.pem"
+  local ca="$config_dir/certs/corp/tander-ca-bundle.pem"
   [ -f "$ca" ] || { printf 'CA не установлен по многосегментному имени: %s\n' "$ca" >&2; return 1; }
+  # Каждое промежуточное звено создано самим установщиком, с правами 0755 (AC-155).
+  local link mode
+  for link in "$config_dir/certs" "$config_dir/certs/corp"; do
+    [ -d "$link" ] || { printf 'Промежуточный каталог не создан: %s\n' "$link" >&2; return 1; }
+    mode=$(mode_of "$link")
+    [ "$mode" = "755" ] || { printf 'Права %s: ожидалось 755, получено %s\n' "$link" "$mode" >&2; return 1; }
+  done
+  # Содержимое доехало целым: sha256 установленного CA равен ca.sha256 манифеста.
+  local ca_sha_manifest ca_sha_real
+  ca_sha_manifest=$(awk '
+    index($0, "\"ca\":") > 0 { in_ca = 1 }
+    in_ca == 1 && index($0, "\"sha256\"") > 0 {
+      line = $0
+      sub(/^[^:]*: "/, "", line)
+      sub(/".*$/, "", line)
+      print line
+      exit
+    }
+  ' "$PKG/common/manifest.json")
+  [ -n "$ca_sha_manifest" ] || { printf 'Не удалось прочитать ca.sha256 манифеста\n' >&2; return 1; }
+  ca_sha_real=$(sha256_file "$ca")
+  [ "$ca_sha_real" = "$ca_sha_manifest" ] || {
+    printf 'sha256 установленного CA %s не равен ca.sha256 манифеста %s\n' "$ca_sha_real" "$ca_sha_manifest" >&2
+    return 1
+  }
   # Цель осталась внутри каталога конфига, а не рядом с ним.
   assert_file_contains "$HOME/.zshrc" "export NODE_EXTRA_CA_CERTS='$ca'"
   assert_output_contains "$ca"
-  # Повторный запуск на уже созданной цепочке каталогов проходит так же.
+  # Повторный запуск на уже созданной цепочке каталогов проходит так же и НЕ МЕНЯЕТ состояния
+  # (N5-U1): снимок дома до и после совпадает побайтово.
+  snapshot_home "$BATS_TEST_TMPDIR/multiseg.after1"
   oc_run --no-launch
+  assert_status 0
+  refute_output_contains "No such file"
+  refute_output_contains "cp:"
+  snapshot_home "$BATS_TEST_TMPDIR/multiseg.after2"
+  run diff "$BATS_TEST_TMPDIR/multiseg.after1" "$BATS_TEST_TMPDIR/multiseg.after2"
   assert_status 0
   oc_run --check
   assert_status 0
