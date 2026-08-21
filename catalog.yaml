@@ -132,16 +132,34 @@ servers:
     audience: ["all"]
     mode: facade
     upstream_url: "https://mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp"
-    auth:
-      type: oauth2
-      authorize_url: "https://jira.corp.tander.ru/rest/oauth2/latest/authorize"
-      token_url: "https://jira.corp.tander.ru/rest/oauth2/latest/token"
-      client_id: "${JIRA_OAUTH_CLIENT_ID}"
-      client_secret: "env:JIRA_OAUTH_CLIENT_SECRET"
-      pkce: true
-      scopes:
-        readonly: ["READ"]
-        readwrite: ["WRITE"]
+    auth_methods:
+      - id: corp_oauth
+        title: "Корпоративная авторизация Jira"
+        available: false
+        unavailable_reason: "OAuth-приложение Jira ещё не выдано администраторами"
+        type: oauth2
+        authorize_url: "https://jira.corp.tander.ru/rest/oauth2/latest/authorize"
+        token_url: "https://jira.corp.tander.ru/rest/oauth2/latest/token"
+        client_id: "${JIRA_OAUTH_CLIENT_ID}"
+        client_secret: "env:JIRA_OAUTH_CLIENT_SECRET"
+        pkce: true
+        scopes:
+          readonly: ["READ"]
+          readwrite: ["WRITE"]
+      - id: personal_token
+        title: "Персональный токен Jira"
+        type: user_token
+        field:
+          label: "Персональный токен Jira"
+          hint: "Jira → Профиль → Personal Access Tokens → Create token"
+          docs_url: "https://jira.corp.tander.ru/secure/ViewProfile.jspa"
+          secret: true
+        verify:
+          url: "https://jira.corp.tander.ru/rest/api/2/myself"
+          method: GET
+          headers:
+            Authorization: "Bearer {{access_token}}"
+          account_field: name
     credential_headers:
       X-Atlassian-Jira-Personal-Token: "{{access_token}}"
       X-Atlassian-Jira-Url: "https://jira.corp.tander.ru"
@@ -164,16 +182,34 @@ servers:
     audience: ["all"]
     mode: facade
     upstream_url: "https://mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp"
-    auth:
-      type: oauth2
-      authorize_url: "https://it-portal.corp.tander.ru/rest/oauth2/latest/authorize"
-      token_url: "https://it-portal.corp.tander.ru/rest/oauth2/latest/token"
-      client_id: "${CONFLUENCE_OAUTH_CLIENT_ID}"
-      client_secret: "env:CONFLUENCE_OAUTH_CLIENT_SECRET"
-      pkce: true
-      scopes:
-        readonly: ["READ"]
-        readwrite: ["WRITE"]
+    auth_methods:
+      - id: corp_oauth
+        title: "Корпоративная авторизация Confluence"
+        available: false
+        unavailable_reason: "OAuth-приложение Confluence ещё не выдано администраторами"
+        type: oauth2
+        authorize_url: "https://it-portal.corp.tander.ru/rest/oauth2/latest/authorize"
+        token_url: "https://it-portal.corp.tander.ru/rest/oauth2/latest/token"
+        client_id: "${CONFLUENCE_OAUTH_CLIENT_ID}"
+        client_secret: "env:CONFLUENCE_OAUTH_CLIENT_SECRET"
+        pkce: true
+        scopes:
+          readonly: ["READ"]
+          readwrite: ["WRITE"]
+      - id: personal_token
+        title: "Персональный токен Confluence"
+        type: user_token
+        field:
+          label: "Персональный токен Confluence"
+          hint: "Confluence → Профиль → Personal Access Tokens → Create token"
+          docs_url: "https://it-portal.corp.tander.ru/plugins/personalaccesstokens/manage-tokens.action"
+          secret: true
+        verify:
+          url: "https://it-portal.corp.tander.ru/rest/api/user/current"
+          method: GET
+          headers:
+            Authorization: "Bearer {{access_token}}"
+          account_field: username
     credential_headers:
       X-Atlassian-Confluence-Personal-Token: "{{access_token}}"
       X-Atlassian-Confluence-Url: "https://it-portal.corp.tander.ru"
