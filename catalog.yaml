@@ -210,6 +210,10 @@ servers:
           headers:
             Authorization: "Bearer {{access_token}}"
           account_field: username
+          # Confluence на неверный токен отвечает 200 с анонимным телом, поэтому
+          # по коду ответа отказ не отличить — требуем, чтобы система назвала
+          # владельца токена (R-U3.1, BUG-I4-009).
+          require_account: true
     credential_headers:
       X-Atlassian-Confluence-Personal-Token: "{{access_token}}"
       X-Atlassian-Confluence-Url: "https://it-portal.corp.tander.ru"
