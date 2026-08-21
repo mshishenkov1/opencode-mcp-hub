@@ -635,7 +635,13 @@ function Get-Layout {
     }
 }
 
+# PSUseSingularNouns срабатывает на «Contains» (существительным правило считает последнее слово имени),
+# хотя здесь это глагол-предикат: Test-<что>-<содержит>. Переименование недопустимо — имя входит в
+# наблюдаемую поверхность и вызывается из набора Pester (Install.Tests.ps1), поэтому правило подавлено
+# точечно, на одной этой функции; общие настройки анализатора не ослабляются.
 function Test-UserPathContains {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Contains — предикат, а не множественное число; имя закреплено вызовами в Install.Tests.ps1')]
     param([string]$PathValue, [string]$Directory)
     $needle = $Directory.TrimEnd('\').ToLowerInvariant()
     foreach ($part in $PathValue.Split(';')) {
