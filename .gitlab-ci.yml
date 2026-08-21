@@ -37,6 +37,9 @@ gates:
   image: "${REGISTRY_PREFIX}python:3.12-slim"
   interruptible: true
   before_script:
+    # В образе python:3.12-slim нет git, а он нужен и для фетча базовой ветки,
+    # и самому diff-cover: без него G2 падает с «базовая ветка недоступна».
+    - apt-get update -qq && apt-get install -y --no-install-recommends git >/dev/null
     - python -m venv .venv
     - .venv/bin/pip install --quiet -e ".[dev]"
     # GitLab CI выкачивает только текущую ссылку, поэтому origin/main в клоне
@@ -69,6 +72,8 @@ mutation:
   timeout: 3h
   needs: []
   before_script:
+    # mutmut опирается на git при обходе изменений — в slim-образе его нет.
+    - apt-get update -qq && apt-get install -y --no-install-recommends git >/dev/null
     - python -m venv .venv
     - .venv/bin/pip install --quiet -e ".[dev]"
   script:
