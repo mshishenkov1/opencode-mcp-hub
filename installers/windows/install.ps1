@@ -1012,73 +1012,73 @@ function Invoke-UninstallProcess {
 function Get-InstallPlan {
     param($Manifest, $Layout, [string]$PackageRoot, [bool]$SkipDesktop, [bool]$SkipLaunch)
     $lines = New-Object System.Collections.ArrayList
-    [void]$lines.Add($script:MsgPlanHead -f (Get-Prop $Manifest 'version'), (Get-Prop $Manifest 'os'), (Get-Prop $Manifest 'arch'))
+    [void]$lines.Add(($script:MsgPlanHead -f (Get-Prop $Manifest 'version'), (Get-Prop $Manifest 'os'), (Get-Prop $Manifest 'arch')))
     $n = 0
     if (-not (Test-Path -LiteralPath $Layout.ConfigDir -PathType Container)) {
         $n++
-        [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanMkdir -f $Layout.ConfigDir))
+        [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanMkdir -f $Layout.ConfigDir)))
     }
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanCa -f $Layout.CaSource, $Layout.CaTarget))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanCa -f $Layout.CaSource, $Layout.CaTarget)))
     if (-not (Test-Path -LiteralPath $Layout.BinDir -PathType Container)) {
         $n++
-        [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanMkdir -f $Layout.BinDir))
+        [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanMkdir -f $Layout.BinDir)))
     }
     if (Test-Path -LiteralPath $Layout.BinTarget -PathType Leaf) {
         $n++
-        [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanBinBackup -f $Layout.BinTarget, $Layout.BinBackup))
+        [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanBinBackup -f $Layout.BinTarget, $Layout.BinBackup)))
     }
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanBin -f $Layout.CliSource, $Layout.BinTarget))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanBin -f $Layout.CliSource, $Layout.BinTarget)))
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanEnv -f $script:EnvName, $Layout.CaTarget))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanEnv -f $script:EnvName, $Layout.CaTarget)))
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanPath -f $Layout.BinDir))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanPath -f $Layout.BinDir)))
 
     $desktop = Get-Artifact $Manifest 'desktop'
     $n++
     if ($null -eq $desktop) {
-        [void]$lines.Add($script:MsgPlanStep -f $n, $script:MsgDesktopNone)
+        [void]$lines.Add(($script:MsgPlanStep -f $n, $script:MsgDesktopNone))
     } elseif ($SkipDesktop) {
-        [void]$lines.Add($script:MsgPlanStep -f $n, $script:MsgDesktopSkipped)
+        [void]$lines.Add(($script:MsgPlanStep -f $n, $script:MsgDesktopSkipped))
     } else {
         $installerPath = Get-PackageFilePath $PackageRoot (Get-Prop $desktop 'file')
         $silent = Get-Prop $desktop 'silent_args'
         if ($null -eq $silent -or @($silent).Count -eq 0) {
-            [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgDesktopManualAt -f $installerPath))
+            [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgDesktopManualAt -f $installerPath)))
         } else {
-            [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanDesktopRun -f $installerPath, ([string]::Join(' ', @($silent)))))
+            [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanDesktopRun -f $installerPath, ([string]::Join(' ', @($silent))))))
         }
     }
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanConfig -f $Layout.ConfigFile, $Layout.ConfigBak))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanConfig -f $Layout.ConfigFile, $Layout.ConfigBak)))
     if (-not $SkipLaunch) {
         $n++
-        [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanCorpStatus -f $Layout.BinTarget))
+        [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanCorpStatus -f $Layout.BinTarget)))
     }
-    [void]$lines.Add($script:MsgCheckHub -f (Get-Prop $Manifest 'hub_url'))
+    [void]$lines.Add(($script:MsgCheckHub -f (Get-Prop $Manifest 'hub_url')))
     return $lines.ToArray()
 }
 
 function Get-UninstallPlan {
     param($Manifest, $Layout, [bool]$WithPurge)
     $lines = New-Object System.Collections.ArrayList
-    [void]$lines.Add($script:MsgPlanUninstallHead -f (Get-Prop $Manifest 'version'))
+    [void]$lines.Add(($script:MsgPlanUninstallHead -f (Get-Prop $Manifest 'version')))
     $n = 0
     foreach ($item in @($Layout.BinTarget, $Layout.BinBackup)) {
         $n++
-        [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanRemove -f $item))
+        [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanRemove -f $item)))
     }
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanPathRemove -f $Layout.BinDir))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanPathRemove -f $Layout.BinDir)))
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanEnvUnset -f $script:EnvName))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanEnvUnset -f $script:EnvName)))
     $n++
-    [void]$lines.Add($script:MsgPlanStep -f $n, ($script:MsgPlanRemove -f $Layout.CaTarget))
+    [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanRemove -f $Layout.CaTarget)))
     if ($WithPurge) {
         [void]$lines.Add($script:MsgPurgeHead)
         foreach ($path in (Get-PurgePathList -Manifest $Manifest)) {
-            [void]$lines.Add($script:MsgPurgeItem -f $path)
+            [void]$lines.Add(($script:MsgPurgeItem -f $path))
         }
     }
     return $lines.ToArray()
