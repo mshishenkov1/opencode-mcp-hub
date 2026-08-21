@@ -1,0 +1,20 @@
+{
+  "id": "BUG-I4-008",
+  "related_ac": "AC-191",
+  "severity": "critical",
+  "title": "Витрина пуста: клиент отвергает карточку каталога из-за модели прав tool_filter",
+  "repro_steps": [
+    "Поднять стенд (docker compose -p hubi3), коннектор tag с permission_model.kind: tool_filter",
+    "Запустить корпоративную сборку Desktop, войти по SSO",
+    "Открыть витрину коннекторов"
+  ],
+  "expected": "В витрине виден коннектор ТЭГ со способами подключения",
+  "actual": "«Hub unavailable: Hub returned an unexpected response», счётчик «0 of 0 connected», ни одного коннектора. Hub при этом отвечает GET /api/catalog кодом 200 и отдаёт корректное тело",
+  "failing_test": "(нет — тесты форка используют карточки с прежними моделями прав)",
+  "evidence": "Декодирование живого ответа схемой форка (packages/opencode/src/corp/schema.ts, CatalogServer): карточка как есть — ОТКЛОНЕНО; без auth_methods — ОТКЛОНЕНО; с заменой permission_model на {kind: consent} — принято. Виновник изолирован: kind tool_filter схеме неизвестен, лишнее поле auth_methods роли не играет",
+  "suspected_area": "Контракт каталога между Hub и форком: src/hub/catalog.py (permission_model kind tool_filter, правило R-P8 спеки Hub) против packages/opencode/src/corp/schema.ts в mshishenkov1/opencode. Спека форка перечисляет модели прав и tool_filter в ней нет",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "пользователь заметил пустую витрину в приложении 2026-08-21",
+  "notes": "Тот же класс, что BUG-I1-002: Hub ушёл вперёд, схема клиента строгая, вся карточка отбрасывается целиком. Стоит проверить, нет ли смысла сделать разбор терпимее — неизвестная модель прав не должна скрывать коннектор из витрины"
+}
