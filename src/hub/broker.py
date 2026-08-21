@@ -13,15 +13,26 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from sqlalchemy import select
 
-from hub.catalog import AuthOAuth2, AuthUserToken, Catalog, ServerEntry
+from hub.catalog import AuthOAuth2, AuthUserToken, Catalog, ServerEntry, TokenExchange
 from hub.clock import Clock
 from hub.crypto import TokenCipher, code_challenge_s256
-from hub.db import Connection, Database, UpstreamToken, to_naive_utc, utcnow
+from hub.db import (
+    TOKEN_ORIGIN_ISSUED,
+    TOKEN_ORIGIN_REASON_POLICY_DENIED,
+    TOKEN_ORIGIN_REASON_TOKEN_UNUSABLE,
+    TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE,
+    TOKEN_ORIGIN_SUBMITTED,
+    Connection,
+    Database,
+    UpstreamToken,
+    to_naive_utc,
+    utcnow,
+)
 from hub.kv import KeyValueStore
 from hub.metrics import Metrics
 from hub.proxy import HeaderValueError, resolve_header_value
@@ -46,6 +57,15 @@ REASON_SCOPE_UPGRADE = "Нужно заново разрешить доступ 
 REASON_TOKEN_REJECTED = (
     "Токен целевой системы больше не действует — подключитесь заново, указав новый токен"
 )
+
+# R-U15.1: маркер «свой токен» усекается справа детерминированно — сопоставление остаётся точным.
+ISSUED_MARKER_MAX_LENGTH = 255
+# R-U15.2: за один заход уборки отзывается не более 20 элементов списка.
+CLEANUP_REVOKE_LIMIT = 20
+# R-U17.2: почему отзывается выпущенный токен.
+REVOKE_REASON_RECONNECT = "reconnect"
+REVOKE_REASON_DISCONNECT = "disconnect"
+REVOKE_REASON_UNUSABLE = "unusable"
 
 
 class BrokerError(Exception):
@@ -90,6 +110,81 @@ class UpstreamTokens:
     token_type: str = "Bearer"
     scopes: list[str] = field(default_factory=list)
     account: str | None = None
+
+
+@dataclass(frozen=True)
+class TokenOrigin:
+    """Происхождение сохранённого токена целевой системы (R-U13.5, R-U14.3, R-U17.4)."""
+
+    origin: str = TOKEN_ORIGIN_SUBMITTED
+    reason: str | None = None
+    issued_token_id: str | None = None
+
+    @property
+    def issued(self) -> bool:
+        return self.origin == TOKEN_ORIGIN_ISSUED
+
+
+@dataclass(frozen=True)
+class ExchangeOutcome:
+    """Что сохранять после попытки обмена (R-U13, R-U14): подключение не отклоняется никогда."""
+
+    token: str
+    origin: TokenOrigin
+    account: str | None = None
+
+
+def _issued_token_id(value: Any) -> str | None:
+    """Идентификатор выпущенного токена: непустая строка либо число (R-U13.3)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return value if value.strip() else None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    return None
+
+
+def _issued_token_value(value: Any) -> str | None:
+    """Значение выпущенного токена: строка, непустая после отбрасывания пробелов (R-U13.3)."""
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _items_of(payload: Any, items_field: str | None, *, object_is_item: bool) -> list[Any] | None:
+    """Массив элементов ответа: по ``items_field`` либо само тело (R-U12, R-U18)."""
+    if items_field:
+        value = payload.get(items_field) if isinstance(payload, dict) else None
+        return list(value) if isinstance(value, list) else None
+    if isinstance(payload, list):
+        return list(payload)
+    if object_is_item and isinstance(payload, dict):
+        return [payload]
+    return None
+
+
+def _parse_expiry_moment(value: Any, unit: str) -> datetime | None:
+    """Значение ``expires_field`` как момент времени (R-U18.2); иначе ``None`` — «без срока»."""
+    if unit == "iso8601":
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            moment = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+        return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    seconds = float(value) / 1000.0 if unit == "ms" else float(value)
+    if seconds <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _parse_token_response(payload: Any) -> UpstreamTokens:
@@ -333,10 +428,408 @@ class TokenBroker:
             return str(value)
         return None
 
-    async def save_user_token(
-        self, connection: Connection, token: str, *, token_type: str = "Bearer"
+    # --- обмен присланного токена на постоянный (R-U12..R-U18) ---------------
+
+    def issued_marker(self, exchange: TokenExchange) -> str:
+        """Маркер «свой токен» (R-U15.1): ``"<description> (<netloc HUB_PUBLIC_URL>)"``.
+
+        Установка Hub входит в маркер, чтобы подключение к тестовому Hub не трогало токены,
+        выпущенные боевым. Усечение справа детерминировано — сопоставление остаётся точным.
+        """
+        netloc = urlsplit(self.settings.public_url).netloc
+        return f"{exchange.description} ({netloc})"[:ISSUED_MARKER_MAX_LENGTH]
+
+    def _resolve_headers(
+        self, headers: Mapping[str, Any], token: str
+    ) -> dict[str, str]:
+        environ = self._catalog_env()
+        return {name: resolve_header_value(value, environ, token) for name, value in headers.items()}
+
+    async def _upstream_json(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: dict[str, str] | None,
+        expect_status: int,
+    ) -> tuple[int | None, Any]:
+        """Запрос к целевой системе: ``(код ответа, разобранное тело)``.
+
+        Код ``None`` — сеть/таймаут. Тело — ``None``, если код не совпал с ожидаемым либо тело
+        не разбирается. Тело ответа не логируется никогда (R-U17.1).
+        """
+        try:
+            response = await self._http().request(
+                method,
+                url,
+                headers=headers,
+                json=body if body is not None else None,
+                timeout=self.settings.upstream_timeout,
+            )
+        except httpx.HTTPError:
+            return None, None
+        if response.status_code != expect_status:
+            return response.status_code, None
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, None
+
+    async def exchange_user_token(
+        self,
+        entry: ServerEntry,
+        method: AuthUserToken,
+        submitted_token: str,
+        *,
+        user_id: str,
+        submitted_account: str | None = None,
+    ) -> ExchangeOutcome:
+        """Обменять присланный токен на постоянный (R-U13, шаги 3–4).
+
+        Подключение не отклоняется ни при каком исходе (R-U14): при неудаче возвращается
+        присланный токен с кодом причины. Ни значение токена, ни тело ответа не логируются.
+        """
+        exchange = method.exchange
+        if exchange is None:  # pragma: no cover - вызывается только при объявленном обмене
+            return ExchangeOutcome(submitted_token, TokenOrigin(), submitted_account)
+
+        def failed(reason: str) -> ExchangeOutcome:
+            logger.info(
+                "user_token_exchange_failed",
+                extra={"alias": entry.alias, "auth_method": method.id, "reason": reason},
+            )
+            return ExchangeOutcome(
+                submitted_token, TokenOrigin(TOKEN_ORIGIN_SUBMITTED, reason), submitted_account
+            )
+
+        marker = self.issued_marker(exchange)
+        try:
+            headers = self._resolve_headers(exchange.headers, submitted_token)
+        except HeaderValueError:
+            return failed(TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE)
+        body = (
+            {k: v.replace("{{token_description}}", marker) for k, v in exchange.body.items()}
+            if exchange.body is not None
+            else None
+        )
+        status, payload = await self._upstream_json(
+            method=exchange.method,
+            url=exchange.url,
+            headers=headers,
+            body=body,
+            expect_status=exchange.expect_status,
+        )
+        logger.info(
+            "user_token_exchange",
+            extra={"alias": entry.alias, "auth_method": method.id, "status": status},
+        )
+        if status != exchange.expect_status:
+            # R-U14.1: понятный отказ целевой системы — политика; всё прочее — недоступность.
+            denied = status is not None and (
+                (400 <= status < 500 and status != 429) or status == 501
+            )
+            return failed(
+                TOKEN_ORIGIN_REASON_POLICY_DENIED
+                if denied
+                else TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE
+            )
+        if not isinstance(payload, dict):
+            return failed(TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE)
+        issued_token = _issued_token_value(payload.get(exchange.token_field))
+        issued_id = _issued_token_id(payload.get(exchange.token_id_field))
+        if issued_token is None or issued_id is None:
+            return failed(TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE)
+
+        # R-U13.4: успешный ответ на выпуск не доказывает работоспособность выданного значения.
+        issued_account: str | None = None
+        usable = True
+        try:
+            issued_account = await self.verify_user_token(entry, method, issued_token)
+        except (UserTokenRejected, UpstreamUnavailable):
+            usable = False
+        if usable and method.verify.account_field and submitted_account and issued_account:
+            usable = issued_account == submitted_account
+        if not usable:
+            # Отзыв выполняется присланным токеном: выпущенный непригоден (R-U13.4, R-U15.2).
+            await self.revoke_issued_token(
+                entry,
+                method,
+                token_id=issued_id,
+                credential=submitted_token,
+                user_id=user_id,
+                reason=REVOKE_REASON_UNUSABLE,
+            )
+            return failed(TOKEN_ORIGIN_REASON_TOKEN_UNUSABLE)
+
+        await self.db.audit(
+            "upstream_token_issued",
+            user_id=user_id,
+            alias=entry.alias,
+            details={"alias": entry.alias, "auth_method": method.id},
+            ts=self.clock.now(),
+        )
+        return ExchangeOutcome(
+            token=issued_token,
+            origin=TokenOrigin(TOKEN_ORIGIN_ISSUED, None, issued_id),
+            account=issued_account or submitted_account,
+        )
+
+    async def revoke_issued_token(
+        self,
+        entry: ServerEntry,
+        method: AuthUserToken,
+        *,
+        token_id: str,
+        credential: str,
+        user_id: str,
+        reason: str,
+    ) -> bool:
+        """Отозвать выпущенный Hub'ом токен по его идентификатору (R-U15.2).
+
+        Отзыв запускает только точный признак: идентификатор, сохранённый Hub'ом, либо элемент
+        списка с описанием, равным маркеру побайтово. Присланный токен не отзывается никогда.
+        """
+        exchange = method.exchange
+        if exchange is None or not token_id:  # pragma: no cover - защитная проверка
+            return False
+        revoke = exchange.revoke
+        status: int | None = None
+        try:
+            headers = self._resolve_headers(revoke.headers, credential)
+        except HeaderValueError:
+            ok = False
+        else:
+            body = (
+                {k: v.replace("{{token_id}}", token_id) for k, v in revoke.body.items()}
+                if revoke.body is not None
+                else None
+            )
+            try:
+                response = await self._http().request(
+                    revoke.method,
+                    revoke.url,
+                    headers=headers,
+                    json=body if body is not None else None,
+                    timeout=self.settings.upstream_timeout,
+                )
+            except httpx.HTTPError:
+                ok = False
+            else:
+                status = response.status_code
+                ok = status == revoke.expect_status
+        log = logger.info if ok else logger.warning
+        log(
+            "upstream_token_revoke",
+            extra={
+                "alias": entry.alias,
+                "auth_method": method.id,
+                "status": status,
+                "reason": reason,
+            },
+        )
+        await self.db.audit(
+            "upstream_token_revoked",
+            user_id=user_id,
+            alias=entry.alias,
+            details={"alias": entry.alias, "reason": reason, "outcome": "ok" if ok else "failed"},
+            ts=self.clock.now(),
+        )
+        return ok
+
+    async def _cleanup_failed(self, *, user_id: str, alias: str, stage: str) -> None:
+        """Неудача уборки: журнал и аудит без значений и без тел ответов (R-U15.3)."""
+        logger.warning("upstream_token_cleanup_failed", extra={"alias": alias, "stage": stage})
+        await self.db.audit(
+            "upstream_token_cleanup_failed",
+            user_id=user_id,
+            alias=alias,
+            details={"alias": alias, "stage": stage},
+            ts=self.clock.now(),
+        )
+
+    async def _list_issued_tokens(
+        self, method: AuthUserToken, access_token: str
+    ) -> list[Any] | None:
+        """Список ранее выпущенных токенов; ``None`` — прочитать не удалось (R-U15.3)."""
+        exchange = method.exchange
+        listing = exchange.list if exchange is not None else None
+        if listing is None:  # pragma: no cover - вызывается только при объявленном списке
+            return None
+        try:
+            headers = self._resolve_headers(listing.headers, access_token)
+        except HeaderValueError:
+            return None
+        status, payload = await self._upstream_json(
+            method=listing.method,
+            url=listing.url,
+            headers=headers,
+            body=None,
+            expect_status=listing.expect_status,
+        )
+        if status != listing.expect_status:
+            return None
+        return _items_of(payload, listing.items_field, object_is_item=False)
+
+    async def cleanup_issued_tokens(
+        self,
+        entry: ServerEntry,
+        method: AuthUserToken,
+        *,
+        user_id: str,
+        access_token: str,
+        issued_token_id: str,
+        previous_token_id: str | None = None,
     ) -> None:
-        """Сохранить пользовательский токен (R-U4): без refresh-токена и без срока действия."""
+        """Убрать прежние токены Hub'а после успешной записи нового (R-U15.3).
+
+        Исход уборки на результат подключения не влияет. Запросы списка и отзыва выполняются
+        новым постоянным токеном; чужие описания и чужие идентификаторы не трогаются.
+        """
+        exchange = method.exchange
+        if exchange is None:  # pragma: no cover - защитная проверка
+            return
+        handled = {issued_token_id}
+        if previous_token_id and previous_token_id not in handled:
+            handled.add(previous_token_id)
+            ok = await self.revoke_issued_token(
+                entry,
+                method,
+                token_id=previous_token_id,
+                credential=access_token,
+                user_id=user_id,
+                reason=REVOKE_REASON_RECONNECT,
+            )
+            if not ok:
+                await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage="revoke")
+        listing = exchange.list
+        if listing is None:
+            return
+        items = await self._list_issued_tokens(method, access_token)
+        if items is None:
+            await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage="list")
+            return
+        marker = self.issued_marker(exchange)
+        targets: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            description = item.get(listing.description_field)
+            # R-U15.2: только побайтовое равенство маркеру — без префиксов, подстрок и регистра.
+            if not isinstance(description, str) or description != marker:
+                continue
+            token_id = item.get(listing.id_field)
+            if not isinstance(token_id, str) or not token_id or token_id in handled:
+                continue
+            handled.add(token_id)
+            targets.append(token_id)
+        for token_id in targets[:CLEANUP_REVOKE_LIMIT]:
+            ok = await self.revoke_issued_token(
+                entry,
+                method,
+                token_id=token_id,
+                credential=access_token,
+                user_id=user_id,
+                reason=REVOKE_REASON_RECONNECT,
+            )
+            if not ok:
+                await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage="revoke")
+
+    async def read_submitted_expiry(
+        self, entry: ServerEntry, method: AuthUserToken, submitted_token: str
+    ) -> datetime | None:
+        """Верхняя граница срока годности присланного токена (R-U18); ``None`` — срока нет.
+
+        Любой неуспех оставляет ``None``: подключение остаётся ``connected``, дата не выдумывается.
+        """
+        expiry = method.expiry
+        if expiry is None:  # pragma: no cover - вызывается только при объявленном блоке
+            return None
+        try:
+            headers = self._resolve_headers(expiry.headers, submitted_token)
+        except HeaderValueError:
+            headers = {}
+            status: int | None = None
+            payload: Any = None
+        else:
+            status, payload = await self._upstream_json(
+                method=expiry.method,
+                url=expiry.url,
+                headers=headers,
+                body=None,
+                expect_status=expiry.expect_status,
+            )
+        items = (
+            _items_of(payload, expiry.items_field, object_is_item=True)
+            if status == expiry.expect_status
+            else None
+        )
+        if items is None:
+            logger.warning(
+                "user_token_expiry_unavailable",
+                extra={"alias": entry.alias, "auth_method": method.id, "status": status},
+            )
+            return None
+        now = self.clock.now()
+        if now.tzinfo is None:  # pragma: no cover - Clock отдаёт время с зоной
+            now = now.replace(tzinfo=UTC)
+        best: datetime | None = None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            moment = _parse_expiry_moment(item.get(expiry.expires_field), expiry.expires_unit)
+            # R-U18.2: годится только момент в будущем; 0, null и прошлое — «без срока».
+            if moment is None or moment <= now:
+                continue
+            if best is None or moment > best:
+                best = moment
+        if best is None:
+            logger.warning(
+                "user_token_expiry_unknown",
+                extra={"alias": entry.alias, "auth_method": method.id, "status": status},
+            )
+        return best
+
+    async def issued_token_id(self, connection: Connection | None) -> str | None:
+        """Идентификатор ранее выпущенного Hub'ом токена подключения (R-U15.3)."""
+        if connection is None:
+            return None
+        row = await self._read_token_row(connection.id)
+        return row.issued_token_id if row is not None else None
+
+    async def store_submitted_expiry(
+        self, connection: Connection, expires_at: datetime | None
+    ) -> None:
+        """Записать срок годности присланного токена (R-U18); ``None`` ничего не меняет."""
+        if expires_at is None:
+            return
+        await self.db.init()
+        async with self.db.session() as session, session.begin():
+            row = (
+                await session.execute(
+                    select(UpstreamToken)
+                    .where(UpstreamToken.connection_id == connection.id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:  # pragma: no cover - строка только что записана
+                return
+            row.submitted_expires_at = to_naive_utc(expires_at)
+        await self.invalidate_cache(connection.user_id, connection.alias)
+
+    async def save_user_token(
+        self,
+        connection: Connection,
+        token: str,
+        *,
+        token_type: str = "Bearer",
+        origin: TokenOrigin | None = None,
+    ) -> None:
+        """Сохранить пользовательский токен (R-U4): без refresh-токена и без срока действия.
+
+        ``origin`` описывает происхождение значения (R-U13.5, R-U14.3): выпущенный Hub'ом
+        постоянный токен либо присланный пользователем с кодом причины.
+        """
         await self.save_tokens(
             connection,
             UpstreamTokens(
@@ -346,6 +839,7 @@ class TokenBroker:
                 token_type=token_type,
                 scopes=[],
             ),
+            origin=origin or TokenOrigin(),
         )
 
     # --- подключения и кэш (R-O12, R-B3) ------------------------------------
@@ -472,9 +966,19 @@ class TokenBroker:
         return result
 
     async def save_tokens(
-        self, connection: Connection, tokens: UpstreamTokens, *, keep_refresh: str | None = None
+        self,
+        connection: Connection,
+        tokens: UpstreamTokens,
+        *,
+        keep_refresh: str | None = None,
+        origin: TokenOrigin | None = None,
     ) -> None:
-        """Сохранить токены системы в зашифрованном виде (R-B3, R-B6)."""
+        """Сохранить токены системы в зашифрованном виде (R-B3, R-B6).
+
+        ``origin`` задаётся только для пользовательского токена (R-U13.5): происхождение
+        перезаписывается целиком, поэтому прежний ``issued_token_id`` не переживает подключение,
+        в котором обмен не состоялся.
+        """
         await self.db.init()
         now = to_naive_utc(self.clock.now())
         expires_at = (
@@ -500,12 +1004,24 @@ class TokenBroker:
             row.updated_at = now
             row.refresh_failed_at = None
             row.last_error = None
+            if origin is not None:
+                row.token_origin = origin.origin
+                row.token_origin_reason = origin.reason
+                row.issued_token_id = origin.issued_token_id
+                row.submitted_expires_at = None
         await self.invalidate_cache(connection.user_id, connection.alias)
 
-    async def delete_tokens(self, connection: Connection) -> str | None:
-        """Удалить токены подключения; вернуть расшифрованный access-токен (для отзыва)."""
+    async def delete_tokens(
+        self, connection: Connection, *, entry: ServerEntry | None = None
+    ) -> str | None:
+        """Удалить токены подключения; вернуть расшифрованный access-токен (для отзыва).
+
+        R-U15.4: выпущенный Hub'ом постоянный токен отзывается **до** удаления строки — иначе
+        в учётной записи пользователя остаётся бесхозный долгоживущий доступ. Присланный токен
+        не отзывается никогда (R-U5, решение 66). Неудача отзыва отключению не мешает.
+        """
         await self.db.init()
-        async with self.db.session() as session, session.begin():
+        async with self.db.session() as session:
             row = (
                 await session.execute(
                     select(UpstreamToken)
@@ -516,7 +1032,29 @@ class TokenBroker:
             if row is None:
                 return None
             token = self.cipher.try_decrypt(row.access_token_enc)
-            await session.delete(row)
+            token_origin = row.token_origin
+            issued_token_id = row.issued_token_id
+        if entry is not None and token and token_origin == TOKEN_ORIGIN_ISSUED and issued_token_id:
+            method = entry.auth_method(connection.auth_method)
+            if isinstance(method, AuthUserToken) and method.exchange is not None:
+                await self.revoke_issued_token(
+                    entry,
+                    method,
+                    token_id=issued_token_id,
+                    credential=token,
+                    user_id=connection.user_id,
+                    reason=REVOKE_REASON_DISCONNECT,
+                )
+        async with self.db.session() as session, session.begin():
+            row = (
+                await session.execute(
+                    select(UpstreamToken)
+                    .where(UpstreamToken.connection_id == connection.id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)
         await self.invalidate_cache(connection.user_id, connection.alias)
         return token
 
@@ -781,19 +1319,26 @@ def token_valid(expires_at: datetime | None, now: datetime | None = None) -> boo
 
 
 __all__ = [
+    "CLEANUP_REVOKE_LIMIT",
     "CONN_CACHE_PREFIX",
+    "ISSUED_MARKER_MAX_LENGTH",
     "REASON_NO_REFRESH",
     "REASON_REFRESH_FAILED",
     "REASON_SCOPE_UPGRADE",
     "REASON_TOKEN_REJECTED",
     "REFRESH_LOCK_PREFIX",
+    "REVOKE_REASON_DISCONNECT",
+    "REVOKE_REASON_RECONNECT",
+    "REVOKE_REASON_UNUSABLE",
     "STATUS_CONNECTED",
     "STATUS_NEEDS_REAUTH",
     "STATUS_NOT_CONNECTED",
     "BrokerError",
+    "ExchangeOutcome",
     "NeedsReauth",
     "ServerUnconfigured",
     "TokenBroker",
+    "TokenOrigin",
     "TokenRefresher",
     "UpstreamAuthFailed",
     "UpstreamTokens",

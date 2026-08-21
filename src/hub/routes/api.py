@@ -15,11 +15,13 @@ from hub.broker import (
     STATUS_CONNECTED,
     STATUS_NEEDS_REAUTH,
     STATUS_NOT_CONNECTED,
+    ExchangeOutcome,
+    TokenOrigin,
     UpstreamUnavailable,
     UserTokenRejected,
 )
 from hub.catalog import AuthUserToken, ServerEntry
-from hub.db import Connection, to_iso
+from hub.db import Connection, UpstreamToken, to_iso
 from hub.errors import HubError
 from hub.permissions import (
     PRESETS,
@@ -78,10 +80,45 @@ async def api_catalog(request: Request, user: Annotated[AuthUser, Depends(authen
     return JSONResponse({"version": catalog.version, "servers": servers})
 
 
+async def _token_rows(request: Request, connections: list[Connection]) -> dict[int, UpstreamToken]:
+    """Строки ``upstream_tokens`` подключений: происхождение токена наружу (R-U16)."""
+    ids = [c.id for c in connections]
+    if not ids:
+        return {}
+    db = request.app.state.db
+    await db.init()
+    async with db.session() as session:
+        rows = (
+            await session.execute(
+                select(UpstreamToken).where(UpstreamToken.connection_id.in_(ids))
+            )
+        ).scalars()
+        return {row.connection_id: row for row in rows}
+
+
+def _origin_view(
+    entry: ServerEntry | None, connection: Connection, row: UpstreamToken | None
+) -> dict[str, Any]:
+    """R-U16: происхождение токена, причина и срок сессии; у OAuth-подключений — ``null``.
+
+    Ни значение токена, ни ``issued_token_id`` наружу не отдаются (R-U17.3).
+    """
+    if row is None or entry is None or not entry.uses_user_token(connection.auth_method):
+        return {"token_origin": None, "token_origin_reason": None, "session_expires_at": None}
+    return {
+        "token_origin": row.token_origin,
+        "token_origin_reason": row.token_origin_reason,
+        "session_expires_at": to_iso(row.submitted_expires_at),
+    }
+
+
 @router.get("/api/me/connections")
 async def api_me_connections(
     request: Request, user: Annotated[AuthUser, Depends(authenticate)]
 ) -> JSONResponse:
+    catalog = request.app.state.catalog
+    connections = await _user_connections(request, user.user_id)
+    rows = await _token_rows(request, connections)
     items = [
         {
             "alias": c.alias,
@@ -90,8 +127,9 @@ async def api_me_connections(
             "groups": list(c.groups or []),
             "created_at": to_iso(c.created_at),
             "updated_at": to_iso(c.updated_at),
+            **_origin_view(catalog.get(c.alias), c, rows.get(c.id)),
         }
-        for c in await _user_connections(request, user.user_id)
+        for c in connections
     ]
     return JSONResponse(items)
 
@@ -204,10 +242,12 @@ async def api_connect_token(
     request: Request,
     user: Annotated[AuthUser, Depends(authenticate_key_or_session)],
 ) -> JSONResponse:
-    """Подключение коннектора пользовательским токеном (R-U4).
+    """Подключение коннектора пользовательским токеном (R-U4, R-U13).
 
     Проверки, не требующие сети (404, 400, 409), выполняются до обращения к целевой системе;
-    само значение токена не попадает ни в журнал, ни в аудит, ни в ответ (R-U9).
+    само значение токена не попадает ни в журнал, ни в аудит, ни в ответ (R-U9). При объявленном
+    блоке ``exchange`` присланный токен меняется на постоянный; неудача обмена подключение не
+    отклоняет (R-U14) — сохраняется присланный токен с пометкой происхождения и причиной.
     """
     state = request.app.state
     entry = _facade_entry(request, alias, user)
@@ -216,6 +256,7 @@ async def api_connect_token(
     token = _validated_token(method, payload)
     preset, groups = _requested_permissions(entry, payload)
 
+    # Шаг 2 R-U13: проверка присланным токеном; её исход — единственный отказ подключения.
     try:
         account = await state.broker.verify_user_token(entry, method, token)
     except UserTokenRejected as exc:
@@ -225,25 +266,60 @@ async def api_connect_token(
             502, "upstream_unavailable", "Целевая система недоступна — повторите позже"
         ) from exc
 
+    # Шаги 3–4 R-U13: выпуск постоянного токена и его проверка тем же блоком verify.
+    if method.exchange is not None:
+        outcome: ExchangeOutcome = await state.broker.exchange_user_token(
+            entry, method, token, user_id=user.user_id, submitted_account=account
+        )
+    else:
+        outcome = ExchangeOutcome(token, TokenOrigin(), account)
+
+    # Шаг 5 R-U13: хранение. Прежний идентификатор читается до перезаписи строки (R-U15.3).
+    previous = await state.broker.load_connection(user.user_id, alias)
+    previous_token_id = await state.broker.issued_token_id(previous)
     connection = await state.broker.upsert_connection(
         user_id=user.user_id,
         alias=alias,
         status=STATUS_CONNECTED,
         preset=preset,
         groups=groups,
-        provider_account=account,
+        provider_account=outcome.account,
         auth_method=method.id,
         clear_reason=True,
     )
-    await state.broker.save_user_token(connection, token)
+    await state.broker.save_user_token(connection, outcome.token, origin=outcome.origin)
     await state.kv.delete_prefix(f"{TOOLS_CACHE_PREFIX}{alias}:")
     await state.db.audit(
         "connection_connected",
         user_id=user.user_id,
         alias=alias,
-        details={"auth_method": method.id, "preset": preset, "groups": groups},
+        details={
+            "auth_method": method.id,
+            "preset": preset,
+            "groups": groups,
+            "token_origin": outcome.origin.origin,
+            "token_origin_reason": outcome.origin.reason,
+        },
         ts=state.clock.now(),
     )
+
+    session_expires_at = None
+    if outcome.origin.issued and outcome.origin.issued_token_id:
+        # Шаг 6 R-U13: уборка прежних выпущенных токенов; её исход на подключение не влияет.
+        await state.broker.cleanup_issued_tokens(
+            entry,
+            method,
+            user_id=user.user_id,
+            access_token=outcome.token,
+            issued_token_id=outcome.origin.issued_token_id,
+            previous_token_id=previous_token_id,
+        )
+    elif method.expiry is not None:
+        # Шаг 7 R-U13: срок годности присланного токена; неудача оставляет ``null`` (R-U18.4).
+        expires_at = await state.broker.read_submitted_expiry(entry, method, outcome.token)
+        await state.broker.store_submitted_expiry(connection, expires_at)
+        session_expires_at = to_iso(expires_at)
+
     return JSONResponse(
         {
             "alias": alias,
@@ -253,6 +329,9 @@ async def api_connect_token(
             "groups": groups,
             "account": connection.provider_account,
             "updated_at": to_iso(connection.updated_at),
+            "token_origin": outcome.origin.origin,
+            "token_origin_reason": outcome.origin.reason,
+            "session_expires_at": session_expires_at,
         }
     )
 
@@ -303,13 +382,17 @@ async def api_disconnect(
     request: Request,
     user: Annotated[AuthUser, Depends(authenticate_key_or_session)],
 ) -> JSONResponse:
-    """Отключение: отзыв токенов системы и всех клиентских токенов Hub (R-B8)."""
+    """Отключение: отзыв токенов системы и всех клиентских токенов Hub (R-B8).
+
+    R-U15.4: выпущенный Hub'ом постоянный токен отзывается до удаления строки; присланный
+    токен не отзывается никогда, OAuth-``revoke_url`` для ``user_token`` не вызывается.
+    """
     state = request.app.state
     entry = _facade_entry(request, alias, user)
     connection = await state.broker.load_connection(user.user_id, alias)
     if connection is None:
         raise HubError(404, "not_found", "Подключение не найдено")
-    access_token = await state.broker.delete_tokens(connection)
+    access_token = await state.broker.delete_tokens(connection, entry=entry)
     if access_token:
         # R-U5: для user_token revoke_url не вызывается никогда (решение 66).
         await state.broker.revoke(entry, access_token, auth_method=connection.auth_method)
