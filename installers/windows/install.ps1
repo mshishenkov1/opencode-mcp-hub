@@ -649,6 +649,14 @@ function Invoke-CaInstall {
     if (-not (Test-Path -LiteralPath $Layout.ConfigDir -PathType Container)) {
         New-Item -ItemType Directory -Path $Layout.ConfigDir -Force | Out-Null
     }
+    # ca.install_name спека допускает многосегментным (N5-P3), Test-PackagePath такое значение
+    # принимает — значит недостающие промежуточные каталоги создаёт установщик. Иначе Copy-Item
+    # обрывает установку английской системной диагностикой вместо русского сообщения (N5-I1).
+    # Паритет с install-posix.sh: пакет, принятый одной платформой, должен ставиться и на другой.
+    $caParent = Split-Path -Parent $Layout.CaTarget
+    if (-not [string]::IsNullOrEmpty($caParent) -and -not (Test-Path -LiteralPath $caParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $caParent -Force | Out-Null
+    }
     if (Test-Path -LiteralPath $Layout.CaTarget -PathType Leaf) {
         if ((Get-FileSha256Hash -Path $Layout.CaTarget) -eq $Layout.CaSha) {
             Write-Say $script:MsgCaSame

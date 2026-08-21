@@ -1401,8 +1401,17 @@ installed_version() {
 # Каталог конфига и CA-файл — пользовательская часть: при --system они создаются в доме
 # исходного пользователя и принадлежат ему, а не root (N5-I14). Права прежние: 0755 и 0644.
 install_ca() {
-  local current
+  local current ca_parent
   make_user_dir "$config_dir"
+  # ca.install_name спека допускает многосегментным (N5-P3: разделитель "/" разрешён), а
+  # is_safe_pkg_path такое значение принимает — значит промежуточные каталоги должен создать
+  # установщик. Иначе cp обрывал установку кодом 1 и английской системной диагностикой
+  # "No such file or directory" вместо русского сообщения (N5-I1). Каталоги создаются тем же
+  # порядком, что и каталог конфига, то есть с владельцем исходного пользователя (N5-I14).
+  ca_parent=$(dirname "$ca_target")
+  if [ "$ca_parent" != "$config_dir" ]; then
+    make_user_dir "$ca_parent"
+  fi
   if [ -f "$ca_target" ]; then
     current=$(to_lower "$(sha256_of "$ca_target")")
     if [ "$current" = "$MF_ca_sha" ]; then
