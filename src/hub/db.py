@@ -22,6 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
+# R-U13/R-U14: происхождение сохранённого токена целевой системы.
+TOKEN_ORIGIN_ISSUED = "issued"
+TOKEN_ORIGIN_SUBMITTED = "submitted"
+# R-U14.1: закрытый набор причин, по которым обмен не состоялся.
+TOKEN_ORIGIN_REASON_POLICY_DENIED = "policy_denied"
+TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+TOKEN_ORIGIN_REASON_TOKEN_UNUSABLE = "token_unusable"
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
@@ -184,6 +192,17 @@ class UpstreamToken(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     refresh_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # R-U17.4: происхождение сохранённого токена и следы обмена (ревизия 4).
+    # ``issued_token_id`` — идентификатор выпущенного Hub'ом токена; не учётные данные,
+    # хранится открытым, но наружу не отдаётся никогда.
+    issued_token_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    token_origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=TOKEN_ORIGIN_SUBMITTED,
+        server_default=TOKEN_ORIGIN_SUBMITTED,
+    )
+    token_origin_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # R-U18: верхняя граница срока годности присланного токена (только для origin=submitted).
+    submitted_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class WebSession(Base):
@@ -333,6 +352,11 @@ async def find_key_owner(session: AsyncSession, key_sha256: str) -> tuple[ApiKey
 
 
 __all__ = [
+    "TOKEN_ORIGIN_ISSUED",
+    "TOKEN_ORIGIN_REASON_POLICY_DENIED",
+    "TOKEN_ORIGIN_REASON_TOKEN_UNUSABLE",
+    "TOKEN_ORIGIN_REASON_UPSTREAM_UNAVAILABLE",
+    "TOKEN_ORIGIN_SUBMITTED",
     "ApiKey",
     "AuditLog",
     "Base",

@@ -238,12 +238,71 @@ class TokenVerify(_Strict):
         return self
 
 
+class TokenExchangeRevoke(_Strict):
+    """Запрос отзыва выпущенного Hub'ом постоянного токена (R-U12).
+
+    Обязателен при наличии ``exchange``: Hub не выпускает того, что не умеет отозвать.
+    """
+
+    url: str = Field(min_length=1)
+    method: Literal["POST", "DELETE"] = "POST"
+    headers: dict[str, HeaderValue] = Field(min_length=1)
+    body: dict[str, str] | None = None
+    expect_status: int = 200
+
+
+class TokenExchangeList(_Strict):
+    """Запрос списка ранее выпущенных токенов — для уборки «сирот» (R-U12, R-U15.3)."""
+
+    url: str = Field(min_length=1)
+    method: Literal["GET", "POST"] = "GET"
+    headers: dict[str, HeaderValue] = Field(min_length=1)
+    expect_status: int = 200
+    items_field: str | None = None
+    id_field: str = Field(min_length=1)
+    description_field: str = Field(min_length=1)
+
+
+class TokenExchange(_Strict):
+    """Обмен присланного пользователем токена на постоянный личный токен системы (R-U12)."""
+
+    url: str = Field(min_length=1)
+    method: Literal["POST", "GET", "PUT"] = "POST"
+    headers: dict[str, HeaderValue] = Field(min_length=1)
+    body: dict[str, str] | None = None
+    expect_status: int = 200
+    token_field: str = Field(min_length=1)
+    token_id_field: str = Field(min_length=1)
+    # R-U15.1: постоянная часть маркера «свой токен»; длина ограничена, чтобы маркер был
+    # сопоставим побайтово и после усечения по 255 символам.
+    description: str = Field(min_length=1, max_length=100)
+    revoke: TokenExchangeRevoke
+    list: TokenExchangeList | None = None
+
+
+class TokenExpiry(_Strict):
+    """Срок годности **присланного** токена (R-U18): сиблинг ``verify`` и ``exchange``."""
+
+    url: str = Field(min_length=1)
+    method: Literal["GET", "POST"] = "GET"
+    headers: dict[str, HeaderValue] = Field(min_length=1)
+    expect_status: int = 200
+    items_field: str | None = None
+    expires_field: str = Field(min_length=1)
+    expires_unit: Literal["ms", "s", "iso8601"] = "ms"
+
+
 class AuthUserToken(_AuthMethodCommon):
-    """Учётные данные вводит сам пользователь (R-U1, R-U2, R-U3)."""
+    """Учётные данные вводит сам пользователь (R-U1, R-U2, R-U3, R-U12, R-U18)."""
 
     type: Literal["user_token"]
     field: TokenField
     verify: TokenVerify
+    # R-U12: необязательный обмен присланного токена на постоянный; отсутствие блока —
+    # прежнее поведение целиком.
+    exchange: TokenExchange | None = None
+    # R-U18: необязательное чтение срока годности присланного токена.
+    expiry: TokenExpiry | None = None
 
 
 AuthMethod = Annotated[AuthOAuth2 | AuthUserToken, Field(discriminator="type")]
@@ -310,26 +369,40 @@ class ServerModel(_Strict):
 
     @model_validator(mode="after")
     def _check_header_templates(self) -> ServerModel:
-        """R-P2/R-C1/R-U3: в заголовках допустим только шаблон ``{{access_token}}``."""
-        headers_by_path: list[tuple[str, dict[str, Any]]] = [
-            (field_name, getattr(self, field_name) or {})
-            for field_name in ("credential_headers", "static_headers")
-        ]
+        """R-P2/R-C1/R-U3/R-U12/R-U18: какие шаблоны допустимы в заголовках и телах запросов.
+
+        В заголовках — только ``{{access_token}}``; в теле запроса выпуска —
+        только ``{{token_description}}``, в теле запроса отзыва — только ``{{token_id}}``.
+        """
+        for field_name in ("credential_headers", "static_headers"):
+            _check_templates(getattr(self, field_name) or {}, (field_name,), "access_token")
         for j, method in enumerate(self.auth_methods or []):
-            if isinstance(method, AuthUserToken):
-                headers_by_path.append(
-                    (f"auth_methods[{j}].verify.headers", dict(method.verify.headers))
+            if not isinstance(method, AuthUserToken):
+                continue
+            base: tuple[Any, ...] = ("auth_methods", j)
+            _check_templates(method.verify.headers, (*base, "verify", "headers"), "access_token")
+            exchange = method.exchange
+            if exchange is not None:
+                _check_templates(exchange.headers, (*base, "exchange", "headers"), "access_token")
+                _check_templates(
+                    exchange.body or {}, (*base, "exchange", "body"), "token_description"
                 )
-        for path, headers in headers_by_path:
-            for name, value in headers.items():
-                if not isinstance(value, str):
-                    continue
-                for found in TEMPLATE_RE.findall(value):
-                    if found.strip() != "access_token":
-                        raise ValueError(
-                            f"{path}.{name}: недопустимый шаблон {{{{{found}}}}} "
-                            "(поддерживается только {{access_token}})"
-                        )
+                _check_templates(
+                    exchange.revoke.headers,
+                    (*base, "exchange", "revoke", "headers"),
+                    "access_token",
+                )
+                _check_templates(
+                    exchange.revoke.body or {}, (*base, "exchange", "revoke", "body"), "token_id"
+                )
+                if exchange.list is not None:
+                    _check_templates(
+                        exchange.list.headers,
+                        (*base, "exchange", "list", "headers"),
+                        "access_token",
+                    )
+            if method.expiry is not None:
+                _check_templates(method.expiry.headers, (*base, "expiry", "headers"), "access_token")
         return self
 
     @model_validator(mode="after")
@@ -378,6 +451,19 @@ class _PathError(ValueError):
         super().__init__(text)
         self.parts = parts
         self.text = text
+
+
+def _check_templates(values: Mapping[str, Any], parts: tuple[Any, ...], allowed: str) -> None:
+    """В значениях ``имя → строка`` допустим ровно один шаблон ``{{<allowed>}}`` (R-C1)."""
+    for name, value in values.items():
+        if not isinstance(value, str):
+            continue
+        for found in TEMPLATE_RE.findall(value):
+            if found.strip() != allowed:
+                raise _PathError(
+                    (*parts, name),
+                    f"недопустимый шаблон {{{{{found}}}}} (поддерживается только {{{{{allowed}}}}})",
+                )
 
 
 @dataclass(frozen=True)
@@ -443,7 +529,9 @@ class ServerEntry:
         return (available or methods[0]).type
 
     def public_auth_methods(self) -> list[dict[str, Any]]:
-        """R-U8: способы подключения наружу — без ``verify``, client_id/secret, scopes и URL OAuth."""
+        """R-U8/R-U16: способы подключения наружу — без ``verify``, ``exchange``, ``expiry``,
+        client_id/secret, scopes и URL OAuth; наружу идёт только признак выпуска постоянного
+        токена."""
         result: list[dict[str, Any]] = []
         for method in self.auth_methods:
             view: dict[str, Any] = {
@@ -452,6 +540,10 @@ class ServerEntry:
                 "type": method.type,
                 "available": method.available,
                 "unavailable_reason": method.unavailable_reason,
+                # R-U16: у способа объявлен обмен — Hub получит постоянный токен.
+                "issues_permanent_token": (
+                    isinstance(method, AuthUserToken) and method.exchange is not None
+                ),
             }
             if isinstance(method, AuthUserToken):
                 f = method.field
@@ -642,7 +734,15 @@ def _env_ref_allowed(rel: tuple[Any, ...]) -> bool:
         tail = rel[2:]
         if tail == ("client_secret",):
             return True
-        if len(tail) == 3 and tail[0] == "verify" and tail[1] == "headers":
+        # R-U3/R-U12/R-U18: заголовки проверки, обмена, списка, отзыва и запроса срока годности.
+        if len(tail) == 3 and tail[0] in ("verify", "exchange", "expiry") and tail[1] == "headers":
+            return True
+        if (
+            len(tail) == 4
+            and tail[0] == "exchange"
+            and tail[1] in ("revoke", "list")
+            and tail[2] == "headers"
+        ):
             return True
     return False
 
@@ -703,6 +803,7 @@ _TYPE_MESSAGES = {
     "extra_forbidden": "неизвестное поле",
     "string_pattern_mismatch": "значение не соответствует формату",
     "string_too_short": "значение не может быть пустым",
+    "string_too_long": "значение длиннее допустимого",
     "too_short": "список/объект не может быть пустым",
     "literal_error": "недопустимое значение",
     "enum": "недопустимое значение",
@@ -862,6 +963,10 @@ __all__ = [
     "Secret",
     "ServerEntry",
     "ServerModel",
+    "TokenExchange",
+    "TokenExchangeList",
+    "TokenExchangeRevoke",
+    "TokenExpiry",
     "TokenField",
     "TokenVerify",
     "ToolMasks",
