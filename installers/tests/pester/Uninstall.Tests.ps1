@@ -32,13 +32,17 @@ BeforeAll {
     }
 
     # Пакет с desktop-артефактом: app_name и silent_args задаются параметрами.
+    # SupportsShouldProcess — требование PSScriptAnalyzer (PSUseShouldProcessForStateChangingFunctions)
+    # для функций с глаголом New-; вызов ShouldProcess обязателен парным правилом PSShouldProcess.
     function New-DesktopPackage {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
         param(
             [string]$Root,
             [string]$AppName = 'OpenCode',
             [string[]]$SilentArgs = @('/S'),
             [string]$Version = '1.17.9-magnit.1'
         )
+        if (-not $PSCmdlet.ShouldProcess($Root, 'Собрать фикстурный пакет с desktop-артефактом')) { return $Root }
         foreach ($sub in @('common', 'bin', 'certs', 'desktop')) {
             $null = New-Item -ItemType Directory -Path (Join-Path $Root $sub) -Force
         }

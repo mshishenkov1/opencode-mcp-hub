@@ -23,13 +23,20 @@ BeforeAll {
 
     # Подменённый источник записей реестра: корень Uninstall -> массив записей.
     #
-    # Область видимости — ГЛОБАЛЬНАЯ намеренно. В Pester 5 тело Mock исполняется не в области
-    # блока It, поэтому присваивание $global:OmFakeRoots внутри It до мока не доходит: мок читает
-    # прежнее (пустое) значение, Get-DesktopUninstallEntry не находит ни одной записи, и тесты,
-    # ожидающие СОВПАДЕНИЯ, краснеют, а ожидающие $null проходят ложно-зелёными.
-    $global:OmFakeRoots = @{}
+    # Область видимости — $script:, то есть область файла набора. Она общая для BeforeAll,
+    # BeforeEach и It (на этом же держатся $script:PkgRoot/$script:HomeRoot в Install.Tests.ps1),
+    # поэтому присваивание внутри It мок видит. Глобальная область здесь не нужна и запрещена
+    # правилом PSAvoidGlobalVars.
+    #
+    # Прежняя редакция считала причиной ложных результатов именно область видимости. Причина была
+    # другая (см. приведение ключа в моках ниже), и переход на $global: её не устранил.
+    $script:OmFakeRoots = @{}
 
+    # SupportsShouldProcess — требование PSScriptAnalyzer (PSUseShouldProcessForStateChangingFunctions)
+    # для функций с глаголом New-. Состояния системы функция не меняет: объект строится в памяти.
+    # Вызов ShouldProcess всё равно обязателен — иначе срабатывает парное правило PSShouldProcess.
     function New-RegEntry {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
         param(
             [string]$Key,
             [string]$DisplayName,
@@ -37,6 +44,7 @@ BeforeAll {
             [string]$QuietUninstallString = '',
             [string]$InstallLocation = ''
         )
+        if (-not $PSCmdlet.ShouldProcess($Key, 'Построить запись Uninstall')) { return $null }
         return [pscustomobject]@{
             PSPath               = $Key
             DisplayName          = $DisplayName
@@ -48,7 +56,9 @@ BeforeAll {
 
     # Типовое содержимое ветки Uninstall: чужие программы плюс, при желании, наша запись.
     function New-FakeRegistry {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
         param([switch]$WithOpenCode)
+        if (-not $PSCmdlet.ShouldProcess('HKCU/HKLM Uninstall', 'Построить содержимое ветки')) { return @{} }
         $hkcu = @(
             (New-RegEntry -Key 'HKCU:\U\7-Zip' -DisplayName '7-Zip 23.01' `
                 -UninstallString 'C:\Program Files\7-Zip\Uninstall.exe' -InstallLocation 'C:\Program Files\7-Zip'),
@@ -71,7 +81,9 @@ BeforeAll {
 
     # Манифест-объект с одним desktop-артефактом (Get-DesktopUninstallEntry больше ничего не читает).
     function New-ManifestObject {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
         param([string]$AppName, [switch]$NoDesktop)
+        if (-not $PSCmdlet.ShouldProcess($AppName, 'Построить объект манифеста')) { return $null }
         if ($NoDesktop) {
             return [pscustomobject]@{ artifacts = @([pscustomobject]@{ kind = 'cli' }) }
         }
@@ -97,12 +109,14 @@ BeforeAll {
 
     # Пакет с desktop-артефактом заданного типа и именем приложения (для Read-Manifest).
     function New-ManifestPackage {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
         param(
             [string]$Root,
             [string]$InstallerType = 'dmg',
             [string]$AppName = 'OpenCode Magnit.app',
             [switch]$NoAppName
         )
+        if (-not $PSCmdlet.ShouldProcess($Root, 'Собрать фикстурный пакет')) { return $Root }
         foreach ($sub in @('common', 'bin', 'certs', 'desktop')) {
             $null = New-Item -ItemType Directory -Path (Join-Path $Root $sub) -Force
         }
@@ -175,19 +189,27 @@ BeforeAll {
 
 Describe 'Сопоставление записи Uninstall с app_name (N5-R1, N5-P4)' -Tag 'ci' {
     BeforeEach {
-        $global:OmFakeRoots = New-FakeRegistry
+        $script:OmFakeRoots = New-FakeRegistry
         Mock Test-IsWindowsHost { return $true }
         Mock Test-Path { return $true }
+        # Ключ хеш-таблицы приводится к ОДНОЙ строке. Причина: у Get-ChildItem, Get-ItemProperty и
+        # Test-Path параметр -LiteralPath объявлен как [string[]], а Pester строит мок по
+        # метаданным настоящей команды — значит в теле мока $LiteralPath приходит МАССИВОМ.
+        # $hash.ContainsKey(<массив>) не совпадает ни с одним строковым ключом и промахивается
+        # МОЛЧА: подменённый реестр выглядит пустым, Get-DesktopUninstallEntry всегда возвращает
+        # $null, тесты «совпадение найдено» краснеют, а «совпадения нет» проходят ложно-зелёными.
         Mock Get-ChildItem {
-            if ($global:OmFakeRoots.ContainsKey($LiteralPath)) {
-                return $global:OmFakeRoots[$LiteralPath]
+            $key = [string](@($LiteralPath)[0])
+            if ($script:OmFakeRoots.ContainsKey($key)) {
+                return $script:OmFakeRoots[$key]
             }
             return @()
         }
         Mock Get-ItemProperty {
-            foreach ($root in @($global:OmFakeRoots.Keys)) {
-                foreach ($item in @($global:OmFakeRoots[$root])) {
-                    if ($item.PSPath -eq $LiteralPath) { return $item }
+            $key = [string](@($LiteralPath)[0])
+            foreach ($root in @($script:OmFakeRoots.Keys)) {
+                foreach ($item in @($script:OmFakeRoots[$root])) {
+                    if ($item.PSPath -eq $key) { return $item }
                 }
             }
             return $null
@@ -195,7 +217,20 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     }
 
     AfterEach {
-        Remove-Variable -Name 'OmFakeRoots' -Scope Global -ErrorAction SilentlyContinue
+        $script:OmFakeRoots = @{}
+    }
+
+    It 'самоконтроль фикстуры: подменённый источник записей доходит до вызывающего кода' {
+        # Проверяется сама подмена, а не продукт: без этого теста промах по ключу хеш-таблицы
+        # снова выглядел бы как «записи в реестре нет» — то есть как штатный результат.
+        $script:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        $root = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+        # Все три подмены, от которых зависят тесты ниже, проверяются по отдельности: иначе
+        # отказ любой из них выглядит одинаково — «записи в реестре нет».
+        Test-IsWindowsHost | Should -BeTrue -Because 'подмена проверки платформы действует'
+        Test-Path -LiteralPath $root | Should -BeTrue -Because 'подмена наличия ветки действует'
+        @(Get-ChildItem -LiteralPath $root).Count | Should -Be 2 -Because 'мок отдаёт обе записи ветки HKLM'
+        (Get-ItemProperty -LiteralPath 'HKLM:\U\OpenCode').DisplayName | Should -Be 'OpenCode Magnit'
     }
 
     It 'AC-139: app_name="*" не совпадает ни с одной чужой записью Uninstall' {
@@ -211,7 +246,7 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     }
 
     It 'AC-139: подстановочные символы не совпадают и когда наша запись в реестре есть' {
-        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        $script:OmFakeRoots = New-FakeRegistry -WithOpenCode
         # Контроль ДО перебора: подменённый источник записей действительно доходит до функции.
         # Без него весь перебор был бы ложно-зелёным на пустом реестре.
         (Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode')) |
@@ -223,7 +258,7 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     }
 
     It 'AC-139: app_name="OpenCode" совпадает со своей записью (негативный контроль)' {
-        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        $script:OmFakeRoots = New-FakeRegistry -WithOpenCode
         $entry = Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode')
         $entry | Should -Not -BeNullOrEmpty
         $entry.DisplayName | Should -Be 'OpenCode Magnit'
@@ -232,7 +267,7 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     }
 
     It 'AC-139, AC-154: суффикс .app отбрасывается — app_name="OpenCode Magnit.app" находит запись "OpenCode Magnit"' {
-        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        $script:OmFakeRoots = New-FakeRegistry -WithOpenCode
         $entry = Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode Magnit.app')
         $entry | Should -Not -BeNullOrEmpty -Because 'пробел в штатном имени сравнение не ломает'
         $entry.DisplayName | Should -Be 'OpenCode Magnit'
@@ -245,12 +280,12 @@ Describe 'Сопоставление записи Uninstall с app_name (N5-R1, 
     It 'AC-139: без desktop-артефакта и вне Windows возвращается $null' {
         Get-DesktopUninstallEntry -Manifest (New-ManifestObject -NoDesktop) | Should -BeNullOrEmpty
         Mock Test-IsWindowsHost { return $false }
-        $global:OmFakeRoots = New-FakeRegistry -WithOpenCode
+        $script:OmFakeRoots = New-FakeRegistry -WithOpenCode
         Get-DesktopUninstallEntry -Manifest (New-ManifestObject -AppName 'OpenCode') | Should -BeNullOrEmpty
     }
 
     It 'AC-139: пустой InstallLocation → DisplayTarget равен DisplayName' {
-        $global:OmFakeRoots = @{
+        $script:OmFakeRoots = @{
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' = @(
                 (New-RegEntry -Key 'HKCU:\U\OC' -DisplayName 'OpenCode Magnit' `
                         -UninstallString '"C:\Apps\OpenCode\Uninstall.exe"')

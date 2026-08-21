@@ -20,7 +20,10 @@ BeforeAll {
     # Dot-source: исполняемый вход не срабатывает (N5-T2).
     . $script:InstallScript
 
+    # SupportsShouldProcess — требование PSScriptAnalyzer (PSUseShouldProcessForStateChangingFunctions)
+    # для функций с глаголом New-; вызов ShouldProcess обязателен парным правилом PSShouldProcess.
     function New-FixturePackage {
+        [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
         param(
             [string]$Root,
             [switch]$WithDesktop,
@@ -31,6 +34,7 @@ BeforeAll {
             # по литералу штатного имени после его смены переставала бы срабатывать молча.
             [string]$CaInstallName = 'tander-ca-bundle.pem'
         )
+        if (-not $PSCmdlet.ShouldProcess($Root, 'Собрать фикстурный пакет')) { return $Root }
         $null = New-Item -ItemType Directory -Path (Join-Path $Root 'common') -Force
         $null = New-Item -ItemType Directory -Path (Join-Path $Root 'bin') -Force
         $null = New-Item -ItemType Directory -Path (Join-Path $Root 'certs') -Force
