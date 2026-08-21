@@ -1005,3 +1005,101 @@ criteria:
     given: "beta-сервер со способами corp_oauth (available: false, client_id '${TAG_OAUTH_CLIENT_ID}') и session_token (type user_token); переменная TAG_OAUTH_CLIENT_ID не задана, upstream_url задан"
     when: "create_app() и GET /api/catalog (Bearer)"
     then: "сервер не помечен unconfigured и виден в /api/catalog, подключение способом session_token работает; при этом незаданная переменная в любом другом поле того же beta-сервера (например в upstream_url) по-прежнему делает его unconfigured и скрывает из каталога"
+  # --- Ревизия 3.1: проверка токена требует названного аккаунта (R-U3.1, BUG-I4-009) ---
+  - id: AC-195
+    text: "Анонимный успешный ответ целевой системы при require_account: true отклоняет токен (R-U3.1, R-U4)"
+    given: "способ user_token с verify {url, headers {Authorization: 'Bearer {{access_token}}'}, account_field: username, require_account: true}; мок целевой системы на любой токен отвечает 200 и телом {'type': 'anonymous', 'displayName': 'Anonymous'} без поля username; подключения у пользователя нет"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'nonsense-token-value'}"
+    then: "400 {error: 'token_rejected'}; в БД нет строки upstream_tokens для этого подключения и статус подключения не стал 'connected'; в кэше conn:<user_id>:<alias> записи с этим токеном нет; GET /api/me/connections не показывает alias подключённым"
+  - id: AC-196
+    text: "Любое неназванное значение account_field при require_account: true — отказ, а не пустой account (R-U3.1)"
+    given: "способ user_token с account_field: username и require_account: true; мок целевой системы отвечает 200 и по очереди телами: {} (поля нет), {'username': null}, {'username': ''}, {'username': '   '}, {'username': 12345}, {'username': true}, {'username': {'name': 'x'}}, {'username': ['x']}"
+    when: "для каждого тела выполняется POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-x'}"
+    then: "во всех восьми прогонах 400 {error: 'token_rejected'} (не 200 и не 502); ни в одном прогоне строка upstream_tokens не появилась"
+  - id: AC-197
+    text: "Без require_account поведение прежнее: анонимный успешный ответ создаёт подключение с пустым account (R-U3.1, совместимость)"
+    given: "тот же способ user_token с account_field: username, но без поля require_account в каталоге (и в отдельном прогоне — с require_account: false); мок целевой системы отвечает 200 и телом {'type': 'anonymous', 'displayName': 'Anonymous'} без username"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'nonsense-token-value'}"
+    then: "в обоих прогонах 200 со status 'connected' и account == null, строка upstream_tokens создана — поведение AC-173 не изменилось; каталог без поля require_account валиден и загружается"
+  - id: AC-198
+    text: "Верный токен с названным аккаунтом принимается и при включённом требовании (R-U3.1)"
+    given: "способ user_token с account_field: username и require_account: true; мок целевой системы отвечает 200 и телом {'type': 'known', 'username': 'm.ivanov', 'displayName': 'Иванов'}"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-1'}"
+    then: "мок получил проверочный запрос с заголовком Authorization: 'Bearer usr-tok-1'; ответ 200 со status 'connected' и account == 'm.ivanov'; в БД connections.provider_account == 'm.ivanov' и есть строка upstream_tokens — поведение AC-173 сохранено"
+  - id: AC-199
+    text: "При включённом требовании отказ и недоступность различаются и не разрушают прежнее подключение (R-U3.1)"
+    given: "пользователь уже подключён токеном 'usr-tok-1'; способ user_token с account_field: username и require_account: true; мок целевой системы по очереди отвечает: 200 с телом без username; 200 с телом 'not a json'; 200 с телом [1, 2] (не объект); 500; сетевой ошибкой; таймаутом"
+    when: "для каждого случая выполняется POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-2'}"
+    then: "первый случай — 400 {error: 'token_rejected'}; остальные пять — 502 {error: 'upstream_unavailable'}; во всех шести случаях подключение осталось 'connected', в БД сохранён прежний токен, и следующий вызов /mcp/{alias} уходит на upstream с 'usr-tok-1'"
+  - id: AC-200
+    text: "Схема каталога: require_account требует account_field и должен быть булевым (R-U3.1, R-C1)"
+    given: "каталоги со способом user_token, у которого verify содержит: (а) require_account: true без account_field; (б) require_account: 'yes'; (в) require_account: true вместе с account_field: username; (г) ни того ни другого"
+    when: "загружается каждый каталог"
+    then: "(а) и (б) — ошибка схемы, сообщение содержит путь servers[0].auth_methods[<j>].verify.require_account; (в) и (г) загружаются успешно, причём в (г) требование выключено (значение по умолчанию false)"
+  - id: AC-201
+    text: "OAuth-подключение не создаётся по успешному ответу без access_token (R-B2, тот же класс, BUG-I4-009)"
+    given: "сервер со способом oauth2; целевая система на обмен кода отвечает 200 и телом {'type': 'anonymous', 'displayName': 'Anonymous'} без access_token (в отдельном прогоне — 200 с телом 'not a json')"
+    when: "проходится флоу подключения до GET /oauth/callback/{alias} с валидным state и code"
+    then: "в обоих прогонах ответ 502 upstream_auth_failed; подключение не создано, строки upstream_tokens нет, статус не стал 'connected'; при этом успешный обмен с access_token, но без account_id/user_id/username, по-прежнему создаёт подключение со status 'connected' и account == null"
+  - id: AC-202
+    text: "Отказ по неназванному аккаунту не выносит тело ответа целевой системы в журнал (R-U3.1, R-U9)"
+    given: "включён перехват логов всех уровней; способ user_token с account_field: username и require_account: true; мок отвечает 200 и телом {'type': 'anonymous', 'displayName': 'Anonymous', 'userKey': 'SECRET-BODY-MARKER'}; токен 'usr-tok-SECRET-3'"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'usr-tok-SECRET-3'}"
+    then: "400 {error: 'token_rejected'}; ни одна запись журнала не содержит 'SECRET-BODY-MARKER' и 'usr-tok-SECRET-3' (и ни одного его фрагмента длиной 8 и более символов); при этом есть запись с alias, идентификатором способа, HTTP-кодом 200 и признаком того, что аккаунт не назван"
+
+  # --- Ревизия 3.2: scope как множество значений (R-O5.1, R-O5.2, BUG-I3-002) ---
+  - id: AC-203
+    text: "Запрос обеих объявленных областей проходит авторизацию и даёт подключение с пресетом readonly (R-O5.1, R-O5.2)"
+    given: "каталог с facade 'tag'; зарегистрирован клиент с redirect 'http://127.0.0.1:19876/cb'; есть веб-сессия; подключения к 'tag' нет; HUB_CONSENT='always'; мок целевой системы"
+    when: "GET /oauth/authorize со scope='tag:readonly tag:readwrite' и resource='<HUB>/mcp/tag'; флоу проходится до конца (OAuth целевой системы, затем «Разрешить» на экране прав без изменения переключателя), полученный код обменивается на токен"
+    then: "ни один шаг не даёт редирект с error='invalid_scope'; экран прав показан и содержит строку 'tag:readonly tag:readwrite' и пояснение о том, что уровень доступа выбирает пользователь; переключатель предвыбран на 'Только чтение'; в целевую систему ушёл authorize со scope пресета readonly (значения scopes.readonly каталога, ни одного значения из scopes.readwrite); ответ /oauth/token — 200 с scope == 'tag:readonly'; в connections.preset == 'readonly'"
+  - id: AC-204
+    text: "Порядок, повторы и лишние пробелы в scope не влияют на результат, для всех facade-коннекторов (R-O5.1)"
+    given: "каталог с facade 'tag', 'jira', 'confluence'; зарегистрированный клиент; веб-сессия"
+    when: "для каждого alias выполняется GET /oauth/authorize со scope: '<alias>:readonly <alias>:readwrite'; '<alias>:readwrite <alias>:readonly'; '<alias>:readonly  <alias>:readwrite' (два пробела); '  <alias>:readonly <alias>:readwrite  ' (ведущие и завершающие пробелы); '<alias>:readonly <alias>:readonly <alias>:readwrite' (дубль)"
+    then: "все 15 запросов проходят валидацию (ни одного редиректа с error) и доходят до подключения или экрана прав; во всех случаях запрошенный набор показан на экране прав и сохранён одинаково — в канонической форме '<alias>:readonly <alias>:readwrite'"
+  - id: AC-205
+    text: "Объявленный Hub'ом набор областей принимается эндпоинтом авторизации целиком и любым подмножеством (R-O5.1, инвариант согласованности)"
+    given: "каталог со всеми facade-коннекторами; зарегистрированный клиент; веб-сессия"
+    when: "для каждого facade-коннектора читается scopes_supported из GET /.well-known/oauth-protected-resource/mcp/{alias}; для каждого непустого подмножества этого набора (в прямом и в обратном порядке элементов) выполняется GET /oauth/authorize с этим scope; отдельно то же делается для значений соответствующего alias из scopes_supported метаданных GET /.well-known/oauth-authorization-server"
+    then: "ни один запрос не завершается редиректом с error='invalid_scope'; каждое объявленное значение принимается и по отдельности, и в составе полного набора"
+  - id: AC-206
+    text: "Недопустимый элемент набора и элементы разных коннекторов — invalid_scope (R-O5.1)"
+    given: "каталог с facade 'tag' и 'jira'; зарегистрирован клиент с redirect 'http://127.0.0.1:19876/cb'; веб-сессия; state='xyz 1'"
+    when: "GET /oauth/authorize со scope: 'tag:readonly jira:readonly'; 'tag:readonly tag:admin'; 'tag:readonly nope:readonly'; 'tag:readonly tag:'; 'tag:readonly :readwrite'; 'tag:readonly readwrite'; 'tag:readwrite tag:readonly jira:readwrite'; отдельно — scope='tag:readonly' вместе с resource='<HUB>/mcp/jira'"
+    then: "первые семь — 302 на 'http://127.0.0.1:19876/cb' с error='invalid_scope' и state, возвращённым байт-в-байт; параметр code отсутствует; последний (расхождение scope и resource) — 302 с error='invalid_request', как и раньше; ни в одном случае транзакция не создана и подключение не изменилось"
+  - id: AC-207
+    text: "Пустое и пробельное значение scope равнозначны отсутствию параметра (R-O5.1)"
+    given: "каталог с facade 'tag'; зарегистрированный клиент; веб-сессия; подключения нет"
+    when: "GET /oauth/authorize с resource='<HUB>/mcp/tag' и scope='' ; затем scope='   ' ; затем без параметра scope"
+    then: "во всех трёх случаях ошибки нет, флоу продолжается, итоговый выданный scope — 'tag:readonly'; ни один из трёх не даёт invalid_scope или invalid_request"
+  - id: AC-208
+    text: "Запрос ровно одной области сохраняет прежнее поведение (R-O5.2, совместимость)"
+    given: "каталог с facade 'tag'; зарегистрированный клиент; веб-сессия; подключения к 'tag' нет; HUB_CONSENT='always'"
+    when: "в первом прогоне GET /oauth/authorize со scope='tag:readwrite' и флоу до токена; во втором — со scope='tag:readonly'"
+    then: "в первом прогоне на экране прав предвыбрано 'Чтение и запись', в целевую систему ушли значения scopes.readwrite, выданный scope — 'tag:readwrite'; во втором — предвыбрано 'Только чтение', ушли значения scopes.readonly, выданный scope — 'tag:readonly'; поведение AC-84 и AC-85 не изменилось"
+  - id: AC-209
+    text: "При запросе обеих областей пресет берётся из существующего подключения (R-O5.2, R-O6.2)"
+    given: "каталог с facade 'tag'; у пользователя подключение 'tag' со status 'connected' и preset 'readwrite'; зарегистрированный клиент; веб-сессия; HUB_CONSENT='always'"
+    when: "GET /oauth/authorize со scope='tag:readonly tag:readwrite'; пользователь жмёт «Разрешить», не меняя переключатель; код обменивается на токен"
+    then: "на экране прав предвыбрано 'Чтение и запись'; повторный OAuth целевой системы не запускался (в мок не ушло ни одного нового запроса authorize); выданный scope — 'tag:readwrite'; connections.preset остался 'readwrite'"
+  - id: AC-210
+    text: "Запрос обеих областей не повышает права молча (R-O5.2, R-B7; AC-111 не ослаблен)"
+    given: "каталог с facade 'tag' (scopes.readonly и scopes.readwrite различаются); подключение 'tag' со status 'connected' и preset 'readonly'; зарегистрированный клиент; веб-сессия; HUB_CONSENT='always'"
+    when: "GET /oauth/authorize со scope='tag:readonly tag:readwrite'; пользователь жмёт «Разрешить», не меняя переключатель; код обменивается на токен"
+    then: "предвыбрано 'Только чтение'; в целевую систему не ушёл ни один запрос authorize со значениями из scopes.readwrite; connections.preset остался 'readonly'; выданный scope — 'tag:readonly'; если же пользователь на том же экране выбирает 'Чтение и запись', запускается повторный OAuth целевой системы (R-B7) и только после его успеха выдаётся код со scope 'tag:readwrite'"
+  - id: AC-211
+    text: "Сохранённое согласие сопоставляется по набору областей, а не по строке (R-O6.3)"
+    given: "HUB_CONSENT='remember'; каталог с facade 'tag'; клиент C уже прошёл авторизацию со scope='tag:readonly tag:readwrite' и пользователь выбрал 'Чтение и запись' (подключение preset 'readwrite')"
+    when: "повторный GET /oauth/authorize клиента C со scope='tag:readwrite  tag:readonly' (обратный порядок, два пробела); затем — со scope='tag:readonly tag:readonly tag:readwrite' (дубль); затем — со scope='tag:readonly'"
+    then: "первые два запроса не показывают экран прав и сразу выдают код, обмен даёт scope 'tag:readwrite'; третий запрос (другой набор) показывает экран прав; ни в одном случае нет ошибки invalid_scope"
+  - id: AC-212
+    text: "Обновление токена разбирает scope как множество и по-прежнему запрещает расширение (R-O10)"
+    given: "активная цепочка refresh-токенов для alias 'tag': в прогонах (а),(б),(д),(е) выданный scope — 'tag:readonly', в прогонах (в),(г) — 'tag:readwrite'"
+    when: "POST /oauth/token с grant_type='refresh_token' и scope: (а) 'tag:readonly tag:readonly'; (б) 'tag:readonly tag:readwrite'; (в) '  tag:readonly  '; (г) 'tag:readwrite tag:readonly'; (д) 'jira:readonly'; (е) без параметра scope"
+    then: "(а) 200 со scope 'tag:readonly'; (б) 400 {error:'invalid_scope'} — расширение запрещено, новый токен не выдан, прежний refresh остался active; (в) 200 со scope 'tag:readonly' (сужение); (г) 200 со scope 'tag:readwrite'; (д) 400 {error:'invalid_scope'}; (е) 200 со scope, равным ранее выданному"
+  - id: AC-213
+    text: "Форма запрошенного scope не влияет на фактические права подключения (R-O5.2)"
+    given: "два пользователя: первый подключил 'tag' через authorize со scope='tag:readonly tag:readwrite' и выбранным пресетом readonly, второй — через authorize со scope='tag:readonly'; у обоих одинаковые группы"
+    when: "для каждого выполняется GET /api/me/connections, затем tools/list и вызов инструмента из группы с preset 'readwrite' через /mcp/tag"
+    then: "у обоих в /api/me/connections preset == 'readonly' и поля scope в ответе нет; списки инструментов совпадают; вызов инструмента readwrite-группы отклоняется одинаково у обоих — набор из двух областей в запросе прав не расширил"
