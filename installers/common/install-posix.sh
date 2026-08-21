@@ -1283,13 +1283,34 @@ chown_user_path() {
 }
 
 # Создание каталога пользовательской части: права 0755 и владелец — исходный пользователь.
-# Владелец назначается только созданному каталогу; уже существующие каталоги не трогаются.
+# Владелец назначается КАЖДОМУ звену цепочки, созданному этим вызовом, а не только листу:
+# mkdir -p создаёт все недостающие каталоги разом, и при --system промежуточные (<дом>/.config,
+# для fish ещё <дом>/.config/fish) оставались root-овыми — пользователь не мог создать в
+# собственном ~/.config ничего нового без sudo, ровно то, что запрещает N5-I14.
+# Каталоги, существовавшие ДО вызова, не трогаются: менять владельца и права чужого каталога
+# установщик не вправе. Поэтому граница «создано нами / было раньше» вычисляется ДО mkdir —
+# после него отличить одно от другого уже нельзя.
 make_user_dir() {
-  local dir=$1
+  local dir=$1 base parent node
   [ -d "$dir" ] && return 0
+  # Первый существующий предок: до него — наше, начиная с него — чужое.
+  base=$dir
+  while [ ! -d "$base" ]; do
+    parent=$(dirname "$base")
+    # Корень существует всегда, но защита от бесконечного цикла на вырожденном пути нужна.
+    [ "$parent" = "$base" ] && break
+    base=$parent
+  done
   mkdir -p "$dir" || return 1
-  chmod 0755 "$dir"
-  chown_user_path "$dir"
+  # Обход снизу вверх — от листа до первого существовавшего предка исключительно.
+  node=$dir
+  while [ "$node" != "$base" ]; do
+    chmod 0755 "$node"
+    chown_user_path "$node"
+    parent=$(dirname "$node")
+    [ "$parent" = "$node" ] && break
+    node=$parent
+  done
   return 0
 }
 
@@ -1461,7 +1482,9 @@ install_desktop() {
   fi
   if [ "$dest" != "/Applications" ]; then
     say "$MSG_DESKTOP_USER_DIR" "/Applications" "$dest"
-    mkdir -p "$dest"
+    # <дом>/Applications — тоже пользовательская часть: создаём общим порядком, чтобы владелец
+    # назначался так же, как каталогу конфига и каталогу профиля (N5-I14).
+    make_user_dir "$dest"
   fi
   app_version=$(desktop_installed_version "$app_dest" || printf '')
   if [ -n "$app_version" ] && [ "$app_version" = "$MF_version" ]; then
