@@ -12,6 +12,7 @@
   "stacktrace": "app-builder-lib asarFileChecker: Application entry file ... is corrupted / was not found",
   "suspected_area": "corp/build.ts — ветка --desktop вызывает package:mac без предшествующих prebuild/build",
   "iteration": 1,
-  "status": "open",
-  "found_by": "оркестратор при ручной сборке 2026-08-20"
+  "status": "verified",
+  "found_by": "оркестратор при ручной сборке 2026-08-20",
+  "verification": "Подтверждено фактически 2026-08-21: corp/build.ts --desktop собирает Electron-приложение — в dist появляются mac-arm64/OpenCode Magnit.app, dmg и zip; проверка бандла в CI требует наличия Electron Framework.framework."
 }

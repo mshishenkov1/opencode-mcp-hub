@@ -13,6 +13,7 @@
   "stacktrace": "Error: SDK context must be used within a context provider\n  at useCorpStatus (main-*.js)\n  at Layout2 (main-*.js)",
   "suspected_area": "packages/app/src/pages/layout.tsx (корп-правка) + packages/app/src/context/corp.ts — хук вызывается выше провайдера SDK",
   "iteration": 1,
-  "status": "open",
-  "found_by": "ручная проверка пользователя на собранном Desktop 2026-08-20"
+  "status": "verified",
+  "found_by": "ручная проверка пользователя на собранном Desktop 2026-08-20",
+  "verification": "Подтверждено фактически 2026-08-21: корпоративная сборка Desktop запускается, окно открывается, витрина коннекторов работает. Проверено многократными запусками собранного бандла OpenCode Magnit.app."
 }
