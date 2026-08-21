@@ -1,0 +1,23 @@
+{
+  "id": "BUG-I5-005",
+  "related_ac": "AC-137 (N5-R1, N5-I1), AC-93, AC-94",
+  "severity": "high",
+  "title": "install.ps1 -Uninstall: если каталог установки был единственным элементом User PATH, Invoke-Uninstall обрывается непойманным исключением привязки параметра Write-UserPathEntry -Value ''",
+  "repro_steps": [
+    "pwsh, dot-source installers/windows/install.ps1",
+    "Собрать фикстурный пакет с desktop-артефактом, прочитать манифест и построить Layout",
+    "Подменить Get-UserPathEntry так, чтобы Value равнялся ровно $layout.BinDir (User PATH состоит из одного элемента — нашего каталога)",
+    "Вызвать Invoke-Uninstall -Manifest $manifest -Layout $layout -WithPurge $false",
+    "Пользовательский путь: HKCU\\Environment\\Path содержит только каталог установки OpenCode, выполняется install.ps1 -Uninstall"
+  ],
+  "expected": "AC-137: напечатаны строки об удалении CLI, записи PATH, переменной NODE_EXTRA_CA_CERTS и CA, эти шаги не откатываются, итоговый код выхода 1 (при ненулевом коде деинсталлятора Desktop). AC-93/AC-94: удаление доводится до конца и повторный запуск идемпотентен. Пустое значение User PATH — законный результат удаления единственного элемента, оно должно записываться в реестр как пустая строка.",
+  "actual": "Invoke-Uninstall обрывается непойманным ParameterBindingValidationException «Cannot bind argument to parameter 'Value' because it is an empty string» (installers/windows/install.ps1:1230). Шаги после правки PATH — снятие NODE_EXTRA_CA_CERTS, удаление CA, обработка Desktop, итоговое сообщение и код выхода — не выполняются; пользователь видит английскую диагностику PowerShell вместо русского сообщения (нарушение N5-I1) и остаётся с наполовину удалённой установкой.",
+  "root_cause": "installers/windows/install.ps1:1230 — `Write-UserPathEntry -Value ([string]::Join(';', $kept.ToArray())) -Kind $entry.Kind`. Когда наш каталог был единственным элементом PATH, $kept пуст и Join даёт пустую строку. Сигнатура Write-UserPathEntry (строка 479) объявлена как `param([Parameter(Mandatory = $true)][string]$Value, …)` без [AllowEmptyString()], поэтому привязка пустой строки к обязательному параметру запрещена. Возможное лечение: добавить [AllowEmptyString()] к $Value (и, если пустое значение в реестре нежелательно, удалять само значение Path через $key.DeleteValue('Path', $false) — но это решение продукта, не тестов).",
+  "failing_test": "installers/tests/pester/Uninstall.Tests.ps1::Штатный деинсталлятор Desktop (N5-R1).AC-137: ненулевой код деинсталлятора → «Desktop: ошибка (код 3)» и код выхода 1",
+  "stacktrace": "[-] Штатный деинсталлятор Desktop (N5-R1).AC-137: ненулевой код деинсталлятора → «Desktop: ошибка (код 3)» и код выхода 1 116ms\n ParameterBindingValidationException: Cannot bind argument to parameter 'Value' because it is an empty string.\n at Invoke-Uninstall, /var/gitlab/builds/shishenkov_ma/opencode-mcp-hub/installers/windows/install.ps1:1230\n at <ScriptBlock>, /var/gitlab/builds/shishenkov_ma/opencode-mcp-hub/installers/tests/pester/Uninstall.Tests.ps1:277",
+  "suspected_area": "installers/windows/install.ps1: Write-UserPathEntry (строки 478-490) и Invoke-Uninstall (строка 1230)",
+  "impact": "Удаление обрывается на середине у любого пользователя, у которого пользовательский PATH состоит только из каталога OpenCode — состояние после отказа: бинарник и .bak удалены, PATH не поправлен, NODE_EXTRA_CA_CERTS и CA остались, Desktop не тронут. Повторный запуск -Uninstall упрётся в то же место (AC-94 не выполняется). Дефект не проявлялся ранее, потому что задание pester в CI выполнялось впервые.",
+  "found_by": "GitLab CI, пайплайн 2439271, задание pester (job 18521114), pwsh 7.4 / Pester 5.9.1, ubuntu",
+  "iteration": 5,
+  "status": "open"
+}

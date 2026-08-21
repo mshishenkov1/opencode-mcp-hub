@@ -1,0 +1,24 @@
+{
+  "id": "BUG-I5-004",
+  "related_ac": "AC-96, AC-97, AC-68, AC-66, AC-65, AC-69, AC-77, AC-92 (N5-C1, N5-I10, N5-R2)",
+  "severity": "critical",
+  "title": "install.ps1: Get-InstallPlan и Get-UninstallPlan падают на первой же строке — запятые в $list.Add($формат -f $a, $b) разбираются как аргументы МЕТОДА, а не как список значений для -f",
+  "repro_steps": [
+    "pwsh (7.4 или Windows PowerShell 5.1), dot-source installers/windows/install.ps1",
+    "Собрать фикстурный пакет (installers/tests/pester/Install.Tests.ps1, New-FixturePackage) и прочитать манифест: $manifest = Read-Manifest -PackageRoot <pkg>",
+    "$layout = Get-Layout -Manifest $manifest -PackageRoot <pkg> -PrefixDir ''",
+    "Get-InstallPlan -Manifest $manifest -Layout $layout -PackageRoot <pkg> -SkipDesktop $false -SkipLaunch $true",
+    "То же для Get-UninstallPlan -Manifest $manifest -Layout $layout -WithPurge $true",
+    "Пользовательский путь: install.ps1 -DryRun и install.ps1 -DryRun -Uninstall на любом корректном пакете"
+  ],
+  "expected": "AC-96: напечатан нумерованный план, в котором для каждого шага указаны абсолютные пути источника и приёмника и целевое значение NODE_EXTRA_CA_CERTS. AC-97: план строится без создания каталогов и завершается кодом 0. AC-92 (Windows-паритет): план удаления печатает полный список удаляемых путей.",
+  "actual": "Обе функции выбрасывают непойманное исключение на ПЕРВОЙ добавляемой строке: RuntimeException «Error formatting a string: Index (zero based) must be greater than or equal to zero and less than the size of the argument list.» (installers/windows/install.ps1:1015). План не строится вообще, ни одной строки не печатается. Режимы -DryRun и -DryRun -Uninstall на Windows нерабочие полностью.",
+  "root_cause": "Строки вида `[void]$lines.Add($script:MsgPlanHead -f (Get-Prop $Manifest 'version'), (Get-Prop $Manifest 'os'), (Get-Prop $Manifest 'arch'))`. Запятые стоят ВНУТРИ скобок вызова метода .Add(...), где PowerShell разбирает их как разделители АРГУМЕНТОВ МЕТОДА, а не как оператор построения массива. Поэтому -f получает ровно одно значение, а формат ссылается на {1} и {2} — String.Format бросает FormatException. Ошибка возникает при вычислении первого аргумента, до разрешения перегрузки ArrayList.Add, поэтому «неверное число аргументов метода» не сообщается. Лечение — внешние скобки вокруг всего выражения формата: `[void]$lines.Add(($script:MsgPlanHead -f $a, $b, $c))` (так же, как это уже сделано в Write-Line (…) и Write-Say (…), которые работают). Затронуты строки install.ps1: 1015, 1019, 1022, 1025, 1029, 1032, 1034, 1036, 1041, 1043, 1048, 1050, 1054, 1057 в Get-InstallPlan и 1070, 1073, 1075, 1077 в Get-UninstallPlan. Строки 1059, 1066 и 1081 с одним значением после -f корректны и падать не будут, но их стоит привести к тому же виду.",
+  "failing_test": "installers/tests/pester/Install.Tests.ps1::План установки Get-InstallPlan (N5-C1, N5-I10).AC-96: план содержит абсолютные пути источника и приёмника и целевое значение переменной",
+  "stacktrace": "[-] План установки Get-InstallPlan (N5-C1, N5-I10).AC-96: план содержит абсолютные пути источника и приёмника и целевое значение переменной 38ms\n RuntimeException: Error formatting a string: Index (zero based) must be greater than or equal to zero and less than the size of the argument list..\n at Get-InstallPlan, /var/gitlab/builds/shishenkov_ma/opencode-mcp-hub/installers/windows/install.ps1:1015\n at <ScriptBlock>, /var/gitlab/builds/shishenkov_ma/opencode-mcp-hub/installers/tests/pester/Install.Tests.ps1:317\n\n(тем же исключением падают AC-68, AC-66, AC-65, AC-69, AC-77, AC-97 того же Describe — все семь тестов, вызывающих Get-InstallPlan, и добавленный AC-92 на Get-UninstallPlan)",
+  "suspected_area": "installers/windows/install.ps1, функции Get-InstallPlan (строки 1012-1061) и Get-UninstallPlan (строки 1063-1090)",
+  "impact": "Никакой утечки или разрушения данных: функции падают ДО любых изменений. Но два из шести режимов запуска установщика на Windows (-DryRun и -DryRun -Uninstall) не работают ни на одном пакете, а именно они предписаны AC-96, AC-97 и AC-92 как способ увидеть план до внесения изменений. Дефект не проявлялся ранее, потому что задание pester в CI выполнялось впервые: локально pwsh в среде разработки отсутствует.",
+  "found_by": "GitLab CI, пайплайн 2439271, задание pester (job 18521114), pwsh 7.4 / Pester 5.9.1, ubuntu",
+  "iteration": 5,
+  "status": "open"
+}

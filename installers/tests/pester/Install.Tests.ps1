@@ -381,6 +381,25 @@ Describe 'План установки Get-InstallPlan (N5-C1, N5-I10)' {
         (Test-Path -LiteralPath $layout.ConfigDir) | Should -BeFalse
         (Test-Path -LiteralPath $layout.BinDir) | Should -BeFalse
     }
+
+    It 'AC-92: план удаления Get-UninstallPlan содержит удаляемые пути и список purge (Windows-паритет N5-C1, N5-R2)' {
+        # Вторая строящая план функция install.ps1 тестами не вызывалась ни разу, хотя её строки
+        # печатает `-DryRun -Uninstall`. Ветка проверяется здесь же, где и план установки: обе
+        # собирают строки одинаково, и дефект в одной означает дефект в другой (BUG-I5-004).
+        $null = New-FixturePackage -Root $script:PkgRoot
+        $manifest = Read-Manifest -PackageRoot $script:PkgRoot
+        $layout = Get-Layout -Manifest $manifest -PackageRoot $script:PkgRoot -PrefixDir ''
+        $text = (Get-UninstallPlan -Manifest $manifest -Layout $layout -WithPurge $true) -join "`n"
+        $text | Should -Match ([regex]::Escape($layout.BinTarget))
+        $text | Should -Match ([regex]::Escape($layout.BinBackup))
+        $text | Should -Match ([regex]::Escape($layout.CaTarget))
+        $text | Should -Match ([regex]::Escape($layout.BinDir))
+        $text | Should -Match 'NODE_EXTRA_CA_CERTS'
+        # Раздел purge: заголовок и хотя бы один путь внутри профиля. Побайтовое значение пути
+        # сравнивать нельзя — разделитель каталогов в purge_paths зависит от платформы прогона.
+        $text | Should -Match 'Удаляются пользовательские данные'
+        $text | Should -Match ([regex]::Escape($script:HomeRoot))
+    }
 }
 
 Describe 'Построчный вывод --check (N5-C2, N5-C3)' {
