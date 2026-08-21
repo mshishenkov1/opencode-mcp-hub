@@ -134,6 +134,11 @@ def tail(text: str, n: int = 300) -> str:
 
 def main(argv: list[str]) -> int:
     run_id = argv[argv.index("--run-id") + 1] if "--run-id" in argv else "manual"
+    # Подмножество гейтов: `--only G1,G2` или `--skip G3`. Нужно, чтобы длинный
+    # mutation можно было вынести в отдельное задание CI — на большом наборе он
+    # не укладывается в часовой лимит задания вместе с остальными гейтами.
+    only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else None
+    skip = set(argv[argv.index("--skip") + 1].split(",")) if "--skip" in argv else set()
     cfg = yaml.safe_load((ROOT / "pipeline.config.yaml").read_text(encoding="utf-8"))
 
     gates = [
@@ -145,9 +150,17 @@ def main(argv: list[str]) -> int:
         ("G6", "AC-трассировка", gate_g6_traceability),
     ]
 
+    selected = [g for g in gates if (only is None or g[0] in only) and g[0] not in skip]
+    if not selected:
+        print("не выбрано ни одного гейта: проверь --only/--skip", file=sys.stderr)
+        return 2
+    if len(selected) != len(gates):
+        names = ", ".join(g[0] for g in selected)
+        print(f"прогон подмножества гейтов: {names}\n")
+
     results = {}
     all_ok = True
-    for gid, name, fn in gates:
+    for gid, name, fn in selected:
         try:
             ok, detail = fn()
         except Exception as e:
