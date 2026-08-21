@@ -16,6 +16,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainValidator,
+    StrictBool,
     ValidationError,
     model_validator,
 )
@@ -223,6 +224,18 @@ class TokenVerify(_Strict):
     headers: dict[str, HeaderValue] = Field(min_length=1)
     expect_status: int | None = None
     account_field: str | None = None
+    # R-U3.1: требовать, чтобы целевая система назвала владельца токена полем account_field.
+    require_account: StrictBool = False
+
+    @model_validator(mode="after")
+    def _require_account_needs_field(self) -> TokenVerify:
+        """R-U3.1: требовать нечего, если не сказано, какое поле читать."""
+        if self.require_account and not self.account_field:
+            raise _PathError(
+                ("require_account",),
+                "требование назвать аккаунт невозможно без account_field",
+            )
+        return self
 
 
 class AuthUserToken(_AuthMethodCommon):

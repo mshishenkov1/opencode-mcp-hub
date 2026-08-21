@@ -267,7 +267,9 @@ class TokenBroker:
     ) -> str | None:
         """Проверить токен запросом к целевой системе; вернуть ``provider_account`` (R-U3).
 
-        Токен не логируется ни в каком виде: в журнал попадают alias, id способа и HTTP-код.
+        При ``verify.require_account`` успехом считается только ответ, в котором система назвала
+        владельца токена (R-U3.1): иначе отказ, а не недоступность. Ни токен, ни тело ответа не
+        логируются: в журнал попадают alias, id способа и HTTP-код.
         """
         verify = method.verify
         environ = self._catalog_env()
@@ -314,6 +316,17 @@ class TokenBroker:
         if not isinstance(payload, dict):
             raise UpstreamUnavailable("целевая система вернула не JSON-объект")
         value = payload.get(verify.account_field)
+        if verify.require_account:
+            # R-U3.1: аккаунт назван, только если это непустая после strip() строка; в БД идёт
+            # исходное значение. Всё прочее — отказ (тело разобрано и означает «токен никем не
+            # является»), а не недоступность. В журнал — только alias, способ и код ответа.
+            if isinstance(value, str) and value.strip():
+                return value
+            logger.info(
+                "user_token_account_missing",
+                extra={"alias": entry.alias, "auth_method": method.id, "status": status},
+            )
+            raise UserTokenRejected("целевая система не назвала владельца токена")
         if isinstance(value, str) and value:
             return value
         if isinstance(value, int) and not isinstance(value, bool):
