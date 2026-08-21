@@ -18,7 +18,14 @@ from hub.broker import STATUS_CONNECTED, ServerUnconfigured, UpstreamAuthFailed
 from hub.catalog import ServerEntry
 from hub.crypto import random_token
 from hub.db import Consent, to_naive_utc
-from hub.oauth import OAuthError, redirect_uri_matches
+from hub.oauth import (
+    OAuthError,
+    ScopeError,
+    ScopeSet,
+    canonical_scope,
+    parse_scope,
+    redirect_uri_matches,
+)
 from hub.permissions import normalize_groups
 from hub.web import current_session, group_definitions, html_error
 from hub.websession import CSRF_FIELD, CSRF_HEADER, check_csrf
@@ -252,11 +259,14 @@ async def _consent_page(request: Request, entry: ServerEntry, tx_id: str, tx: di
     always, groups = group_definitions(entry)
     conn = await state.broker.load_connection(tx["user_id"], entry.alias)
     selected = set(conn.groups or []) if conn else set()
+    # Показывается запрошенный набор в канонической форме, а не выданное значение (R-W3, R-O5.2).
+    requested_scope = _requested_scope(tx)
     return state.templates.page(
         "consent.html",
         server={"title": entry.model.title, "description": entry.model.description},
         client_name=tx.get("client_name") or tx["client_id"],
-        scope=tx["scope"],
+        scope=requested_scope,
+        scope_is_set=len(requested_scope.split()) > 1,
         preset=tx["preset"],
         tx=tx_id,
         csrf_token=info.csrf_token if info else "",
@@ -290,8 +300,26 @@ async def _issue_code_and_redirect(
     return RedirectResponse(f"{tx['redirect_uri']}{separator}{urlencode(params)}", status_code=302)
 
 
+def _requested_scope(tx: dict[str, Any]) -> str:
+    """Запрошенный набор областей транзакции в канонической форме (R-O5.1)."""
+    return str(tx.get("requested_scope") or tx["scope"])
+
+
+def _canonical_or_none(value: str | None, alias: str) -> str | None:
+    """Каноническая форма сохранённого набора того же коннектора; иначе ``None`` (R-O5.1)."""
+    try:
+        parsed = parse_scope(value, alias_allowed=lambda candidate: candidate == alias)
+    except ScopeError:
+        return None
+    return parsed.canonical if parsed is not None else None
+
+
 async def _remembered_consent(request: Request, tx: dict[str, Any]) -> bool:
-    """``HUB_CONSENT=remember``: согласие того же клиента на тот же scope уже дано (R-O6)."""
+    """``HUB_CONSENT=remember``: согласие того же клиента на тот же набор областей (R-O6.3).
+
+    Сравниваются канонические формы наборов, а не строки: порядок, повторы и лишние пробелы
+    в ``scope`` на совпадение не влияют, а другой набор согласие не переиспользует.
+    """
     state = request.app.state
     if state.settings.consent != "remember":
         return False
@@ -308,7 +336,14 @@ async def _remembered_consent(request: Request, tx: dict[str, Any]) -> bool:
                 .limit(1)
             )
         ).scalar_one_or_none()
-    return row is not None and row.scope == tx["scope"]
+    if row is None:
+        return False
+    alias = str(tx["alias"])
+    if _canonical_or_none(row.scope, alias) != _requested_scope(tx):
+        return False
+    # Выдаётся scope пресета сохранённого согласия, а не запрошенный набор (R-O6.3, R-O5.2).
+    tx["scope"] = canonical_scope(alias, row.preset or "readonly")
+    return True
 
 
 async def _continue_authorize(
@@ -376,13 +411,15 @@ async def authorize(request: Request) -> Response:
             return _redirect_error(
                 redirect_uri, "invalid_target", "Ресурс не обслуживается этим Hub", state_value
             )
-    alias_from_scope = None
-    if scope:
-        alias_from_scope = scope.split(":")[0] if ":" in scope else None
-        if not alias_from_scope or _facade_entry(request, alias_from_scope) is None:
-            return _redirect_error(
-                redirect_uri, "invalid_scope", "Запрошен неизвестный scope", state_value
-            )
+    # scope — множество значений через пробел (R-O5.1): alias выводится из разобранного набора,
+    # а не из строки целиком; каждый элемент проверяется отдельно.
+    try:
+        scope_set = parse_scope(
+            scope, alias_allowed=lambda value: _facade_entry(request, value) is not None
+        )
+    except ScopeError as exc:
+        return _redirect_error(redirect_uri, "invalid_scope", str(exc), state_value)
+    alias_from_scope = scope_set.alias if scope_set is not None else None
     if alias_from_resource and alias_from_scope and alias_from_resource != alias_from_scope:
         return _redirect_error(
             redirect_uri, "invalid_request", "resource и scope указывают на разные серверы", state_value
@@ -394,11 +431,10 @@ async def authorize(request: Request) -> Response:
         )
     entry = _facade_entry(request, alias)
     assert entry is not None
-    final_scope = scope or f"{alias}:readonly"
-    if final_scope not in (f"{alias}:readonly", f"{alias}:readwrite"):
-        return _redirect_error(
-            redirect_uri, "invalid_scope", "Запрошен неизвестный scope", state_value
-        )
+    if scope_set is None:
+        # scope не задан (в т.ч. пустое значение или одни пробелы) → <alias>:readonly (R-O5).
+        scope_set = ScopeSet(alias=alias, presets=frozenset({"readonly"}))
+    requested_scope = scope_set.canonical
 
     info = await current_session(request)
     if info is None:
@@ -409,7 +445,14 @@ async def authorize(request: Request) -> Response:
 
         return RedirectResponse(f"/auth/login?next={quote(next_url, safe='')}", status_code=302)
 
-    preset = "readwrite" if final_scope.endswith(":readwrite") else "readonly"
+    if len(scope_set) == 1:
+        # Запрос ровно одной области — поведение прежнее: элемент задаёт предвыбор (R-O5.2).
+        preset = scope_set.widest_preset
+    else:
+        # Запрос обеих объявленных областей — верхняя граница, а не выбор прав (R-O5.2):
+        # пресет берётся из текущего подключения, а при его отсутствии — readonly.
+        existing = await state.broker.load_connection(info.user_id, alias)
+        preset = (existing.preset if existing else None) or "readonly"
     tx_id = uuid.uuid4().hex
     tx = {
         "client_id": client.client_id,
@@ -417,7 +460,10 @@ async def authorize(request: Request) -> Response:
         "redirect_uri": redirect_uri,
         "state": state_value,
         "code_challenge": code_challenge,
-        "scope": final_scope,
+        # requested_scope — каноническая форма запрошенного набора (экран прав, consents.scope);
+        # scope — выданное значение <alias>:<пресет> (код, токен, refresh) — R-O5.2.
+        "requested_scope": requested_scope,
+        "scope": canonical_scope(alias, preset),
         "resource": resource,
         "alias": alias,
         "preset": preset,
@@ -517,6 +563,8 @@ async def consent(request: Request) -> Response:
     granted_preset = (conn.preset if conn else None) or "readonly"
     tx["preset"] = preset
     tx["groups"] = groups
+    # Выданный scope — всегда одно значение <alias>:<подтверждённый пресет> (R-O5.2).
+    tx["scope"] = canonical_scope(entry.alias, preset)
     if preset == "readwrite" and granted_preset != "readwrite":
         # Нужны более широкие права целевой системы — повторный OAuth системы (R-B7).
         # После возврата флоу продолжается с шага «подключение есть» (_continue_authorize):
@@ -557,7 +605,7 @@ async def _remember_consent(
                     user_id=tx["user_id"],
                     client_id=tx["client_id"],
                     alias=tx["alias"],
-                    scope=tx["scope"],
+                    scope=_requested_scope(tx),
                     preset=preset,
                     groups=list(groups),
                     created_at=now,
@@ -565,7 +613,7 @@ async def _remember_consent(
                 )
             )
         else:
-            row.scope = tx["scope"]
+            row.scope = _requested_scope(tx)
             row.preset = preset
             row.groups = list(groups)
             row.updated_at = now

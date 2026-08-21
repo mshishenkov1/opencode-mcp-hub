@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -140,6 +141,85 @@ def redirect_uri_matches(registered: list[str], candidate: str) -> bool:
     return False
 
 
+# --- scope как множество значений (R-O5.1, R-O5.2) ---------------------------
+#
+# Единственное место разбора и канонизации ``scope`` во всём Hub. Живёт рядом с
+# ``as_metadata``/``resource_metadata``, потому что набор из метаданных и набор проверки обязаны
+# быть одним источником: инвариант R-O5.1 требует, чтобы объявленное в ``scopes_supported``
+# принималось целиком и любым подмножеством. Сравнивать значение ``scope`` со строкой целиком
+# запрещено везде (решение 78, BUG-I3-002).
+
+SCOPE_PRESETS: tuple[str, ...] = ("readonly", "readwrite")
+
+
+def scopes_supported_for(alias: str) -> list[str]:
+    """Объявляемый набор областей коннектора в каноническом порядке (R-O1, R-O2, R-O5.1)."""
+    return [f"{alias}:{preset}" for preset in SCOPE_PRESETS]
+
+
+class ScopeError(ValueError):
+    """Недопустимый элемент ``scope`` или элементы разных коннекторов (R-O5.1) → ``invalid_scope``."""
+
+
+@dataclass(frozen=True)
+class ScopeSet:
+    """Разобранное множество областей одного коннектора (R-O5.1)."""
+
+    alias: str
+    presets: frozenset[str]
+
+    @property
+    def canonical(self) -> str:
+        """Каноническая форма: без дубликатов, в порядке ``scopes_supported``, через один пробел."""
+        return " ".join(
+            value
+            for value, preset in zip(scopes_supported_for(self.alias), SCOPE_PRESETS, strict=True)
+            if preset in self.presets
+        )
+
+    @property
+    def widest_preset(self) -> str:
+        """Самый широкий пресет набора — верхняя граница запроса, но не выбор прав (R-O5.2)."""
+        return "readwrite" if "readwrite" in self.presets else "readonly"
+
+    def __len__(self) -> int:
+        return len(self.presets)
+
+
+def parse_scope(value: str | None, *, alias_allowed: Callable[[str], bool]) -> ScopeSet | None:
+    """Разобрать ``scope`` как множество значений через пробел (RFC 6749 §3.3, R-O5.1).
+
+    Разделитель — любая последовательность пробельных символов; ведущие и завершающие пробелы
+    отбрасываются, повторы схлопываются, порядок не влияет на результат. Отсутствующее, пустое и
+    состоящее из одних пробелов значение — ``None`` («не задан»). Каждый элемент проверяется
+    отдельно по :func:`scopes_supported_for`; все элементы обязаны относиться к одному коннектору,
+    допустимость alias определяет вызывающая сторона через ``alias_allowed``.
+    """
+    if value is None:
+        return None
+    items = value.split()
+    if not items:
+        return None
+    aliases: set[str] = set()
+    presets: set[str] = set()
+    for item in dict.fromkeys(items):
+        alias, separator, preset = item.partition(":")
+        if not separator or not alias or preset not in SCOPE_PRESETS:
+            raise ScopeError(f"Запрошена неизвестная область доступа: {item}")
+        if not alias_allowed(alias):
+            raise ScopeError(f"Запрошена неизвестная область доступа: {item}")
+        aliases.add(alias)
+        presets.add(preset)
+    if len(aliases) > 1:
+        raise ScopeError("Запрошенные области относятся к разным серверам")
+    return ScopeSet(alias=aliases.pop(), presets=frozenset(presets))
+
+
+def canonical_scope(alias: str, preset: str) -> str:
+    """Каноническая форма набора из одного элемента (выданный scope, R-O5.2)."""
+    return f"{alias}:{preset}"
+
+
 class OAuthServer:
     """Регистрация клиентов, коды, токены Hub и denylist (R-O3..R-O12)."""
 
@@ -161,8 +241,7 @@ class OAuthServer:
         base = self.settings.public_url
         scopes: list[str] = []
         for entry in self.facade_servers(catalog):
-            scopes.append(f"{entry.alias}:readonly")
-            scopes.append(f"{entry.alias}:readwrite")
+            scopes.extend(scopes_supported_for(entry.alias))
         return {
             "issuer": base,
             "authorization_endpoint": f"{base}/oauth/authorize",
@@ -182,7 +261,7 @@ class OAuthServer:
         return {
             "resource": f"{base}/mcp/{entry.alias}",
             "authorization_servers": [base],
-            "scopes_supported": [f"{entry.alias}:readonly", f"{entry.alias}:readwrite"],
+            "scopes_supported": scopes_supported_for(entry.alias),
             "bearer_methods_supported": ["header"],
             "resource_name": entry.model.title,
             "resource_documentation": entry.model.docs_url,
@@ -502,10 +581,18 @@ class OAuthServer:
         if row.expires_at <= now:
             raise invalid_grant("Срок действия refresh-токена истёк")
         new_scope = row.scope
-        if scope is not None and scope.strip() and scope != row.scope:
-            if scope != f"{row.alias}:readonly":
+        # Разбор множеством (R-O5.1): элементы того же коннектора, набор не шире выданного.
+        # Запрет расширения сохранён дословно — перестала считаться расширением лишь
+        # эквивалентная запись того же набора (решение 81).
+        try:
+            requested = parse_scope(scope, alias_allowed=lambda alias: alias == row.alias)
+        except ScopeError as exc:
+            raise OAuthError(400, "invalid_scope", str(exc)) from exc
+        if requested is not None:
+            granted_readwrite = row.scope.endswith(":readwrite")
+            if "readwrite" in requested.presets and not granted_readwrite:
                 raise OAuthError(400, "invalid_scope", "Расширение scope при обновлении недопустимо")
-            new_scope = scope
+            new_scope = canonical_scope(row.alias, requested.widest_preset)
         await self.db.init()
         async with self.db.session() as session, session.begin():
             await session.execute(
