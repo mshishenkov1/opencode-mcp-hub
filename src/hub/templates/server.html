@@ -14,6 +14,11 @@
   <p>Способ подключения: <span class="auth-method">{{ connected_method.title }}</span></p>
   {% if account %}<p>Учётная запись: <span class="account">{{ account }}</span></p>{% endif %}
   {% endif %}
+  {% if origin_notice and connection_status != 'not_connected' %}
+  <p class="token-origin token-origin-{{ origin_notice.kind }}{% if origin_notice.kind == 'submitted' %} warning{% endif %}">
+    {{ origin_notice.text }}{% if origin_notice.reason_text %} — {{ origin_notice.reason_text }}{% endif %}
+  </p>
+  {% endif %}
 </div>
 {% if auth_methods %}
 <div class="card" id="connect">
@@ -47,7 +52,8 @@
            maxlength="{{ token_method.field.max_length }}"
            {% if token_method.field.placeholder %}placeholder="{{ token_method.field.placeholder }}"{% endif %}
            required>
-    {% if token_method.field.hint %}<p class="muted hint">{{ token_method.field.hint }}</p>{% endif %}
+      {% if token_method.field.hint %}<p class="muted hint">{{ token_method.field.hint }}</p>{% endif %}
+    {% if exchange_hint %}<p class="muted exchange-hint">{{ exchange_hint }}</p>{% endif %}
     {% if token_method.field.docs_url %}
     <p><a href="{{ token_method.field.docs_url }}">Где взять токен</a></p>
     {% endif %}

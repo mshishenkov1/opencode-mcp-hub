@@ -10,10 +10,11 @@ from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
 from hub.crypto import random_token
-from hub.db import Connection, User, to_naive_utc
+from hub.db import Connection, UpstreamToken, User, to_naive_utc
 from hub.errors import HubError
 from hub.oidc import OIDCError, user_id_from_claims
 from hub.web import (
+    EXCHANGE_HINT,
     current_session,
     group_definitions,
     group_titles,
@@ -22,6 +23,7 @@ from hub.web import (
     preset_title,
     safe_next,
     status_title,
+    token_origin_notice,
 )
 from hub.websession import CSRF_FIELD, CSRF_HEADER, check_csrf, session_token
 
@@ -285,6 +287,29 @@ async def auth_logout(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+async def _token_rows(session: Any, connections: list[Connection]) -> dict[int, UpstreamToken]:
+    """Строки ``upstream_tokens`` подключений пользователя (R-U16)."""
+    ids = [c.id for c in connections]
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(select(UpstreamToken).where(UpstreamToken.connection_id.in_(ids)))
+    ).scalars()
+    return {row.connection_id: row for row in rows}
+
+
+def _origin_notice(
+    entry: Any, connection: Connection | None, rows: dict[int, UpstreamToken]
+) -> dict[str, Any] | None:
+    """R-U16: текст о постоянстве подключения; у OAuth-подключений его нет."""
+    if connection is None or not entry.uses_user_token(connection.auth_method):
+        return None
+    row = rows.get(connection.id)
+    if row is None:
+        return None
+    return token_origin_notice(row.token_origin, row.token_origin_reason, row.submitted_expires_at)
+
+
 @router.get("/ui/connections")
 async def ui_connections(request: Request) -> Response:
     state = request.app.state
@@ -298,6 +323,7 @@ async def ui_connections(request: Request) -> Response:
             await session.execute(select(Connection).where(Connection.user_id == info.user_id))
         ).scalars()
         connections = {c.alias: c for c in rows}
+        token_rows = await _token_rows(session, list(connections.values()))
     items = []
     for entry in state.catalog.visible_for(groups):
         conn = connections.get(entry.alias)
@@ -317,6 +343,8 @@ async def ui_connections(request: Request) -> Response:
                 "group_titles": group_titles(entry, list(conn.groups or [])) if conn else [],
                 # R-U8: «Мои подключения» дополнительно показывают способ подключения.
                 "auth_method_title": method.title if method is not None else None,
+                # R-U16: постоянное подключение отличается от временного видимым текстом.
+                "origin_notice": _origin_notice(entry, conn, token_rows),
             }
         )
     return state.templates.page("connections.html", items=items, user_id=info.user_id)
@@ -343,6 +371,7 @@ async def ui_server(alias: str, request: Request) -> Response:
                 .limit(1)
             )
         ).scalar_one_or_none()
+        token_rows = await _token_rows(session, [conn] if conn is not None else [])
     always, selectable = group_definitions(entry)
     view = entry.public_view(state.settings.public_url)
     view.pop("permission_model", None)
@@ -376,4 +405,11 @@ async def ui_server(alias: str, request: Request) -> Response:
         connected_method=connected_method,
         default_method_id=default_method_id,
         account=conn.provider_account if conn else None,
+        # R-U16: постоянное подключение и временное различаются текстом, значений токенов нет.
+        origin_notice=_origin_notice(entry, conn, token_rows),
+        exchange_hint=(
+            EXCHANGE_HINT
+            if token_method is not None and token_method.get("issues_permanent_token")
+            else None
+        ),
     )

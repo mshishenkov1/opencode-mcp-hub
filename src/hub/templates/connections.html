@@ -11,6 +11,11 @@
   {% if item.auth_method_title %}
   <p>Способ подключения: <span class="auth-method">{{ item.auth_method_title }}</span></p>
   {% endif %}
+  {% if item.origin_notice and item.status != 'not_connected' %}
+  <p class="token-origin token-origin-{{ item.origin_notice.kind }}{% if item.origin_notice.kind == 'submitted' %} warning{% endif %}">
+    {{ item.origin_notice.text }}{% if item.origin_notice.reason_text %} — {{ item.origin_notice.reason_text }}{% endif %}
+  </p>
+  {% endif %}
   {% if item.preset_title %}<p>Уровень доступа: {{ item.preset_title }}</p>{% endif %}
   {% if item.group_titles %}<p>Группы: {{ item.group_titles|join(', ') }}</p>{% endif %}
   <div class="actions">
