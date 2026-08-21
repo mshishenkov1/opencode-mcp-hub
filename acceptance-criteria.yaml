@@ -1103,3 +1103,95 @@ criteria:
     given: "два пользователя: первый подключил 'tag' через authorize со scope='tag:readonly tag:readwrite' и выбранным пресетом readonly, второй — через authorize со scope='tag:readonly'; у обоих одинаковые группы"
     when: "для каждого выполняется GET /api/me/connections, затем tools/list и вызов инструмента из группы с preset 'readwrite' через /mcp/tag"
     then: "у обоих в /api/me/connections preset == 'readonly' и поля scope в ответе нет; списки инструментов совпадают; вызов инструмента readwrite-группы отклоняется одинаково у обоих — набор из двух областей в запросе прав не расширил"
+
+  # --- Ревизия 4: обмен присланного токена на постоянный (R-U12…R-U18, R-U10.1) ---
+  - id: AC-214
+    text: "Обмен прошёл: в хранилище лежит постоянный токен, выпущенный целевой системой, а не присланный (R-U13)"
+    given: "способ user_token с verify {url '/me', account_field: username} и exchange {url '/me/tokens', method POST, headers {Authorization: 'Bearer {{access_token}}'}, body {description: '{{token_description}}'}, token_field: token, token_id_field: id, description: 'OpenCode Hub', revoke {...}}; мок целевой системы: verify отвечает 200 {'username': 'm.ivanov'} на оба токена, POST /me/tokens отвечает 200 {'id': 'tokid-1', 'token': 'PERMANENT-1', 'user_id': 'u1', 'description': 'OpenCode Hub (hub.test)', 'is_active': true}; HUB_PUBLIC_URL='https://hub.test'"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'SESSION-1'}"
+    then: "200 со status 'connected', token_origin == 'issued', token_origin_reason == null, account == 'm.ivanov'; мок получил запрос выпуска с заголовком Authorization 'Bearer SESSION-1' и телом {'description': 'OpenCode Hub (hub.test)'}; расшифровка upstream_tokens.access_token_enc даёт 'PERMANENT-1'; upstream_tokens.issued_token_id == 'tokid-1', token_origin == 'issued'; verify вызван дважды — с 'SESSION-1' и с 'PERMANENT-1'"
+  - id: AC-215
+    text: "При проксировании в целевую систему уходит постоянный токен, а не присланный (R-U13, R-P2)"
+    given: "подключение из AC-214 создано (выпущен 'PERMANENT-1' в обмен на 'SESSION-1'); credential_headers сервера — {Authorization: 'Bearer {{access_token}}'}"
+    when: "выполняется POST /mcp/{alias} с tools/list"
+    then: "upstream получил заголовок Authorization 'Bearer PERMANENT-1'; строки 'SESSION-1' нет ни в одном исходящем запросе"
+  - id: AC-216
+    text: "Схема каталога: блок exchange принимается только в допустимом виде (R-U12, R-C1)"
+    given: "каталоги со способом user_token, у которого: (а) корректный exchange с revoke; (б) exchange без revoke; (в) exchange у способа type: oauth2; (г) exchange.body со значением '{{access_token}}'; (д) exchange.revoke.body со значением '{{token_description}}'; (е) лишнее подполе exchange.retry; (ж) exchange.headers == {}; (з) exchange.description из 101 символа; (и) exchange.list без description_field; (к) способ user_token без exchange вовсе"
+    when: "загружается каждый каталог"
+    then: "(а) и (к) загружаются успешно, причём в (к) обмен не выполняется и поведение прежнее; (б)…(и) — ошибка схемы, сообщение содержит путь вида servers[0].auth_methods[<j>].exchange(.<подполе>)"
+  - id: AC-217
+    text: "Целевая система запрещает выпуск: подключение создаётся присланным токеном с причиной policy_denied (R-U14)"
+    given: "способ user_token с корректным exchange; verify отвечает 200 {'username': 'm.ivanov'}; мок POST /me/tokens по очереди отвечает 403 {'id': 'api.context.permissions.app_error'}, затем 501, затем 400, затем 404"
+    when: "для каждого случая выполняется POST /api/me/connections/{alias}/token с телом {token: 'SESSION-2'}"
+    then: "во всех четырёх случаях ответ 200 (не 400, не 409 и не 502) со status 'connected', token_origin == 'submitted', token_origin_reason == 'policy_denied'; расшифровка upstream_tokens.access_token_enc даёт 'SESSION-2'; issued_token_id == null; запросы к exchange.revoke и exchange.list не отправлялись; в audit_log событие connection_connected с details.token_origin == 'submitted' и details.token_origin_reason == 'policy_denied'"
+  - id: AC-218
+    text: "Обмен не удался по недоступности или непригодному ответу: подключение всё равно создаётся, причина upstream_unavailable (R-U14)"
+    given: "способ user_token с корректным exchange; verify отвечает 200 {'username': 'm.ivanov'}; мок POST /me/tokens по очереди отвечает: 500; 503; 429; сетевой ошибкой; таймаутом; 200 с телом 'not a json'; 200 с телом [1,2]; 200 с {'id': 'tokid', 'token': ''}; 200 с {'id': 'tokid', 'token': '   '}; 200 с {'id': 'tokid', 'token': 42}; 200 с {'token': 'PERM'} без id; 200 с {'id': '', 'token': 'PERM'}; 201 при expect_status 200"
+    when: "для каждого случая выполняется POST /api/me/connections/{alias}/token с телом {token: 'SESSION-3'}"
+    then: "во всех тринадцати случаях ответ 200 со status 'connected', token_origin == 'submitted', token_origin_reason == 'upstream_unavailable'; хранится 'SESSION-3', issued_token_id == null; ни одного запроса на exchange.revoke не отправлено"
+  - id: AC-219
+    text: "Выпущенный токен непригоден: он отзывается, подключение остаётся на присланном с причиной token_unusable (R-U13, R-U14)"
+    given: "способ user_token с exchange и verify {account_field: username}; мок POST /me/tokens всегда отвечает 200 {'id': 'tokid-9', 'token': 'PERMANENT-9'}; verify отвечает 200 {'username': 'm.ivanov'} на 'SESSION-4' и по очереди на 'PERMANENT-9': 401; 500; 200 {'username': 'a.petrov'} (другой аккаунт)"
+    when: "для каждого случая выполняется POST /api/me/connections/{alias}/token с телом {token: 'SESSION-4'}"
+    then: "во всех трёх случаях 200 со status 'connected', token_origin == 'submitted', token_origin_reason == 'token_unusable'; хранится 'SESSION-4', issued_token_id == null; в каждом случае на exchange.revoke ушёл ровно один запрос с token_id 'tokid-9', отправленный с заголовком Authorization 'Bearer SESSION-4'; в audit_log есть upstream_token_revoked с details.reason == 'unusable'"
+  - id: AC-220
+    text: "Повторное подключение не плодит личные токены пользователя (R-U15)"
+    given: "способ user_token с exchange, включая list {url '/me/tokens', id_field: id, description_field: description} и revoke; мок целевой системы ведёт список токенов пользователя и на каждый POST /me/tokens добавляет новый элемент с присланным description, отдавая {'id': 'tokid-<n>', 'token': 'PERMANENT-<n>'}; POST /tokens/revoke удаляет элемент по token_id; в списке изначально лежит чужой элемент {'id': 'foreign-1', 'description': 'Личный токен пользователя'}"
+    when: "один и тот же пользователь трижды подряд выполняет POST /api/me/connections/{alias}/token с телами {token: 'SESSION-a'}, {token: 'SESSION-b'}, {token: 'SESSION-c'}"
+    then: "все три ответа 200 с token_origin == 'issued'; после третьего в списке мока ровно два элемента — 'foreign-1' и последний выпущенный 'tokid-3'; upstream_tokens.issued_token_id == 'tokid-3', расшифровка access_token_enc даёт 'PERMANENT-3'; список и отзыв запрашивались новым постоянным токеном; отзыв 'tokid-1' и 'tokid-2' выполнен, отзыв 'foreign-1' не выполнялся ни разу"
+  - id: AC-221
+    text: "Отзываются только свои токены; сбой уборки не ломает подключение (R-U15.2, R-U15.3)"
+    given: "способ user_token с exchange, list и revoke; HUB_PUBLIC_URL='https://hub.test' (маркер 'OpenCode Hub (hub.test)'); мок POST /me/tokens отдаёт {'id': 'tokid-new', 'token': 'PERMANENT-new'}; список отдаёт элементы с description: 'OpenCode Hub (hub.test)' (id 'own-old'), 'opencode hub (hub.test)' (id 'case'), 'OpenCode Hub (hub.test) — копия' (id 'suffix'), 'OpenCode Hub' (id 'prefix'), 'OpenCode Hub (other.test)' (id 'other-install'), 42 вместо строки (id 'nonstr'), элемент без description (id 'nodesc'), а также сам 'tokid-new'"
+    when: "выполняется POST /api/me/connections/{alias}/token с телом {token: 'SESSION-5'}; отдельным прогоном тот же сценарий, но запрос списка отвечает 500, и ещё одним — запрос отзыва отвечает 500"
+    then: "в первом прогоне отозван ровно один элемент — 'own-old'; 'case', 'suffix', 'prefix', 'other-install', 'nonstr', 'nodesc' и 'tokid-new' не отзывались; во всех трёх прогонах ответ 200 со status 'connected', token_origin == 'issued' и сохранённым 'PERMANENT-new'; в прогонах со сбоем в audit_log есть upstream_token_cleanup_failed со stage 'list' и 'revoke' соответственно, а тела ответов целевой системы в журнал не попали"
+  - id: AC-222
+    text: "При отключении выпущенный Hub'ом токен отзывается, присланный — никогда (R-U15.4, R-U5, решение 66)"
+    given: "три подключения: (а) token_origin 'issued' с issued_token_id 'tokid-7'; (б) token_origin 'submitted' (обмен не удался); (в) token_origin 'issued', но мок отвечает на отзыв 500; у сервера объявлены exchange.revoke и OAuth-поле revoke_url"
+    when: "для каждого выполняется DELETE /api/me/connections/{alias}"
+    then: "(а) на exchange.revoke ушёл один запрос с token_id 'tokid-7', отправленный сохранённым постоянным токеном; (б) ни одного запроса на exchange.revoke и ни одного на revoke_url не отправлено; (в) отзыв провалился, но ответ всё равно успешный; во всех трёх случаях строка upstream_tokens удалена, connections.status == 'not_connected', клиентские токены Hub отозваны, записан аудит connection_disconnected, а последующий /mcp/{alias} отвечает -32002 not_connected; ни в одном случае не вызван OAuth revoke_url"
+  - id: AC-223
+    text: "При удавшемся обмене присланный токен не сохранён нигде (R-U13, R-U17)"
+    given: "включён перехват логов всех уровней; сценарий AC-214, присланный токен 'SESSION-SECRET-6', выпущенный 'PERMANENT-6'"
+    when: "POST /api/me/connections/{alias}/token с телом {token: 'SESSION-SECRET-6'}, затем GET /api/me/connections, GET /api/catalog, GET /ui/servers/{alias} и POST /mcp/{alias} с tools/list"
+    then: "строки 'SESSION-SECRET-6' (и любого её фрагмента длиной 8 и более символов) нет: ни в одном значении таблиц upstream_tokens и connections, ни в audit_log (включая details), ни в значении кэша conn:<user_id>:<alias>, ни в теле любого из перечисленных ответов, ни в HTML, ни в одной записи журнала; при этом расшифровка access_token_enc даёт 'PERMANENT-6'"
+  - id: AC-224
+    text: "Постоянный токен, тело ответа на выпуск и идентификатор токена наружу и в журнал не попадают (R-U17)"
+    given: "включён перехват логов всех уровней; мок POST /me/tokens отвечает 200 {'id': 'tokid-SECRET-ID', 'token': 'PERMANENT-SECRET-8', 'user_id': 'u1', 'extra': 'BODY-MARKER-8'}"
+    when: "POST /api/me/connections/{alias}/token, затем GET /api/me/connections, GET /api/catalog, GET /remote-config, GET /metrics и GET /ui/servers/{alias}"
+    then: "ни в одном ответе и ни в одной записи журнала нет 'PERMANENT-SECRET-8', 'BODY-MARKER-8' и 'tokid-SECRET-ID'; в audit_log есть upstream_token_issued с details {alias, auth_method} и connection_connected с details.token_origin == 'issued', и ни в одном details нет значения токена, идентификатора и тела ответа; в журнале при этом есть запись с alias, идентификатором способа и HTTP-кодом запроса выпуска"
+  - id: AC-225
+    text: "Пользователь видит, отвалится ли коннектор: постоянное и временное подключения различаются (R-U16)"
+    given: "три подключения одного пользователя: (а) alias A, token_origin 'issued'; (б) alias B, token_origin 'submitted', token_origin_reason 'policy_denied'; (в) alias C — способ user_token без блока exchange, token_origin 'submitted', token_origin_reason null"
+    when: "запрашиваются GET /api/me/connections, GET /ui/connections и GET /ui/servers/{alias} для каждого alias"
+    then: "в /api/me/connections у A — token_origin 'issued' и token_origin_reason null, у B — 'submitted' и 'policy_denied', у C — 'submitted' и null; на страницах A сказано, что подключение постоянное и выход из мессенджера его не разорвёт; у B показано предупреждение о временном подключении и объяснение, что целевая система не разрешает выпуск личных токенов; у C страница выглядит как прежде — предупреждения о временном подключении нет (AC-185…AC-187 не изменились); ни на одной странице нет значения токена"
+  - id: AC-226
+    text: "Маркер выпущенного токена изолирует установки Hub друг от друга (R-U15.1)"
+    given: "две установки Hub с HUB_PUBLIC_URL='https://hub.test' и 'https://hub-stage.test:8443', один и тот же каталог с exchange.description 'OpenCode Hub'; общий мок целевой системы, в списке которого уже лежит элемент с description 'OpenCode Hub (hub-stage.test:8443)' и id 'stage-1'"
+    when: "пользователь подключается через установку hub.test"
+    then: "в теле запроса выпуска description == 'OpenCode Hub (hub.test)'; элемент 'stage-1' не отозван; после подключения через hub-stage.test:8443 её запрос выпуска несёт description == 'OpenCode Hub (hub-stage.test:8443)', отзывается только 'stage-1', а токен, выпущенный установкой hub.test, не тронут"
+  - id: AC-227
+    text: "Наружу отдаётся только признак выпуска постоянного токена, но не сам блок обмена (R-U16, R-U8, R-C6)"
+    given: "каталог с сервером, объявившим два способа: user_token с exchange и expiry, и user_token без них; и отдельный сервер без auth_methods вовсе"
+    when: "GET /api/catalog (Bearer) и GET /ui/servers/{alias}"
+    then: "у первого способа issues_permanent_token == true, у второго — false; ни в одном ответе и ни в одном HTML нет ключей exchange и expiry и ни одного их значения (адресов, заголовков, description, token_field, token_id_field); у сервера без auth_methods в публичном представлении нет ни ключа auth_methods, ни issues_permanent_token (AC-22 не изменился)"
+  - id: AC-228
+    text: "Запись каталога tag с блоками exchange и expiry принимается и работает (R-U10.1)"
+    given: "каталог с записью tag из R-U10.1 (mode facade, verify /api/v4/users/me с account_field username, exchange на /api/v4/users/me/tokens с list и revoke, expiry на /api/v4/users/me/sessions); мок ТЭГ отвечает: verify 200 {'username': 'm.ivanov'}, POST /users/me/tokens 200 {'id': 'mm-1', 'token': 'MM-PERMANENT'}; HUB_PUBLIC_URL='https://hub.test'"
+    when: "create_app(), GET /api/catalog и POST /api/me/connections/tag/token с телом {token: 'MMAUTHTOKEN-1'}"
+    then: "старт успешен, схема принята; в /api/catalog у способа session_token issues_permanent_token == true; ответ подключения 200 с token_origin 'issued'; запрос выпуска ушёл на /api/v4/users/me/tokens методом POST с телом {'description': 'OpenCode Hub (hub.test)'} и заголовком Authorization 'Bearer MMAUTHTOKEN-1'; хранится 'MM-PERMANENT'; отдельным прогоном тот же каталог с моком, отвечающим 403 на /users/me/tokens и на GET /users/me/tokens, даёт 200 с token_origin 'submitted' и token_origin_reason 'policy_denied'"
+  - id: AC-229
+    text: "Неудача обмена не запоминается: следующее подключение повышает коннектор до постоянного токена (R-U14.4)"
+    given: "подключение создано присланным токеном при моке, отвечающем 403 на выпуск (token_origin 'submitted', reason 'policy_denied'); затем мок начинает отвечать 200 {'id': 'tokid-late', 'token': 'PERMANENT-late'}"
+    when: "тот же пользователь повторно выполняет POST /api/me/connections/{alias}/token с телом {token: 'SESSION-late'}"
+    then: "запрос выпуска отправлен снова (без каких-либо пропусков попытки), ответ 200 с token_origin 'issued' и token_origin_reason null, хранится 'PERMANENT-late', issued_token_id == 'tokid-late'; обратный переход тоже работает: если после этого мок снова отвечает 403, следующее подключение даёт token_origin 'submitted' с reason 'policy_denied'"
+  - id: AC-230
+    text: "Срок годности присланного токена читается и показывается как верхняя граница (R-U18)"
+    given: "способ user_token с expiry {url '/api/v4/users/me/sessions', expires_field: expires_at, expires_unit: ms} и exchange, отвечающим 403 на выпуск; мок сессий отдаёт массив из элементов с expires_at: <now+179 дней в мс>, <now+3 дня в мс>, 0 и <now-1 день в мс>"
+    when: "POST /api/me/connections/{alias}/token, затем GET /api/me/connections и GET /ui/servers/{alias}"
+    then: "ответ 200 с token_origin 'submitted'; session_expires_at равен наибольшему пригодному значению (now+179 дней) в ISO-8601 UTC, а не now+3 дня и не 0; в upstream_tokens.submitted_expires_at то же значение; на странице сервера дата показана с формулировкой «не позднее»; запрос сессий отправлен присланным токеном; при token_origin 'issued' (мок выпуска отвечает 200) запрос сессий не отправляется вовсе и session_expires_at == null"
+  - id: AC-231
+    text: "Невозможность прочитать срок ничего не ломает и не порождает выдуманных дат (R-U18.4)"
+    given: "тот же способ с expiry; мок выпуска отвечает 403; мок сессий по очереди отвечает: 403; 500; сетевой ошибкой; таймаутом; 200 с телом 'not a json'; 200 с []; 200 с массивом, где все expires_at равны 0; 200 с массивом, где все expires_at в прошлом"
+    when: "для каждого случая выполняется POST /api/me/connections/{alias}/token с телом {token: 'SESSION-11'}"
+    then: "во всех восьми случаях ответ 200 со status 'connected', token_origin 'submitted', token_origin_reason 'policy_denied' и session_expires_at == null; submitted_expires_at в БД == null; на странице сервера показано предупреждение о временном подключении без какой-либо даты; тело ответа мока сессий в журнал не попало"
