@@ -323,7 +323,12 @@ VALUES
 @test "AC-145: \\u0020 в app_name — пробел ВНУТРИ имени, а не запрещённый символ" {
   # Паритет с ConvertFrom-Json на разрешённом символе: "OpenCode Magnit.app" — та же строка,
   # что и штатное имя бандла, и она обязана приниматься.
-  PKG_DESKTOP=1 make_pkg
+  #
+  # Пакет собирается с PKG_PLATFORM=macos на ОБЕИХ площадках (как в AC-154 в 36-desktop-safety):
+  # план установки бандла существует только в macOS-ветке (на Linux каталога /Applications нет и
+  # шага с бандлом в плане нет вовсе), а --dry-run до hdiutil/ditto не доходит. Так проверка
+  # декодирования \\u0020 в имени бандла выполняется и на Linux, без молчаливого пропуска.
+  PKG_PLATFORM=macos PKG_DESKTOP=1 make_pkg
   # Имя берётся из $OM_APP_NAME, а не из литерала: подстановка sed по литералу имени после
   # переименования бандла перестала бы срабатывать МОЛЧА (N5-T1, AC-154).
   case $OM_APP_NAME in
@@ -339,7 +344,7 @@ VALUES
   oc_run --dry-run
   assert_status 0
   refute_output_contains "поле artifacts.1.app_name"
-  assert_output_contains "$OM_APP_NAME"
+  assert_output_contains "/Applications/$OM_APP_NAME"
 }
 
 @test "AC-145: \\u0024 не отмывает \$ — код 2 с именем поля и декодированным значением" {
