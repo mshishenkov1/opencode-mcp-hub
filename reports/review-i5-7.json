@@ -1,0 +1,92 @@
+{
+  "iteration": "I-5",
+  "cycle": 7,
+  "kind": "final_recheck",
+  "scope": "Узкая финальная перепроверка по заданию: обязательная находка NEW-1 (маркер AC-155, коммит 9f301b3), минорные 2 и 3 (коммит 9c2f91d), минорная 4 (статус pwsh/fish). Сплошной обход не проводился, закрытые в reports/review-i5-6.json вопросы не переоткрывались.",
+  "branch": "pipeline/i1-hub-login-catalog-20260818",
+  "head_at_review": "9f301b3",
+  "worktree_state": "продукт не изменялся: sha256 installers/common/install-posix.sh df127268cd87937586333db3dcc4542640579d70220df28ba8b20e7c7ec3f263 до и после всех трёх мутантов; git status по installers/ пуст. Мутанты собирались в КОПИИ дерева (scratchpad/mut/installers), сам репозиторий под мутацию не правился. Изменён state.json (побочный эффект scripts/run_gates.py) и добавлены reports/gates-review-i5-7-*.json, reports/gates-manual.json.",
+
+  "verdict": "approve",
+
+  "recheck": [
+    {
+      "finding": "NEW-1 отчёта review-i5-6 (major, must_fix)",
+      "title": "Маркер AC-155 отсутствовал во всех тестах, trace-ac.sh давал код 1, 95-sources.bats краснел",
+      "commit": "9f301b3",
+      "status": "ЗАКРЫТА",
+      "evidence": {
+        "trace": "bash installers/tests/trace-ac.sh -> код 0. Строка AC-155: type=integration, тестов 6, файлы 35-manifest-paths.bats 57-system-user.bats Install.Tests.ps1. Итог: «Всего критериев AC-*: 155; с тестами: 138. Все критерии типа unit/integration покрыты.»",
+        "bats_suite": "bats installers/tests/bats на HEAD 9f301b3: 269 ok, 0 not ok, 1 skip (было 268 ok / 1 not ok / 1 skip). Прежде красный тест «AC-127: трассировка AC → тесты сходится» зелёный (ok 258). Набор ветки зелёный, задание bats installers/ci/installers.yml пройдёт.",
+        "mutant_1": "«убрать make_user_dir для родителя CA»: в копии дерева строка 1413 install_ca заменена на ': \"$ca_parent\"' (bash -n чист, поведение изменено наблюдаемо). Прогон 35-manifest-paths.bats + 57-system-user.bats: 32 ok, 2 not ok — краснеют РОВНО оба помеченных AC-155 теста. Тест 13 (35-manifest-paths): код выхода 1 вместо 0 и в выводе «cp: …/certs/corp/tander-ca-bundle.pem: No such file or directory» — то есть краснеет по обоим утверждениям критерия сразу (код 0 и отсутствие английской диагностики). Тест 29 (57-system-user): «CA не установлен по многосегментному имени».",
+        "mutant_2": "«chmod 0700 вместо 0755» в make_user_dir (строка 1332). Прогон тех же двух файлов: 33 ok, 1 not ok — краснеет тест 13 с сообщением «Права …/.config/opencode/certs: ожидалось 755, получено 700». Тест 57-system-user на этом мутанте зелёный — он владельца, а не права проверяет; это соответствует разделению клауз критерия.",
+        "mutant_3_own": "Дополнительный собственный мутант (задание его не требовало) на проверку живости НОВОЙ клаузы идемпотентности: write_profile_block, строка 1152 «if profile_has_block …» -> «if false» — второй запуск дописывает второй блок в профиль. В 35-manifest-paths.bats краснеет ровно тест 13: снимок дома snapshot_home до/после второго запуска расходится. Значит добавленная проверка N5-U1 не декоративная.",
+        "restoration": "После каждого мутанта копия восстанавливалась из эталона; итоговый sha256 копии и репозитория совпадает с базовым."
+      },
+      "completeness_of_marker": {
+        "verdict": "маркер поставлен обоснованно, частичного покрытия под маркером нет",
+        "detail": "Клаузы AC-155 и где каждая проверена: (1) первый запуск код 0 — 35:oc_run --no-launch + assert_status 0; (2) промежуточные <config>/certs и <config>/certs/corp созданы САМИМ установщиком — явное предусловие «if [ -e \"$config_dir/certs\" ] -> return 1» до запуска плюс проверка -d после; (3) права 0755 на каждом звене — цикл по обоим каталогам с mode_of, убит мутантом 2; (4) CA лежит по многосегментному пути — [ -f \"$ca\" ]; (5) sha256 CA равен ca.sha256 манифеста — значение независимо вычитано awk из $PKG/common/manifest.json и сверено с sha256_file установленного файла (не формула реализации, не подстановка теста); (6) цель внутри каталога конфига — путь строится от config_dir_path; (7) NODE_EXTRA_CA_CERTS в профиле указывает ровно на этот путь — assert_file_contains \"$HOME/.zshrc\" \"export NODE_EXTRA_CA_CERTS='$ca'\"; (8) путь напечатан в отчёте — assert_output_contains \"$ca\"; (9) нет 'No such file', нет иной системной англоязычной диагностики копирования, нет «поле ca.install_name» — три refute_output_contains ('No such file', 'cp:', 'поле ca.install_name'), причём на обоих запусках; (10) повторный запуск код 0 и не меняет состояния (N5-U1) — snapshot_home до/после второго запуска и diff, убит мутантом 3; (11) --check код 0 — oc_run --check + assert_status 0; (12) Windows-клауза — Describe «AC-155…» из трёх It в Install.Tests.ps1; (13) клауза «при --system каждый созданный промежуточный каталог принадлежит исходному пользователю» — 57-system-user.bats: assert_chowned на certs, certs/corp и сам CA-файл плюс assert_new_paths_chowned (от обратного: каждый появившийся в доме путь обязан быть в журнале chown). Ни одна клауза критерия не осталась без теста. Маркер на 57-system-user.bats покрывает ровно ту клаузу, которую этот файл и проверяет (владелец при --system); основной корпус критерия несёт 35-manifest-paths.bats, Windows-паритет — Install.Tests.ps1. Тавтологии нет: ожидания берутся из манифеста, из снимков ФС и из ловушки chown, а не из выражений реализации."
+      },
+      "windows_part": {
+        "status": "написан, на этой машине не прогонялся",
+        "detail": "Install.Tests.ps1: Describe «AC-155…», три It — валидация Test-PackagePath 'certs/corp/tander-ca-bundle.pem' и CaTarget внутри ConfigDir; создание обоих недостающих каталогов с предусловием «ни одного звена нет», Should -Not -Throw на Invoke-CaInstall, сверка Get-FileHash с $layout.CaSha, отсутствие 'No such file'/'Could not find'/'DirectoryNotFound' и наличие русского 'CA: установлен'; идемпотентность повторного вызова — 'CA: уже установлен', неизменный хеш и посостав ConfigDir из ровно 3 объектов. Статической сверкой подтверждено, что все используемые имена существуют в installers/windows/install.ps1: Get-Layout, Invoke-CaInstall, Read-Manifest, Test-PackagePath, Get-Prop, Get-UserProfileDir, Get-LocalAppDataDir, Write-Line, Write-Say; свойства Layout.ConfigDir/CaTarget/CaSha; сообщения $script:MsgCaInstalled='CA: установлен ({0})' и $script:MsgCaSame='CA: уже установлен' совпадают с ожиданиями теста. New-TempDir определён в самом Install.Tests.ps1 (строка 97). Ветвлений по платформе и Set-ItResult -Skipped в добавленном блоке нет. Фабрика New-FixturePackage расширена параметром -CaInstallName со значением по умолчанию 'tander-ca-bundle.pem' — прежние тесты не затронуты. Исполнить нечем: pwsh на машине отсутствует."
+      }
+    },
+    {
+      "finding": "минорная 2 отчёта review-i5-6",
+      "title": "Ложный безусловный инвариант границы chown в N5-I14",
+      "commit": "9c2f91d",
+      "status": "ЗАКРЫТА",
+      "evidence": "spec.md, абзац «Цепочка каталогов и граница «создано установщиком»» переписан по признаку «установщик объект СОЗДАЛ ИЛИ ИЗМЕНИЛ». Положительная часть названа прямо: владельца получают созданные звенья цепочки, каталог конфига (если создан им), CA-файл, резервные копии <файл>.opencode-magnit.bak и opencode.json.bak, «а также файл профиля — в том числе уже существовавший». Отрицательная часть ограничена объектами, которых установщик не касался: сам дом, обжитый <дом>/.config, уже существовавший каталог конфига, пользовательский opencode.json. Проверяемая часть разбита на три утверждения, третье — положительное: «существовавший до запуска файл профиля в этом множестве, наоборот, ЕСТЬ». Формулировка совпадает с наблюдавшимся в цикле 6 поведением (журнал chown содержит ~/.zshrc в прогоне с обжитым домом) и с реализацией: install-posix.sh:1195-1196 — cat в существующий $profile_file и следом chown_user_path \"$profile_file\". Та же обобщающая фраза исправлена в шапке installers/docs/acceptance-criteria.yaml (комментарий ревизии 1.5.1). Критерии не менялись: набор остался AC-01…AC-155 (подтверждено trace-ac.sh: «Всего критериев AC-*: 155»), AC-149 и раньше ограничивал инвариант каталогами и пользовательским opencode.json — регрессии тестов нет (57-system-user.bats зелёный, 5 тестов на AC-149)."
+    },
+    {
+      "finding": "минорная 3 отчёта review-i5-6",
+      "title": "§14 неполон по artifacts[].install_name для kind:\"cli\"",
+      "commit": "9c2f91d",
+      "status": "ЗАКРЫТА",
+      "evidence": "spec.md §14, пункт «[решить] Многосегментное artifacts[].install_name для kind:\"cli\"» дополнен обоими фактами дословно: (1) системная англоязычная диагностика в stderr «mv: rename <bin_dir>/.opencode.new.<pid> to <bin_dir>/sub/dir/opencode: No such file or directory» — названа нарушением N5-I1, и отдельно отмечено, что сопровождающее русское «Нет прав на запись в каталог» вводит в заблуждение; (2) в bin_dir ОСТАЁТСЯ временный файл .opencode.new.<pid>, при --system — мусор в системном каталоге. Код обрыва уточнён с прежней размытой формулировки до «обрывается кодом 5» — совпадает с воспроизведением цикла 6. Рекомендация зафиксирована и совпадает с моей: из двух вариантов выбран ВТОРОЙ (отвергать '/' в этом поле кодом 2 при проверке манифеста), с обоснованием, что первый означал бы создание подкаталогов в /usr/local/bin при --system — новое привилегированное действие, не требуемое ни одним правилом. Вопрос явно оставлен открытым и вынесен в отдельную итерацию, с обоснованием допустимости на I-5 (манифест не порождается сборщиком по N5-B2, path_require_child держит цель внутри bin_dir, кода 0 не возникает, безопасность не затронута) и ссылками на review-i5-5 находка 6 и review-i5-6 находка 3. Возражений нет."
+    },
+    {
+      "finding": "минорная 4 отчёта review-i5-6",
+      "title": "Pester и fish не прогоняются на этой машине",
+      "commit": "—",
+      "status": "ПОДТВЕРЖДЁН СТАТУС, чинить нечего",
+      "evidence": "command -v pwsh — пусто; command -v fish — пусто. В полном прогоне bats ровно 1 skip — тест AC-147 (исполнение сгенерированного fish-профиля настоящим fish) в 55-injection.bats. Весь набор installers/tests/pester/*.Tests.ps1, включая новый Describe AC-155, на этой машине исполнить нельзя; проверен статически (см. windows_part выше). must_fix не ставится; прежнее действие остаётся в силе — добавить fish в задание bats installers/ci/installers.yml."
+    }
+  ],
+
+  "findings": [],
+
+  "new_findings_note": "Новых находок нет. В узкой области задания (коммиты 9f301b3 и 9c2f91d, суммарно 5 файлов: 2 bats, 1 Pester, spec.md, acceptance-criteria.yaml) отклонений от спеки, тавтологичных тестов и подгонки под тест не обнаружено. Код продукта этими коммитами не затрагивался.",
+
+  "gates": [
+    {"gate": "G1", "what": "Тесты (pytest)", "result": "зелёный", "detail": "все тесты зелёные, skip: 0"},
+    {"gate": "G2", "what": "Coverage-diff", "result": "зелёный", "detail": "coverage-diff 95% >= порога 90% (база main)"},
+    {"gate": "G3", "what": "Mutation", "result": "зелёный", "detail": "прогнан отдельно (--only G3, no_proxy='*'): mutation score 89.3% (killed 2595, timeout 0, survived 310, suspicious 0), порог 70% — reports/gates-review-i5-7-g3.json"},
+    {"gate": "G4", "what": "Статанализ (ruff + mypy)", "result": "зелёный", "detail": "линтер и типизация чистые"},
+    {"gate": "G5", "what": "Ревью", "result": "зелёный после настоящего отчёта", "detail": "прогон --skip G3 ДО записи отчёта дал FAIL («review-i5-6.json: verdict=request_changes»); повторный прогон с настоящим reports/review-i5-7.json (verdict=approve, ни одного must_fix) — PASS. Файл reports/gates-review-i5-7-nog3.json"},
+    {"gate": "G6", "what": "AC-трассировка хаба (scripts/check_ac_traceability.py)", "result": "зелёный", "detail": "все 69 критериев корневого acceptance-criteria.yaml покрыты тестами tests/"},
+    {"gate": "bats (вне G1-G6)", "what": "installers/tests/bats", "result": "зелёный", "detail": "269 ok, 0 not ok, 1 skip (skip — AC-147, fish отсутствует). В цикле 6 было 268 ok / 1 not ok / 1 skip"}
+  ],
+
+  "trace_ac": {
+    "command": "bash installers/tests/trace-ac.sh",
+    "exit_code": 0,
+    "result": "зелёный",
+    "summary": "Всего критериев AC-*: 155; с тестами: 138. Все критерии типа unit/integration покрыты. AC-155 — integration, 6 тестов, файлы 35-manifest-paths.bats, 57-system-user.bats, Install.Tests.ps1. Без тестов остаются только типы manual и два ci (AC-124, AC-129), что скрипт допускает."
+  },
+
+  "not_verified_on_this_machine": [
+    "Pester-набор installers/tests/pester/*.Tests.ps1, включая новый Describe AC-155 — pwsh отсутствует; проверен только статической сверкой имён, свойств Layout и текстов сообщений с installers/windows/install.ps1.",
+    "Исполнение сгенерированного fish-профиля настоящим fish — fish отсутствует (1 skip в 55-injection.bats).",
+    "Поведение под настоящим sudo/root — прогоны --system идут на ловушках id/dscl/getent/chown."
+  ],
+
+  "dispute_resolutions": [],
+
+  "notes": [
+    "Единственная обязательная находка предыдущего цикла закрыта, все три минорные из области задания закрыты или подтверждены как не требующие правки. Ни одного must_fix не осталось — вердикт approve.",
+    "Мутанты собирались в копии дерева в scratchpad, репозиторий под мутацию не правился ни разу; sha256 installers/common/install-posix.sh неизменен на протяжении всего ревью.",
+    "scripts/run_gates.py при прогоне меняет state.json как побочный эффект: в этом ревью gates.G5 true -> false (по review-i5-6.json) и добавлены записи history «gates: FAIL -> gates-manual.json» и «gates: ALL PASS -> gates-manual.json». Это правка инструмента, не review-agent; зона review — только reports/ и disputes/. Также инструмент создаёт reports/gates-manual.json."
+  ]
+}

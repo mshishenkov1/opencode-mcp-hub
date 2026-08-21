@@ -171,6 +171,18 @@
     {
       "ts": "2026-08-19T20:04:05",
       "event": "I-1 done: все гейты зелёные"
+    },
+    {
+      "ts": "2026-08-21T10:13:53",
+      "event": "gates: FAIL -> gates-manual.json"
+    },
+    {
+      "ts": "2026-08-21T10:14:03",
+      "event": "gates: ALL PASS -> gates-manual.json"
+    },
+    {
+      "ts": "2026-08-21T10:17:30",
+      "event": "gates: ALL PASS -> gates-manual.json"
     }
   ]
 }

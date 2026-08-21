@@ -1,0 +1,12 @@
+{
+  "run_id": "manual",
+  "ts": "2026-08-21T10:14:03",
+  "all_passed": true,
+  "gates": {
+    "G3": {
+      "name": "Mutation",
+      "passed": true,
+      "detail": "mutation score 89.3% (killed 2595, timeout 0, survived 310, suspicious 0), порог 70%"
+    }
+  }
+}
