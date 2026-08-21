@@ -177,7 +177,11 @@ def main(argv: list[str]) -> int:
     state_path = ROOT / "state.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state["gates"] = {gid: r["passed"] for gid, r in results.items()}
+        # Прогон подмножества (--only/--skip) дополняет запись, а не заменяет её:
+        # иначе состояние непрогнанных гейтов молча терялось бы.
+        gates_state = dict(state.get("gates") or {})
+        gates_state.update({gid: r["passed"] for gid, r in results.items()})
+        state["gates"] = gates_state
         state.setdefault("history", []).append(
             {"ts": ts, "event": f"gates: {'ALL PASS' if all_ok else 'FAIL'} -> {out.name}"})
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n",
