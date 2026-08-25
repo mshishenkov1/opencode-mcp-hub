@@ -65,7 +65,10 @@ source = ["src"]
 source_paths = ["src/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Тесты запускаются из каталога mutants/; AC-07 читает catalog.yaml из корня репозитория.
-also_copy = ["catalog.yaml", "deploy"]
+# Шаблоны Jinja здесь же: copy_src_dir() копирует не-Python файлы только если их ещё нет, поэтому
+# без also_copy в mutants/ навсегда остаются устаревшие копии (copy_also_copy_files() перезаписывает
+# их каждый прогон) — на них падал сбор статистики G3.
+also_copy = ["catalog.yaml", "deploy", "src/hub/templates"]
 
 [tool.ruff]
 line-length = 100
