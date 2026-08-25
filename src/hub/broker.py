@@ -66,6 +66,13 @@ CLEANUP_REVOKE_LIMIT = 20
 REVOKE_REASON_RECONNECT = "reconnect"
 REVOKE_REASON_DISCONNECT = "disconnect"
 REVOKE_REASON_UNUSABLE = "unusable"
+# R-U17.2 (ревизия 4.1): прежний выпущенный токен убирается после неудавшегося обмена (R-U19).
+REVOKE_REASON_EXCHANGE_FAILED = "exchange_failed"
+# R-U17.2: на какой стадии уборка не удалась.
+CLEANUP_STAGE_LIST = "list"
+CLEANUP_STAGE_REVOKE = "revoke"
+# R-U19.5, R-U19.8 (ревизия 4.1): отзывать прежний выпущенный токен нечем либо след потерян.
+CLEANUP_STAGE_ORPHAN = "orphan"
 
 
 class BrokerError(Exception):
@@ -575,17 +582,16 @@ class TokenBroker:
             account=issued_account or submitted_account,
         )
 
-    async def revoke_issued_token(
+    async def _revoke_request(
         self,
         entry: ServerEntry,
         method: AuthUserToken,
         *,
         token_id: str,
         credential: str,
-        user_id: str,
         reason: str,
     ) -> bool:
-        """Отозвать выпущенный Hub'ом токен по его идентификатору (R-U15.2).
+        """Один запрос отзыва выпущенного Hub'ом токена (R-U15.2); аудит пишет вызывающий.
 
         Отзыв запускает только точный признак: идентификатор, сохранённый Hub'ом, либо элемент
         списка с описанием, равным маркеру побайтово. Присланный токен не отзывается никогда.
@@ -628,13 +634,85 @@ class TokenBroker:
                 "reason": reason,
             },
         )
+        return ok
+
+    async def _revoked_audit(self, *, user_id: str, alias: str, reason: str, ok: bool) -> None:
+        """Факт отзыва в аудит (R-U17.2): без значений токенов и без ``issued_token_id``."""
         await self.db.audit(
             "upstream_token_revoked",
             user_id=user_id,
-            alias=entry.alias,
-            details={"alias": entry.alias, "reason": reason, "outcome": "ok" if ok else "failed"},
+            alias=alias,
+            details={"alias": alias, "reason": reason, "outcome": "ok" if ok else "failed"},
             ts=self.clock.now(),
         )
+
+    async def revoke_issued_token(
+        self,
+        entry: ServerEntry,
+        method: AuthUserToken,
+        *,
+        token_id: str,
+        credential: str,
+        user_id: str,
+        reason: str,
+    ) -> bool:
+        """Отозвать выпущенный Hub'ом токен по его идентификатору (R-U15.2): запрос и аудит."""
+        ok = await self._revoke_request(
+            entry, method, token_id=token_id, credential=credential, reason=reason
+        )
+        await self._revoked_audit(user_id=user_id, alias=entry.alias, reason=reason, ok=ok)
+        return ok
+
+    async def revoke_orphan_issued_token(
+        self,
+        entry: ServerEntry,
+        method: AuthOAuth2 | AuthUserToken | None,
+        *,
+        token_id: str,
+        stored_credential: str | None,
+        submitted_token: str,
+        user_id: str,
+    ) -> bool:
+        """Попытка отозвать прежний выпущенный токен после неудавшегося обмена (R-U19.3).
+
+        ``method`` — способ, **которым токен был выпущен** (``connections.auth_method`` до
+        текущего подключения). Best effort: не более двух запросов — прежним сохранённым токеном
+        подключения, затем ровно одна запасная попытка присланным (он уже прошёл ``verify``).
+        Исход на результат подключения не влияет; ``True`` — отзыв подтверждён, идентификатор
+        можно стирать, иначе он остаётся пометкой на уборку (R-U19.4).
+        """
+        if not isinstance(method, AuthUserToken) or method.exchange is None:
+            # R-U19.5: механизма отзыва нет — ни одного запроса не отправляется.
+            await self._cleanup_failed(
+                user_id=user_id, alias=entry.alias, stage=CLEANUP_STAGE_ORPHAN
+            )
+            return False
+        ok = False
+        if stored_credential:
+            ok = await self._revoke_request(
+                entry,
+                method,
+                token_id=token_id,
+                credential=stored_credential,
+                reason=REVOKE_REASON_EXCHANGE_FAILED,
+            )
+        if not ok:
+            # R-U19.3(б): ровно одна запасная попытка присланным токеном — новых каналов утечки
+            # нет, он уходит в ту же целевую систему тем же способом, что и в ``verify``.
+            ok = await self._revoke_request(
+                entry,
+                method,
+                token_id=token_id,
+                credential=submitted_token,
+                reason=REVOKE_REASON_EXCHANGE_FAILED,
+            )
+        await self._revoked_audit(
+            user_id=user_id, alias=entry.alias, reason=REVOKE_REASON_EXCHANGE_FAILED, ok=ok
+        )
+        if not ok:
+            await self._cleanup_failed(
+                user_id=user_id, alias=entry.alias, stage=CLEANUP_STAGE_REVOKE
+            )
         return ok
 
     async def _cleanup_failed(self, *, user_id: str, alias: str, stage: str) -> None:
@@ -701,13 +779,15 @@ class TokenBroker:
                 reason=REVOKE_REASON_RECONNECT,
             )
             if not ok:
-                await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage="revoke")
+                await self._cleanup_failed(
+                    user_id=user_id, alias=entry.alias, stage=CLEANUP_STAGE_REVOKE
+                )
         listing = exchange.list
         if listing is None:
             return
         items = await self._list_issued_tokens(method, access_token)
         if items is None:
-            await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage="list")
+            await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage=CLEANUP_STAGE_LIST)
             return
         marker = self.issued_marker(exchange)
         targets: list[str] = []
@@ -733,7 +813,9 @@ class TokenBroker:
                 reason=REVOKE_REASON_RECONNECT,
             )
             if not ok:
-                await self._cleanup_failed(user_id=user_id, alias=entry.alias, stage="revoke")
+                await self._cleanup_failed(
+                    user_id=user_id, alias=entry.alias, stage=CLEANUP_STAGE_REVOKE
+                )
 
     async def read_submitted_expiry(
         self, entry: ServerEntry, method: AuthUserToken, submitted_token: str
@@ -790,12 +872,35 @@ class TokenBroker:
             )
         return best
 
-    async def issued_token_id(self, connection: Connection | None) -> str | None:
-        """Идентификатор ранее выпущенного Hub'ом токена подключения (R-U15.3)."""
+    async def previous_issued_token(
+        self, connection: Connection | None
+    ) -> tuple[str | None, str | None]:
+        """Прежний выпущенный токен подключения: ``(идентификатор, сохранённый токен)``.
+
+        Читается **до** перезаписи строки (R-U15.3, R-U19.2): идентификатор нужен уборке, а
+        расшифрованный ``access_token_enc`` — учётные данные первой попытки отзыва (R-U19.3(а)).
+        """
         if connection is None:
-            return None
+            return None, None
         row = await self._read_token_row(connection.id)
-        return row.issued_token_id if row is not None else None
+        if row is None:
+            return None, None
+        return row.issued_token_id, self.cipher.try_decrypt(row.access_token_enc)
+
+    async def clear_issued_token_id(self, connection: Connection) -> None:
+        """Стереть идентификатор выпущенного токена — только по подтверждённому отзыву (R-U19.4)."""
+        await self.db.init()
+        async with self.db.session() as session, session.begin():
+            row = (
+                await session.execute(
+                    select(UpstreamToken)
+                    .where(UpstreamToken.connection_id == connection.id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:  # pragma: no cover - строка только что записана
+                return
+            row.issued_token_id = None
 
     async def store_submitted_expiry(
         self, connection: Connection, expires_at: datetime | None
@@ -975,9 +1080,10 @@ class TokenBroker:
     ) -> None:
         """Сохранить токены системы в зашифрованном виде (R-B3, R-B6).
 
-        ``origin`` задаётся только для пользовательского токена (R-U13.5): происхождение
-        перезаписывается целиком, поэтому прежний ``issued_token_id`` не переживает подключение,
-        в котором обмен не состоялся.
+        ``origin`` задаётся только для пользовательского токена (R-U13.5). Идентификатор
+        выпущенного токена перезаписывается лишь новым выпущенным (R-U14.3 в редакции ревизии
+        4.1): при неудавшемся обмене прежний ``issued_token_id`` остаётся пометкой на уборку и
+        стирается отдельно — только по подтверждённому отзыву (R-U19.2, R-U19.4).
         """
         await self.db.init()
         now = to_naive_utc(self.clock.now())
@@ -1007,7 +1113,8 @@ class TokenBroker:
             if origin is not None:
                 row.token_origin = origin.origin
                 row.token_origin_reason = origin.reason
-                row.issued_token_id = origin.issued_token_id
+                if origin.issued:
+                    row.issued_token_id = origin.issued_token_id
                 row.submitted_expires_at = None
         await self.invalidate_cache(connection.user_id, connection.alias)
 
@@ -1019,6 +1126,10 @@ class TokenBroker:
         R-U15.4: выпущенный Hub'ом постоянный токен отзывается **до** удаления строки — иначе
         в учётной записи пользователя остаётся бесхозный долгоживущий доступ. Присланный токен
         не отзывается никогда (R-U5, решение 66). Неудача отзыва отключению не мешает.
+
+        Уточнение ревизии 4.1 (R-U19.6): отзыв выполняется по непустому ``issued_token_id`` и
+        при ``token_origin = "submitted"`` — это пометка на уборку. Если механизма отзыва в
+        каталоге больше нет, строка всё равно удаляется, а потеря следа фиксируется (R-U19.8).
         """
         await self.db.init()
         async with self.db.session() as session:
@@ -1032,11 +1143,10 @@ class TokenBroker:
             if row is None:
                 return None
             token = self.cipher.try_decrypt(row.access_token_enc)
-            token_origin = row.token_origin
             issued_token_id = row.issued_token_id
-        if entry is not None and token and token_origin == TOKEN_ORIGIN_ISSUED and issued_token_id:
+        if entry is not None and issued_token_id:
             method = entry.auth_method(connection.auth_method)
-            if isinstance(method, AuthUserToken) and method.exchange is not None:
+            if isinstance(method, AuthUserToken) and method.exchange is not None and token:
                 await self.revoke_issued_token(
                     entry,
                     method,
@@ -1044,6 +1154,13 @@ class TokenBroker:
                     credential=token,
                     user_id=connection.user_id,
                     reason=REVOKE_REASON_DISCONNECT,
+                )
+            else:
+                # R-U19.5, R-U19.8: отзывать нечем — строка удаляется, потеря следа фиксируется.
+                await self._cleanup_failed(
+                    user_id=connection.user_id,
+                    alias=connection.alias,
+                    stage=CLEANUP_STAGE_ORPHAN,
                 )
         async with self.db.session() as session, session.begin():
             row = (

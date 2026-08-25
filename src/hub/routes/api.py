@@ -248,6 +248,8 @@ async def api_connect_token(
     само значение токена не попадает ни в журнал, ни в аудит, ни в ответ (R-U9). При объявленном
     блоке ``exchange`` присланный токен меняется на постоянный; неудача обмена подключение не
     отклоняет (R-U14) — сохраняется присланный токен с пометкой происхождения и причиной.
+    В этой же ветке выполняется уборка сироты (R-U19): прежний выпущенный Hub'ом токен Hub
+    пытается отозвать, пока помнит его идентификатор, — best effort, на исход не влияет.
     """
     state = request.app.state
     entry = _facade_entry(request, alias, user)
@@ -274,9 +276,11 @@ async def api_connect_token(
     else:
         outcome = ExchangeOutcome(token, TokenOrigin(), account)
 
-    # Шаг 5 R-U13: хранение. Прежний идентификатор читается до перезаписи строки (R-U15.3).
+    # Шаг 5 R-U13: хранение. Прежний идентификатор и прежний токен читаются до перезаписи
+    # строки (R-U15.3, R-U19.2); способ выпуска — тот, которым подключение работало до сих пор.
     previous = await state.broker.load_connection(user.user_id, alias)
-    previous_token_id = await state.broker.issued_token_id(previous)
+    previous_token_id, previous_credential = await state.broker.previous_issued_token(previous)
+    previous_method = entry.auth_method(previous.auth_method) if previous is not None else None
     connection = await state.broker.upsert_connection(
         user_id=user.user_id,
         alias=alias,
@@ -314,11 +318,27 @@ async def api_connect_token(
             issued_token_id=outcome.origin.issued_token_id,
             previous_token_id=previous_token_id,
         )
-    elif method.expiry is not None:
-        # Шаг 7 R-U13: срок годности присланного токена; неудача оставляет ``null`` (R-U18.4).
-        expires_at = await state.broker.read_submitted_expiry(entry, method, outcome.token)
-        await state.broker.store_submitted_expiry(connection, expires_at)
-        session_expires_at = to_iso(expires_at)
+    else:
+        if previous_token_id:
+            # Шаг 6 R-U13 в ветке неудавшегося обмена (R-U19): попытка отзыва прежнего
+            # выпущенного токена — после записи и без влияния на исход подключения.
+            revoked = await state.broker.revoke_orphan_issued_token(
+                entry,
+                previous_method,
+                token_id=previous_token_id,
+                stored_credential=previous_credential,
+                submitted_token=token,
+                user_id=user.user_id,
+            )
+            if revoked:
+                # R-U14.3: ``NULL`` пишется только по подтверждённому отзыву; иначе
+                # идентификатор остаётся пометкой на уборку (R-U19.4).
+                await state.broker.clear_issued_token_id(connection)
+        if method.expiry is not None:
+            # Шаг 7 R-U13: срок годности присланного токена; неудача оставляет ``null`` (R-U18.4).
+            expires_at = await state.broker.read_submitted_expiry(entry, method, outcome.token)
+            await state.broker.store_submitted_expiry(connection, expires_at)
+            session_expires_at = to_iso(expires_at)
 
     return JSONResponse(
         {

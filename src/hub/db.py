@@ -195,6 +195,9 @@ class UpstreamToken(Base):
     # R-U17.4: происхождение сохранённого токена и следы обмена (ревизия 4).
     # ``issued_token_id`` — идентификатор выпущенного Hub'ом токена; не учётные данные,
     # хранится открытым, но наружу не отдаётся никогда.
+    # Ревизия 4.1 (R-U19.4, решение 100): пара ``token_origin = "submitted"`` при непустом
+    # ``issued_token_id`` — законное состояние и единственная форма пометки на уборку
+    # («Hub выпустил этот токен и ещё не убедился, что тот отозван»); новых колонок для неё нет.
     issued_token_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     token_origin: Mapped[str] = mapped_column(
         String(16), nullable=False, default=TOKEN_ORIGIN_SUBMITTED,
