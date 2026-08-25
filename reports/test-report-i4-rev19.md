@@ -4,7 +4,8 @@
 - **Спека:** `corp/docs/spec.md` @ `5efd9491be`, критерии `corp/docs/acceptance-criteria.yaml` @ `a1ad60532d`.
 - **Реализация под проверкой:** 15 коммитов `a839e34d52…29f483e968`.
 - **Базовый коммит для сравнения:** `a1ad60532d` (критерии без реализации).
-- **Коммиты тестов:** `afdd1f0efa`, `4b5f97b262`, `d9e35d509e`, `f3a392e683`, `8cbcc140ca`, `e76b08e08a`.
+- **Коммиты тестов:** `afdd1f0efa`, `4b5f97b262`, `d9e35d509e`, `f3a392e683`, `8cbcc140ca`, `e76b08e08a`, `a2e534eb35` (типизация).
+- **Фикс дефекта dev-агентом:** `12302c4285` — оба красных воспроизведения `BUG-I4-011` зелёные, статус бага — `fixed`, тесты остаются в сьюте как регрессионные.
 - **Дата:** 2026-08-25.
 
 ## 1. Итог
@@ -135,8 +136,27 @@
 | `bun --cwd packages/opencode test` (полный) | 3363 pass, 22 skip, 1 todo, 3 fail: 2 × `BUG-I4-011` + 1 базовая флака `v2 pty HttpApi` |
 | `bun --cwd packages/app run test:unit` (полный) | 453 pass, 0 fail |
 | `bun --cwd packages/tui test` (полный) | 219 pass, 1 skip, 8 fail — все 8 базовые |
+| `bun --cwd packages/opencode run typecheck` | чисто |
+| `bun --cwd packages/app run typecheck` | чисто |
+| `bun --cwd packages/tui run typecheck` | чисто |
+| `bun --cwd packages/desktop run typecheck` | чисто |
 
 Диспутные падения: было 6, стало 0.
+
+После фикса `12302c4285` красных тестов не осталось: корп-набор **372 pass / 0 fail**, полный
+`packages/opencode` — **3367 pass / 0 fail**.
+
+### Типизация тестов (коммит `a2e534eb35`)
+
+Четыре ошибки `tsgo` в тестах ревизии 1.9 устранены сужением типов, без `as any` и без ослабления
+утверждений:
+
+| Место | Было | Стало |
+|---|---|---|
+| `oc/orchestration.test.ts` (AC-172) | `toContain(card.error_class)` при `string \| undefined` | явная проверка `if (errorClass === undefined) throw` с текстом про D-32, затем `toContain(errorClass)` — проверок стало больше |
+| `oc/status.test.ts` (AC-188) | ожидание выведено как `string[]` | аннотация `CorpSchema.CardAction[]`: опечатка в имени действия теперь ошибка типов |
+| `oc/upgrade.test.ts` (AC-199) | `toContain(host)` по кортежу литералов модуля | `const declared: string[] = [...CorpUpgrade.FORBIDDEN_HOSTS]` — падение остаётся тестовым и называет хост |
+| `app/dictionary.test.ts` (AC-187) | статический импорт словаря TUI ломал `tsgo -b` пакета `app` | спецификатор через переменную — тот же приём и та же причина, что в `app/corp/channel.test.ts` |
 
 ```
 до:  (fail) AC-51: строка 3 …; AC-52: строка 4 …; AC-44: строка 2 …;
