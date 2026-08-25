@@ -235,6 +235,50 @@ async def test_exchange_stores_issued_token_not_the_submitted_one(make_hub: HubF
     assert hub.net.verify.tokens_seen() == ["SESSION-1", "PERMANENT-1"]
 
 
+_VERIFY_REFUSALS: list[tuple[str, Any, int, str]] = [
+    ("401", httpx.Response(401, json={"error": "unauthorized"}), 400, "token_rejected"),
+    ("403", httpx.Response(403, json={"error": "forbidden"}), 400, "token_rejected"),
+    ("500", httpx.Response(500, json={"error": "boom"}), 502, "upstream_unavailable"),
+    ("таймаут", httpx.ReadTimeout("timed out"), 502, "upstream_unavailable"),
+]
+
+
+@pytest.mark.ac("AC-214")
+@pytest.mark.parametrize(
+    ("title", "answer", "status", "error"),
+    _VERIFY_REFUSALS,
+    ids=[c[0] for c in _VERIFY_REFUSALS],
+)
+async def test_rejected_submitted_token_never_reaches_the_issue_request(
+    make_hub: HubFactory, title: str, answer: Any, status: int, error: str
+) -> None:
+    """Шаг 2 R-U13: не принятый проверкой токен в запрос выпуска не уходит.
+
+    Порядок шагов — не деталь реализации: отправка присланного значения на выпуск после того,
+    как целевая система его уже отвергла, была бы лишней передачей отвергнутого секрета.
+    """
+    hub = await _hub(make_hub)
+    assert hub.net is not None
+    api = hub.net.tokens
+    hub.net.verify.push(answer)
+
+    response = await connect_with_token(hub, alias="tag", token="SESSION-refused")
+    assert response.status_code == status, f"{title}: {response.text}"
+    assert response.json()["error"] == error, title
+
+    # Ни выпуска, ни списка, ни отзыва — обмен не выполнялся вовсе.
+    assert api.issue_requests == [], title
+    assert api.list_requests == [], title
+    assert api.revoke_requests == [], title
+    assert api.sessions_requests == [], title
+    # Подключение не создано: строки токена нет, статус не connected.
+    assert await fetch_rows(hub.app, "SELECT id FROM upstream_tokens") == [], title
+    statuses = [
+        row["status"] for row in await fetch_rows(hub.app, "SELECT status FROM connections")
+    ]
+    assert "connected" not in statuses, title
+
+
 # --- AC-215 ----------------------------------------------------------------
 
 
