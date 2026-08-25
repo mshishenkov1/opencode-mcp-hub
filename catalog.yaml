@@ -48,6 +48,34 @@ servers:
           headers:
             Authorization: "Bearer {{access_token}}"
           account_field: username
+        exchange:
+          # Обмен присланного токена на постоянный личный токен Mattermost (R-U12…R-U19):
+          # выпуск PAT от имени владельца присланного токена; без права system_user_access_token
+          # целевая система ответит 403 → policy_denied, подключение останется на присланном.
+          url: "${TAG_API_BASE}/users/me/tokens"
+          method: POST
+          headers:
+            Authorization: "Bearer {{access_token}}"
+          body:
+            description: "{{token_description}}"
+          expect_status: 200
+          token_field: token
+          token_id_field: id
+          description: "OpenCode Hub"
+          revoke:
+            url: "${TAG_API_BASE}/users/tokens/revoke"
+            method: POST
+            headers:
+              Authorization: "Bearer {{access_token}}"
+            body:
+              token_id: "{{token_id}}"
+          list:
+            url: "${TAG_API_BASE}/users/me/tokens"
+            method: GET
+            headers:
+              Authorization: "Bearer {{access_token}}"
+            id_field: id
+            description_field: description
     credential_headers:
       Authorization: "Bearer {{access_token}}"
     permission_model:
