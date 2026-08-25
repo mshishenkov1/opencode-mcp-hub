@@ -1,0 +1,216 @@
+{
+  "review": "review-i4-rev19-1",
+  "iteration": "I-4, ревизия 1.9 спеки",
+  "date": "2026-08-25",
+  "reviewer": "REVIEW-AGENT",
+  "verdict": "approve",
+  "scope": {
+    "repo": "~/Documents/opencode, ветка corp/i4-sso-connectors (только локальные коммиты, ничего не пушилось)",
+    "spec": "corp/docs/spec.md @ 5efd9491be — S-V15…S-V19, S-D10, S-T10, S-B13, S-B14, S-B15, D-30…D-34, F42–F45",
+    "criteria": "corp/docs/acceptance-criteria.yaml @ a1ad60532d — AC-170…AC-199 + переформулированный AC-51",
+    "base": "a1ad60532d",
+    "implementation": [
+      "a839e34d52", "8f02054927", "5c275a28f6", "f7a111cbaf", "b99530b660",
+      "7acf18efa2", "55ddf9f95a", "70baa8be1c", "e52569a368", "6f2943b469",
+      "fad039f9d2", "7076380d26", "73f3815ebe", "fec44786c7", "29f483e968",
+      "12302c4285"
+    ],
+    "tests": ["afdd1f0efa", "4b5f97b262", "d9e35d509e", "f3a392e683", "8cbcc140ca", "e76b08e08a", "a2e534eb35"],
+    "test_report": "reports/test-report-i4-rev19.md",
+    "bugs": ["BUG-I4-010 (исходный)", "BUG-I4-011 (найден тестами, fixed 12302c4285)"]
+  },
+
+  "customer_complaints_BUG_I4_010": [
+    {
+      "complaint": "(а) у неподключённого сервера показывается «Отключить»",
+      "closed": true,
+      "evidence": "packages/opencode/src/corp/status.ts:63-73 — таблица ACTIONS: состояния never и failed дают ['connect','open_hub'], disconnect есть ровно у состояния connected. Состояния 1–3 больше не содержат disconnect ни при каком входе. Оболочки набор не пересчитывают: packages/app/src/components/corp/dialog-connectors.tsx:371 показывает кнопку по card.actions.includes('disconnect'); packages/tui/src/component/corp/dialog-connectors.tsx:164-176 — предикат allows() поверх того же card.actions, клавиша d вне состояния 4 показывает подсказку и ничего не меняет. Признак «подключение состоялось» (S-V15) вынесен в отдельный персистентный артефакт packages/opencode/src/corp/connections.ts, и запись mcp.<alias> в конфиге доказательством не считается — именно она была источником дефекта."
+    },
+    {
+      "complaint": "(б) у подключённого нет явного признака подключения",
+      "closed": true,
+      "evidence": "dialog-connectors.tsx:312-314 — <Tag class=\"corp-tag-connected\">, то же средство и тот же размер, что бейдж «устаревший» (<Tag> без собственного размера, строка 321); цвета успеха темы в dialog-shell.css (border-success-base / surface-success-weak / text-on-success-base). Подпись статуса (STATUS_KEY[card.status]) сохранена — бейдж её дополняет. Признак ставится по card.state === 'connected', то есть положительным условием, а не отсутствием кнопки. TUI: маркер '● ' в начале строки карточки (dialog-connectors.tsx:55, 296) — читается в монохромном терминале."
+    },
+    {
+      "complaint": "(в) при ошибке подключения нет внятной логики и объяснения",
+      "closed": true,
+      "evidence": "packages/opencode/src/corp/errors.ts:70-134 — четыре класса, определяются всегда (unknown — полноценный класс со своим текстом и действием, D-32). Класс считается и в ответе connect, и в самой карточке: status.ts:163-171 выставляет card.errorClass для состояний 2 и 3, поэтому объяснение есть и после перезапуска, без свежей попытки. Словари полны в обоих языках: corp.error.connect.{token_rejected,method_unavailable,hub_unreachable,unknown} в ru.ts и en.ts, те же тексты в словаре TUI. Desktop показывает объяснение подписью карточки (explain(), строки 262-266, 330-332), предлагаемое действие — тем же элементом, которым выполняется; отдельной «кнопки-совета» нет."
+    },
+    {
+      "complaint": "(г) окно витрины меньше окна настроек / высота зависит от содержимого",
+      "closed": true,
+      "evidence": "packages/app/src/components/corp/dialog-shell.css — панель [data-slot=\"dialog-content\"].corp-dialog и .corp-dialog-v2 получают height:100%; min-height:0; overflow:hidden, то есть высота приходит от контейнера, а не от содержимого (F45). Правка адресована корп-классу и живёт в корп-файле стилей — общие стили packages/ui не тронуты. fit не передаётся ни в одной ветке флага (dialog-shell.tsx). Размер — свойство контейнера CorpDialog, экран витрины про размеры не знает."
+    }
+  ],
+
+  "bug_i4_011_fix_check": {
+    "commit": "12302c4285",
+    "correct": true,
+    "reasoning": "Проверка connection === 'needs_reauth' поставлена первой ветвью вычисления state (status.ts:130-145) — тем же приоритетом, каким строка 4 таблицы S-V6 идёт выше строки 5. S-V16 перечисляет needs_reauth среди условий состояния 3 и относит его к подписи «Соединение потеряно», поэтому ветвь даёт 'lost', а не 'disconnected'. Соседние состояния разобраны против таблицы целиком и не сломаны: local='connected' без connection → 'connected' (строка 4); everConnected && local='disabled' → 'disconnected' (строка 3, «Отключено вами»); everConnected && local undefined && configured → 'disconnected' (тот же случай, что «Отключено вами»: запись конфига без локального статуса); everConnected && local in {failed,needs_auth,needs_client_registration} → 'lost' (строка 3); !everConnected && local in {failed,needs_auth,needs_client_registration} → 'failed' (строка 2); прочее → 'never' (строка 1). Статус витрины (S-V6, столбец «Статус») ревизией не изменён и считается прежним каскадом. Класс ошибки такой карточки — token_rejected: errors.ts:132 проверяет connection последней, после кода и текста местной ошибки, поэтому конкретная местная причина класс не теряет. Оболочки не правились и не должны были: и бейдж, и маркер, и подпись действия, и клавиши читают card.state/card.actions из общего модуля (S-T10)."
+  },
+
+  "tails": [
+    {
+      "rule": "S-B13",
+      "ok": true,
+      "evidence": "packages/desktop/electron-builder.config.ts — extraMetadata: {...base.extraMetadata, name: 'opencode-magnit-desktop'} добавлено ТОЛЬКО внутри ветки case 'magnit'; getBase() и ветки dev/beta/prod не изменены (diff e52569a368 затрагивает ровно эту ветку). Тест AC-190 импортирует настоящую конфигурацию с каждым каналом и требует extraMetadata ванильных каналов ровно равным {desktopName}. Инструмент осмотра бандла (corp/verify-desktop-bundle.ts) ловит и общий каталог @opencode-aidesktop-updater, и любое updaterCacheDirName, отличное от opencode-magnit-desktop-updater."
+    },
+    {
+      "rule": "S-B14",
+      "ok": true,
+      "evidence": "Путь кода, а не только тест. packages/opencode/src/cli/cmd/upgrade.ts: CorpUpgrade.plan() вызывается ДО Installation.method() и Installation.latest(); при mode==='disabled' печатается сообщение, ставится process.exitCode=1 и происходит return — ни одного fetch и ни одного менеджера пакетов ниже по потоку не достигается. packages/opencode/src/cli/upgrade.ts: та же проверка стоит сразу после чтения autoupdate, до Installation.method() (её вызов вынесен в апстримную ветку коммитом fec44786c7), и при 'disabled' функция возвращается, один раз записав причину в лог. plan() отдаёт 'disabled' только при corpEnabled(); ванильная сборка получает 'upstream' и идёт прежним путём (S-C6). Build-константа OPENCODE_CORP_CLI_UPDATE_URL проброшена в обоих бандлерах (script/build.ts, script/build-node.ts) и в corp/build.ts."
+    },
+    {
+      "rule": "S-B15",
+      "ok": true,
+      "evidence": "Таблица APP_NAMES и функция appName() живут в единственном месте — packages/desktop/src/main/constants.ts, рядом с разбором канала. index.ts свою копию таблицы удалил и зовёт appName(); windows.ts зовёт appName() и не содержит литерала имени сборки даже в комментарии (29f483e968). Тест AC-198/AC-199 проверяет, что ни index.ts, ни windows.ts не объявляют APP_NAMES без импорта из ./constants и не разбирают process.env.OPENCODE_CHANNEL повторно."
+    }
+  ],
+
+  "injections": {
+    "note": "Семь инъекций ослаблений в продуктовый код; каждая обязана была уронить хотя бы один тест. Все семь уронили, все откачены полностью — рабочее дерево после отката чистое (git status пуст, git diff пуст), корп-набор снова 372/0.",
+    "results": [
+      {
+        "injection": "status.ts: ACTIONS.never и ACTIONS.failed получили 'disconnect' («Отключить» вернулось неподключённому)",
+        "caught": true,
+        "failed_tests": "11 падений: status.test.ts — AC-51, AC-52, AC-55, AC-44, AC-170, AC-171, AC-188 ×3; orchestration.test.ts — AC-175, AC-172"
+      },
+      {
+        "injection": "dialog-connectors.tsx (app): удалён блок <Show when={card.state === \"connected\"}><Tag class=\"corp-tag-connected\">…</Tag></Show> (убран бейдж)",
+        "caught": true,
+        "failed_tests": "connectors-view.test.ts — AC-177: бейдж «Подключено» — тот же элемент и размер, что бейдж «устаревший»"
+      },
+      {
+        "injection": "status.ts: проверка connection === \"needs_reauth\" переставлена ПОСЛЕ local === \"connected\" (сломан приоритет фикса BUG-I4-011)",
+        "caught": true,
+        "failed_tests": "status.test.ts — AC-52: needs_reauth поверх работающего локального соединения тоже даёт повторную авторизацию"
+      },
+      {
+        "injection": "dialog-shell.css: у .corp-dialog вместо height:100%; min-height:0 возвращено min-height:280px (высота под содержимое)",
+        "caught": true,
+        "failed_tests": "connectors-view.test.ts — AC-184: legacy — ноль, одна и полсотни карточек дают одну и ту же высоту окна"
+      },
+      {
+        "injection": "cli/cmd/upgrade.ts: из ветки corp.mode === \"disabled\" убраны exitCode=1 и return (команда без адреса проваливается в апстримный путь и идёт в сеть)",
+        "caught": true,
+        "failed_tests": "upgrade.test.ts — AC-193 ×2 (ни одного сетевого запроса и кода выхода 1; молчаливого «уже последняя версия» не бывает)"
+      },
+      {
+        "injection": "electron-builder.config.ts: удалён extraMetadata.name у ветки magnit (возвращён общий с ванильной каталог кеша)",
+        "caught": true,
+        "failed_tests": "electron-builder.config.corp.test.ts — AC-189: канал magnit получает собственное имя пакета и сохраняет desktopName из getBase()"
+      },
+      {
+        "injection": "windows.ts: title: appName() заменено литералом title: \"OpenCode\" (второй источник имени сборки)",
+        "caught": true,
+        "failed_tests": "updater.corp.test.ts — AC-199: в windows.ts нет литерала «OpenCode» в качестве значения title"
+      }
+    ]
+  },
+
+  "findings": [
+    {
+      "severity": "minor",
+      "where": "corp/docs/spec.md:1496 (S-D10) ↔ packages/app/src/components/corp/dialog-corp-login.tsx:148-151",
+      "what": "S-D10 перечисляет экран входа (и экран прав) среди корп-окон на CorpDialog, но dialog-corp-login.tsx открывается напрямую через Dialog size=\"large\", а экран прав (DialogConnectorPermissions в dialog-connectors.tsx:99) — через Dialog вовсе без размера. Решение ревью: это НЕ дефект, а неточность формулировки. Заголовок правила — «Размер окна витрины», нормативная часть и все её подпункты говорят о витрине; перечисление — ограничительное («ко всем корп-окнам НА CorpDialog»), то есть описывает свойство контейнера, а не список обязанных на него перейти экранов. Ни один AC ревизии 1.9 экрана входа не касается (AC-184 — только витрина), и замечание заказчика BUG-I4-010 было про окно витрины. Если бы это был дефект, дефектов было бы два (вход и права), и оба — вне покрытия критериев. Рекомендация следующей ревизии: либо перевести dialog-corp-login.tsx и DialogConnectorPermissions на CorpDialog и добавить AC, либо переписать перечисление как «витрине и любому новому корп-экрану на CorpDialog».",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "corp/patches.md (столбец «Коммит»)",
+      "what": "Коммиты fec44786c7 (packages/opencode/src/cli/upgrade.ts) и 29f483e968 (packages/desktop/src/main/windows.ts) сделаны ПОСЛЕ ссылочного коммита реестра 7076380d26 и в столбец коммитов своих строк не дописаны. Регистрацию это не нарушает: обе строки в таблице есть, их описание правку описывает точно, а corp/patches.test.ts (12 pass) механически сверяет множество изменённых upstream-файлов с таблицей и расхождения не видит. Замечание только к прослеживаемости по хешам.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/app/src/corp/connectors-view.test.ts, packages/tui/src/corp/dialog-actions.test.ts, packages/desktop/src/main/updater.corp.test.ts::AC-199",
+      "what": "Часть проверок оболочек — утверждения по тексту исходника (toContain по .tsx), а не по отрисованному результату. Тавтологичными они не являются и инъекции ловят (проверено: 3 из 7 инъекций уронили именно их), а причина документирована — раскладка в happy-dom не считается. Но такие проверки ломаются от безобидного рефакторинга и не заметят подмены семантики при сохранённом тексте. dialog-actions.test.ts смягчает это приёмом получше: тело allows() извлекается из исходника и ИСПОЛНЯЕТСЯ, копии правила в тесте нет. Рекомендация на будущее — по мере появления возможности рендерить компоненты переводить эти проверки на наблюдаемый DOM.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/opencode/src/corp/status.ts:86-96 (правило 1 таблицы S-V6)",
+      "what": "Карточка, alias которой есть в конфиге, но отсутствует в каталоге Hub, по-прежнему получает actions = ['disconnect','open_hub'] — в том числе когда признак S-V15 ложен и state = 'never'. Это единственное оставшееся место, где сервер без состоявшегося подключения предлагает «Отключить». Дефектом не считаю: S-V16 прямо выводит строку 1 из-под ревизии 1.9 («её действия остаются прежними («Отключить», «Открыть в Hub», AC-50)»), заказчик эту строку не оспаривал, и в интерфейсе подписи состояния у неё нет. Рекомендация следующей ревизии — решить эту строку явно, чтобы правило «Отключить только в состоянии 4» стало безусловным.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "packages/opencode/src/corp/status.ts:130-142",
+      "what": "Наблюдение, не замечание. При одновременных connection.status = 'needs_reauth' и local = 'disabled' (пользователь отключил сервер сам, а Hub пометил подключение требующим повторной авторизации) подпись состояния 3 будет «Соединение потеряно», а не «Отключено вами». Набор действий у обеих подписей одинаков, поэтому поведение не расходится; выбор согласован со столбцом «Статус витрины» (строка 4 S-V6 идёт выше строки 6). Спекой этот стык не описан — фиксирую как известное поведение.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+
+  "dispute_resolutions": [
+    {
+      "dispute": "disputes/test-dispute-i4-sv16-card-actions.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Претензия dev-agent верна, резолюция test-agent (disputes/test-dispute-i4-sv16-card-actions.resolution.json) подтверждается независимо. Пять проверок закрепляли столбец «Действия» ПРЕЖНЕЙ редакции строк 3–7 таблицы S-V6, который ревизия 1.9 переопределила правилом S-V16 и объявила дефектом заказчика (BUG-I4-010). Ожидания ['reconnect','disconnect'] и ['connect','disconnect'] несовместимы с AC-188 («ни в одном случае состояний 1–3 набор действий не содержит disconnect») по построению — при любой корректной реализации. Переформулированный AC-51 требует РАЗНЫХ наборов при одинаковом local='failed' в зависимости от признака S-V15, поэтому одна проверка одного набора не могла остаться. По stale правило S-V16 прямо оставляет «Убрать из списка» доступной, что делает прежнее ожидание ['disconnect'] противоречащим дважды. Ослабления нет: ни один идентификатор AC не удалён, число проверяемых утверждений в каждом месте выросло, проверки статуса витрины и текста ошибки сохранены дословно. Порог не понижен."
+    },
+    {
+      "dispute": "disputes/test-dispute-i4-ac38-catalog-card-shape.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Претензия dev-agent верна, резолюция test-agent подтверждается. AC-38 полей карточки не перечисляет — он требует, чтобы витрина отдавала источник, признак протухания и карточки; форма карточки задаётся моделью S-V6/S-V16 и меняется вместе с ней, поэтому дополнение фикстуры полями state и ever_connected критерий не ослабляет. Обязательность этих полей — не удобство, а механизм S-T10: без них оболочке пришлось бы домысливать состояние по паре status+actions, то есть завести вторую копию правила S-V16, а различить «Соединение потеряно» и «Отключено вами» так вообще невозможно — набор действий у обеих подписей одинаков. Проверка конверта витрины сохранена дословно, добавлены отрицательные случаи (карточка без state / без ever_connected / с чужим значением state схемой не принимается) — покрытие выросло."
+    }
+  ],
+
+  "runs": [
+    {
+      "run": "корп-набор: bun --cwd packages/opencode test src/corp ../../corp/patches.test.ts ../../corp/verify-desktop-bundle.test.ts ../../packages/desktop/electron-builder.config.corp.test.ts ../../packages/desktop/src/main/updater.corp.test.ts",
+      "result": "372 pass, 0 fail (18 файлов, 1872 expect). Повторён после отката всех инъекций — тот же результат."
+    },
+    {
+      "run": "corp/patches.test.ts отдельно",
+      "result": "входит в набор выше; реестр правок upstream сходится с фактическим множеством изменённых upstream-файлов механически"
+    },
+    {
+      "run": "полный packages/opencode: bun test (прогон №1)",
+      "result": "3365 pass, 22 skip, 1 todo, 2 fail [408 s]"
+    },
+    {
+      "run": "полный packages/opencode: bun test (прогон №2)",
+      "result": "2 fail: «корп-модель без ключа (AC-135)» (таймаут 180 с) и «v2 pty HttpApi > serves location-wrapped PTY routes and retains exited sessions». Списки падений двух прогонов НЕ совпадают — признак нагрузочных флак, а не детерминированной регрессии. AC-135 изолированно: 4 pass / 0 fail за 9,8 с (packages/opencode/src/corp/model.test.ts). v2 pty — известная базовая флака, воспроизводится на a1ad60532d."
+    },
+    {
+      "run": "packages/app: bun run test:unit",
+      "result": "453 pass, 0 fail (74 файла). Повторён после отката инъекций — тот же результат."
+    },
+    {
+      "run": "packages/tui: bun test",
+      "result": "219 pass, 1 skip, 8 fail — ровно известный базовый список sync/hydration (Exit context must be used within a context provider, sync.tsx:319), воспроизводится на a1ad60532d, регрессом не считается"
+    },
+    {
+      "run": "typecheck × 4: packages/{opencode,app,tui,desktop} run typecheck",
+      "result": "чисто во всех четырёх (tsgo без диагностик)"
+    }
+  ],
+
+  "known_base_failures": [
+    "packages/tui — 8 падений sync/hydration (воспроизводятся на a1ad60532d)",
+    "packages/opencode — v2 pty HttpApi, флака по времени/нагрузке",
+    "packages/opencode — v2 location HttpApi при изолированном прогоне",
+    "packages/opencode — AC-135 (corp/model.test.ts) под нагрузкой полного прогона упирается в таймаут 180 с; изолированно 4/0 за 9,8 с. Новая, ранее не зафиксированная нагрузочная флака; к ревизии 1.9 отношения не имеет (файл ревизией не менялся)."
+  ],
+
+  "bug_status_changes": [
+    {
+      "bug": "BUG-I4-010",
+      "from": "open",
+      "to": "verified",
+      "file": "/Users/miroslavshishenkov/Documents/opencode-mcp-hub-i3/bugs/BUG-I4-010.json",
+      "note": "Файл лежит не в рабочем дереве этого конвейера (ветка pipeline/i1-hub-login-catalog-20260818), а во втором рабочем дереве того же репозитория — opencode-mcp-hub-i3, ветка pipeline/i3-hub-oauth-facade-proxy, куда его положил коммит f86809f. Статус переведён там же; стоит перенести запись в bugs/ ветки I-4/I-1, чтобы реестр багов конвейера был в одном месте."
+    },
+    {
+      "bug": "BUG-I4-011",
+      "status": "fixed → подтверждён ревью",
+      "note": "Фикс 12302c4285 проверен по коду против таблицы S-V16 целиком, соседние состояния не сломаны; оба минимальных воспроизведения зелёные и остаются в сьюте регрессионными. Инъекция №3 (перестановка приоритета) снова роняет AC-52 — тест дефект действительно ловит. Перевод в verified оставляю оркестратору: файл в зоне записи, но перевод статуса не запрашивался."
+    }
+  ],
+
+  "summary": "approve. Все четыре замечания заказчика из BUG-I4-010 закрыты реализацией, а не только тестами: «Отключить» существует ровно в состоянии 4 общего модуля corp/status.ts и обе оболочки берут набор действий оттуда; признак «Подключено» — отдельный положительный бейдж того же средства и размера, что бейдж «устаревший», плюс маркер в TUI; ошибка подключения всегда получает класс (включая unknown) с текстом и предлагаемым действием, причём и на карточке, а не только в ответе connect; высота корп-окна приходит от контейнера и не зависит от содержимого, общие стили packages/ui не тронуты. Фикс BUG-I4-011 корректен и соседние состояния не сломал. Три хвоста (S-B13, S-B14, S-B15) проверены по пути кода. Правки upstream минимальны и зарегистрированы в corp/patches.md — сходимость реестра проверяется механически. Семь инъекций ослаблений уронили тесты все до одной и откачены полностью. Ни одного must_fix."
+}
