@@ -133,12 +133,31 @@ def _fragments(value: str, length: int = 8) -> list[str]:
     return [value[i : i + length] for i in range(len(value) - length + 1)]
 
 
-def _hub_log(caplog: pytest.LogCaptureFixture, json_logs: Any) -> str:
-    """Журнал самого Hub — все уровни, без отладочного вывода сторонних библиотек.
+def _capture_all_levels(caplog: pytest.LogCaptureFixture) -> None:
+    """Включить перехват логов всех уровней — и Hub, и сторонних библиотек.
 
-    ``caplog.set_level(DEBUG)`` включает и DEBUG драйвера БД (``aiosqlite`` печатает текст
-    запроса вместе со значениями параметров). Это вывод библиотеки, а не журнал Hub: правило
-    R-U17 говорит о записях Hub, поэтому и проверяем их.
+    Одного ``caplog.set_level(DEBUG)`` мало: он поднимает root, а логгер ``hub`` к этому моменту
+    уже возвращён на INFO вызовом ``configure_logging`` внутри ``create_app`` (autouse-фикстура
+    ``hub_logs_captured`` отрабатывает раньше приложения). Без явного уровня на ``hub`` запись
+    значения токена на DEBUG тест бы не уронил — given критериев «включён перехват логов всех
+    уровней» не выполнялся бы. Вызывать строго ПОСЛЕ создания приложения.
+    """
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="hub")
+
+
+def _all_log(caplog: pytest.LogCaptureFixture, json_logs: Any) -> str:
+    """Журнал целиком: все записи всех логгеров всех уровней плюс JSON-sink Hub."""
+    return "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+
+
+def _hub_log(caplog: pytest.LogCaptureFixture, json_logs: Any) -> str:
+    """Только записи самого Hub — все уровни, без вывода сторонних библиотек.
+
+    Нужен ровно для одного значения: ``issued_token_id`` по R-U17.3 не учётные данные и хранится
+    открытым, поэтому он законно виден в DEBUG-эхе SQL драйвера БД (``aiosqlite`` печатает текст
+    запроса вместе со значениями параметров). Правило R-U17.3 говорит о журнале Hub — его и
+    проверяем. Значения токенов и тела ответов проверяются без этого фильтра (``_all_log``).
     """
     records = [record_text(r) for r in caplog.records if r.name.split(".")[0] == "hub"]
     lines = [
@@ -607,7 +626,7 @@ async def test_cleanup_failure_does_not_break_the_connection(
         api.push_list(failure)
     else:
         api.push_revoke(failure)
-    caplog.set_level(logging.DEBUG)
+    _capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         response = await connect_with_token(hub, alias="tag", token="SESSION-5")
@@ -620,7 +639,7 @@ async def test_cleanup_failure_does_not_break_the_connection(
     failed = await audit_rows(hub.app, "upstream_token_cleanup_failed")
     assert [row["details"]["stage"] for row in failed] == [stage]
 
-    logged = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+    logged = _all_log(caplog, json_logs)
     assert logged, "журнал пуст — проверка вырождена"
     assert "CLEANUP-BODY-MARKER" not in logged
     assert "CLEANUP-BODY-MARKER" not in json.dumps(
@@ -751,7 +770,7 @@ async def test_submitted_token_is_not_stored_anywhere_after_successful_exchange(
     hub.net.tokens.push_issue(
         httpx.Response(200, json={"id": "tokid-6", "token": "PERMANENT-6"})
     )
-    caplog.set_level(logging.DEBUG)
+    _capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         connected = await connect_with_token(hub, alias="tag", token=secret)
@@ -779,7 +798,7 @@ async def test_submitted_token_is_not_stored_anywhere_after_successful_exchange(
     audit = json.dumps(await audit_rows(hub.app), default=str, ensure_ascii=False)
     assert [f for f in fragments if f in audit] == []
 
-    logged = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+    logged = _all_log(caplog, json_logs)
     assert logged, "журнал пуст — проверка вырождена"
     assert [f for f in fragments if f in logged] == []
 
@@ -808,7 +827,7 @@ async def test_issued_token_id_and_response_body_never_leak(
             },
         )
     )
-    caplog.set_level(logging.DEBUG)
+    _capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         connected = await connect_with_token(hub, alias="tag", token="SESSION-8")
@@ -828,10 +847,17 @@ async def test_issued_token_id_and_response_body_never_leak(
         for secret in secrets:
             assert secret not in response.text, f"{response.url}: {secret}"
 
-    logged = _hub_log(caplog, json_logs)
-    assert logged, "журнал пуст — проверка вырождена"
-    for secret in secrets:
-        assert secret not in logged, secret
+    # Значение постоянного токена и тело ответа на выпуск не должны появиться ни у одного
+    # логгера: фильтр по ``hub`` замаскировал бы утечку через стороннюю библиотеку.
+    everything = _all_log(caplog, json_logs)
+    assert everything, "журнал пуст — проверка вырождена"
+    for secret in ("PERMANENT-SECRET-8", "BODY-MARKER-8"):
+        assert secret not in everything, secret
+    # Идентификатор выпущенного токена хранится открытым (R-U17.3) и законно виден в DEBUG-эхе
+    # SQL драйвера БД; правило запрещает его в журнале Hub — там и проверяем.
+    hub_logged = _hub_log(caplog, json_logs)
+    assert hub_logged, "журнал Hub пуст — проверка вырождена"
+    assert "tokid-SECRET-ID" not in hub_logged
 
     rows = await audit_rows(hub.app)
     dumped = json.dumps(rows, default=str, ensure_ascii=False)

@@ -925,7 +925,10 @@ async def test_user_token_never_appears_in_logs_or_audit(
     secret = "usr-tok-SECRET-1"
     hub = await _hub(make_hub)
     await _user(hub)
+    # Перехват логов всех уровней: root мало — configure_logging внутри create_app
+    # вернул логгер ``hub`` на INFO, и DEBUG-утечка тестом бы не ловилась.
     caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="hub")
     with capture_json_logs() as json_logs:
         await _connect(hub, token=secret)
         tokens = await _mcp_tokens(hub)

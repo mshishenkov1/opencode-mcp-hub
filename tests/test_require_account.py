@@ -395,7 +395,10 @@ async def test_rejection_does_not_log_response_body(
     hub = await _hub(make_hub)
     assert hub.net is not None
     hub.net.verify.push(_anonymous(userKey="SECRET-BODY-MARKER"))
+    # Перехват логов всех уровней: root мало — configure_logging внутри create_app
+    # вернул логгер ``hub`` на INFO, и DEBUG-утечка тестом бы не ловилась.
     caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="hub")
 
     with capture_json_logs() as json_logs:
         response = await connect_with_token(hub, alias="tag", token=secret)
