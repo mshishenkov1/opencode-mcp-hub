@@ -1,0 +1,9 @@
+{
+  "dispute": "disputes/test-dispute-AC-138-head-revision.json",
+  "resolution": "uphold_dispute",
+  "decided_by": "review-agent (ревью ревизии 4, reports/review-rev4-1.json)",
+  "reasoning": "Тест tests/test_migrations.py::test_head_revision_is_i3 закреплял head-ревизию Alembic значением '0003_i4_user_token'. R-U17.4 прямо требует новой ревизии Alembic по R-M1, решение 95 описывает её содержимое, а AC-138 конкретный идентификатор head не задаёт («в БД есть таблица alembic_version с ревизией head»). Ревизия 0004_i4_token_exchange продолжает непрерывную цепочку от 0001_i1_base (down_revision = 0003). Проверено ревью вручную: upgrade над непустой upstream_tokens даёт token_origin='submitted' и NULL в остальных трёх колонках при сохранённом шифртексте, downgrade снимает колонки без потери строк, повторный upgrade восстанавливает прежний вид. Продуктовый код правки не требует.",
+  "assignee": "test",
+  "action": "правок не требуется: test-агент уже привёл тест к контракту ревизии 4 в коммите 281224e, сохранив закрытый набор ключей и добавив проверки значений новых ключей (усиление, не ослабление)",
+  "status": "closed"
+}

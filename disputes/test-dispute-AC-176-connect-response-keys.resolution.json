@@ -1,0 +1,9 @@
+{
+  "dispute": "disputes/test-dispute-AC-176-connect-response-keys.json",
+  "resolution": "uphold_dispute",
+  "decided_by": "review-agent (ревью ревизии 4, reports/review-rev4-1.json)",
+  "reasoning": "Тест tests/test_user_token.py::test_success_response_shape_has_no_token требовал точного равенства набора ключей успешного ответа POST /api/me/connections/{alias}/token, тогда как AC-176 перечисляет их как обязательные, а не исчерпывающие. §28 и R-U16 обязывают дополнить тот же ответ ключами token_origin, token_origin_reason и session_expires_at; их значения проверяют AC-214, AC-217…AC-219, AC-229 и AC-230. Значения прежних ключей не изменились, значения токена в ответе по-прежнему нет. Продуктовый код правки не требует.",
+  "assignee": "test",
+  "action": "правок не требуется: test-агент уже привёл тест к контракту ревизии 4 в коммите 281224e, сохранив закрытый набор ключей и добавив проверки значений новых ключей (усиление, не ослабление)",
+  "status": "closed"
+}

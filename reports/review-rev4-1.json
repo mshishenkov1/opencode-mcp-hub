@@ -1,0 +1,103 @@
+{
+  "verdict": "request_changes",
+  "scope": {
+    "spec": "414466b (§26–§30, R-U12…R-U18, R-U10.1, AC-214…AC-231)",
+    "dev": ["69e7927", "5750f21", "a232899"],
+    "test": ["612fb28", "281224e", "ad7e9cc", "e64db21"],
+    "migration": "0004_i4_token_exchange"
+  },
+  "runs": {
+    "pytest": ".venv/bin/pytest tests/ -q → 830 passed, 1 deselected (load), 0 failed",
+    "ruff": ".venv/bin/ruff check src tests → All checks passed",
+    "mypy": ".venv/bin/mypy src → Success: no issues found in 39 source files",
+    "coverage": ".venv/bin/python -m pytest --cov=src → TOTAL 93%; broker 88%, catalog 96%, routes/api 97%, web 96%, routes/web 90%, db 97%",
+    "coverage_diff": ".venv/bin/diff-cover coverage.xml --compare-branch=main --fail-under=90 → Coverage 92% (порог 90%) — зелено",
+    "traceability": ".venv/bin/python scripts/check_ac_traceability.py → G6 OK: все 231 критериев покрыты тестами",
+    "gates_script": "scripts/run_gates.py намеренно не запускался: он пишет state.json, а это зона оркестратора, не ревью. Прогнаны эквиваленты команд из pipeline.config.yaml: G1, G2, G4, G6 — зелёные. G5 (ревью) закрывается этим отчётом. G3 (mutation) — см. notes.mutation",
+    "migration_manual": "ручная проверка 0004 на существующих данных: upgrade 0003→0004 над непустой upstream_tokens даёт token_origin='submitted', issued_token_id/token_origin_reason/submitted_expires_at = NULL, access_token_enc сохранён; downgrade 0004→0003 снимает четыре колонки без потери данных, повторный upgrade восстанавливает — миграция обратима"
+  },
+  "findings": [
+    {
+      "severity": "major",
+      "where": "tests/test_token_exchange.py:754 (AC-223), tests/test_token_exchange.py:811 (AC-224), tests/test_token_exchange.py:610 (AC-221), tests/test_token_expiry.py:280 (AC-231)",
+      "what": "Проверка «токен не попадает в журнал любого уровня» на уровне DEBUG вырождена: вызов caplog.set_level(logging.DEBUG) поднимает только root-логгер, а логгер hub остаётся на INFO. Autouse-фикстура tests/conftest.py:87 (caplog.set_level(DEBUG, logger='hub')) отрабатывает раньше, чем create_app вызывает configure_logging(settings.log_level_int) (src/hub/app.py:148), и уровень hub возвращается к INFO. Проверено экспериментом: инъекция в путь обмена записи logger.debug('leak', extra={'tok': <присланный токен>}) оставляет AC-223, AC-224 и AC-231 зелёными; та же запись на уровне INFO их роняет; при принудительно поднятом до DEBUG логгере hub DEBUG-утечка ловится обеими проверками. То есть given критериев AC-223/AC-224 («включён перехват логов всех уровней») тестом не выполнен, и осмысленная поломка (журналирование значения токена на DEBUG) тест не роняет. Продуктового дефекта сегодня нет: в src/hub/broker.py, routes/api.py и routes/web.py DEBUG-записей с секретами нет вовсе (единственный logger.debug — broker.py:1311, token_refresh_stop_failed, без значений), но инвариант R-U9/R-U17.1 не защищён от регресса. Правка минимальная: во всех четырёх местах писать caplog.set_level(logging.DEBUG, logger='hub') (именно после создания hub, иначе уровень снова собьёт configure_logging); проверено — с этой правкой DEBUG-утечка ловится, остальной набор остаётся зелёным.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "src/hub/routes/api.py:284-300 (api_connect_token), src/hub/broker.py:968 (save_tokens), spec.md R-U14.3, R-U15.3",
+      "what": "Замечание к спеке, не к коду: при неудавшемся обмене на переподключении Hub теряет след ранее выпущенного им токена. Сценарий: первое подключение прошло обменом (issued_token_id='tokid-1'); второе подключение делается, когда целевая система отвечает 403/500 на выпуск — R-U14.3 предписывает записать issued_token_id = NULL, и save_tokens перезаписывает происхождение целиком, а уборка (шаг 6 R-U13) не выполняется, потому что origin не issued. Долгоживущий 'tokid-1' остаётся в учётной записи пользователя, и DELETE /api/me/connections/{alias} его уже не отзовёт (R-U15.4 требует token_origin='issued' и непустой issued_token_id). Если у способа объявлен exchange.list (как у tag), сирота будет отозван при ближайшем удачном подключении по маркеру (R-U15.3б) — но блок list по R-U12 необязателен, и без него сирота не отзывается никогда, что расходится с обоснованием R-U15.4 («Hub не выпускает того, что не умеет отозвать») и решением 90. Реализация спеке соответствует дословно, поэтому правки кода не требую; нужно решение spec-агента/оркестратора: либо сделать exchange.list обязательным при наличии exchange, либо разрешить отзыв прежнего issued_token_id присланным токеном и при неудавшемся обмене (идентификатор известен, признак точный — п. 2 R-U15.2 не нарушается).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_token_exchange.py:136-151 (_hub_log), tests/test_token_exchange.py:793 (AC-224)",
+      "what": "Оговорка test-агента по AC-224 принимается: фильтрация по записям логгера hub допустима, но фильтр шире необходимого. Проверено инструментально (перехват всех записей всех логгеров в этом сценарии): единственное совпадение вне hub — 'tokid-SECRET-ID' в логгере aiosqlite (DEBUG-эхо SQL с параметрами; issued_token_id по R-U17.3 хранится открытым). 'PERMANENT-SECRET-8' и 'BODY-MARKER-8' не встречаются ни в одном логгере ни разу. Дополнительно проверено, что в бою утечки нет и не может быть: configure_logging (src/hub/logging_.py:56) ставит уровень только на логгер hub, root остаётся на WARNING, поэтому даже при HUB_LOG_LEVEL=DEBUG logging.getLogger('aiosqlite').isEnabledFor(DEBUG) == False — вывод драйвера в JSON-sink не попадает. Доп-фильтра в продукте не нужно. Рекомендация (не блокирует): фильтровать по логгеру hub только для 'tokid-SECRET-ID', а отсутствие 'PERMANENT-SECRET-8' и 'BODY-MARKER-8' проверять по всем записям — иначе фильтр способен замаскировать будущую утечку самого значения постоянного токена через стороннюю библиотеку. Полезно также закрепить тестом само свойство «подъём HUB_LOG_LEVEL до DEBUG не включает отладку драйвера БД»: сейчас оно держится на том, что root не трогают.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_migrations.py::test_i1_database_is_upgraded_without_data_loss (AC-142), src/hub/migrations/versions/0004_i4_token_exchange.py",
+      "what": "Поведение миграции 0004 на существующих данных не покрыто ни одним тестом: тест AC-142 засевает строку connections, но не засевает upstream_tokens, поэтому утверждение R-U17.4 и решения 95 («существующие строки получают token_origin='submitted' и NULL в остальных») не проверяется нигде. Проверено вручную и подтверждено: upgrade 0003→0004 над непустой upstream_tokens даёт token_origin='submitted', issued_token_id/token_origin_reason/submitted_expires_at = NULL, шифртекст access_token_enc сохранён; downgrade 0004→0003 снимает ровно четыре колонки без потери строк, повторный upgrade возвращает прежний вид (batch_alter_table на SQLite пересоздаёт таблицу корректно). Правки кода не требуется; предлагается дополнить тест AC-142 строкой upstream_tokens и проверкой значений четырёх новых колонок после апгрейда.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_token_exchange.py (AC-214/AC-217), spec.md R-U13 шаг 2",
+      "what": "Не покрыто требование R-U13.2 «в обоих исходах verify подключение не создаётся, обмен не выполняется и запрос выпуска в целевую систему не уходит»: ни один тест не проверяет, что при отказе verify присланному токену (400 token_rejected) и при недоступности (502) на exchange.url не ушло ни одного запроса. Код ведёт себя правильно (src/hub/routes/api.py:259-269 поднимает HubError до обращения к exchange), но регресс порядка шагов — отправка присланного пользователем токена в запрос выпуска после того, как целевая система его уже отвергла, — тестами не ловится. Достаточно одного случая: verify отвечает 401 → ответ 400 token_rejected, api.issue_requests == [], строки upstream_tokens нет; и одного на 500/таймаут → 502, issue_requests == []. Маркер ac — AC-214 (R-U13).",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_scope_set.py:252 (test_both_scopes_pass_authorize_and_give_readonly_preset, AC-203…AC-213), гейт G3",
+      "what": "Гейт G3 (mutation) на этой ветке не прогоняется: .venv/bin/mutmut run падает на этапе сбора статистики, потому что при прогоне против преобразованных mutmut исходников (без единого применённого мутанта — «0 files mutated, 39 unmodified») падает tests/test_scope_set.py::test_both_scopes_pass_authorize_and_give_readonly_preset: AssertionError: assert 'все объявленные области' in page.text — страница согласия отдаёт HTML без пояснения про набор областей. В обычном прогоне (и в файловом порядке без рандомизации, и полным набором) этот тест зелёный: 830 passed. Мутационному покрытию ревизии 4 это не мешает по существу, но G3 остаётся неоценённым для всей ветки, и mutmut останавливается по -x, не дойдя до мутантов. Тест относится к ревизии 3.2 (BUG-I3-002, коммит 67276a6), появившейся после последнего зелёного прогона G3 (reports/gates-i3-plus-h5-20260820.json), — то есть проблема унаследованная, а не внесена ревизией 4. Нужно разобраться, почему консент-страница ведёт себя иначе на преобразованном mutmut исходнике (вероятно, зависимость от формы кода в разборе scope как множества или в ветке выбора текста), и починить либо тест, либо совместимость кода с преобразованием; до этого G3 гонять отдельным заданием и считать неоценённым.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/catalog.py:531-560 (public_auth_methods)",
+      "what": "Наблюдение, правки не требует: признак issues_permanent_token отдаётся наружу и для способа с available: false, тогда как R-U12 оговаривает, что «exchange внутри способа с available: false наружу не отдаётся и не читается». Сам блок действительно не отдаётся — наружу идёт только булев признак, и R-U16 добавляет его к публичному виду способа без оговорок про доступность, поэтому поведение считаю соответствующим спеке. Фиксирую, чтобы расхождение формулировок R-U12 и R-U16 не всплыло как дефект позже; AC-227 этот случай не проверяет.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "dispute_resolutions": [
+    {
+      "dispute": "disputes/test-dispute-AC-56-connections-keys.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Тест закреплял закрытый набор ключей элемента /api/me/connections по редакции до ревизии 4. §28 и R-U16 прямо обязывают дополнить элемент ключами token_origin, token_origin_reason и session_expires_at, а AC-225 проверяет их значения в ответе того же эндпоинта — сохранять равенство набора значило бы запретить реализацию правила. Значения прежних ключей не изменились, значений токенов среди новых ключей нет (R-U17.3). Правки продукта не требуется. Test-агент закрыл диспут сильнее, чем предлагалось: набор оставлен закрытым (не заменён на подмножество), в него добавлены ровно три новых ключа и добавлена проверка, что у OAuth-подключения все три равны null (281224e, tests/test_api.py::test_me_connections). Ослабления нет, решение принято."
+    },
+    {
+      "dispute": "disputes/test-dispute-AC-113-connections-keys.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Тот же закрытый набор ключей в тесте «токены целевой системы не выходят наружу». Существо AC-113 не нарушено: новые ключи несут происхождение токена, код причины из закрытого набора и момент времени; ни значения токенов, ни шифртекста, ни issued_token_id в ответе нет — проверки «secret not in response.text» остались дословно и проходят. Правки продукта не требуется. Приведение к контракту ревизии 4 выполнено с сохранением закрытого набора (281224e, tests/test_broker.py::test_provider_tokens_never_leak_outside)."
+    },
+    {
+      "dispute": "disputes/test-dispute-AC-138-head-revision.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Тест закреплял head-ревизию Alembic значением '0003_i4_user_token', тогда как R-U17.4 прямо требует новой ревизии Alembic по R-M1, а решение 95 описывает её содержимое. AC-138 идентификатор head не фиксирует. Цепочка 0001→0002→0003→0004 непрерывна, down_revision у 0004 = 0003, миграция обратима и на существующих данных даёт прежнее поведение (проверено вручную). Правки продукта не требуется. Test-агент обновил и head, и цепочку, сохранив проверки непрерывности и равенства chain[-1] == head_revision() (281224e, tests/test_migrations.py::test_head_revision_is_i3)."
+    },
+    {
+      "dispute": "disputes/test-dispute-AC-176-connect-response-keys.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "AC-176 перечисляет ключи успешного ответа POST /api/me/connections/{alias}/token как обязательные, а не исчерпывающие; §28 и R-U16 обязывают дополнить тот же ответ ключами token_origin, token_origin_reason и session_expires_at, значения которых проверяют AC-214, AC-217…AC-219, AC-229, AC-230. Значения прежних ключей не изменились, значения токена в ответе по-прежнему нет. Правки продукта не требуется. Приведение выполнено с сохранением закрытого набора и с добавленной проверкой submitted/null у способа без exchange (281224e, tests/test_user_token.py::test_success_response_shape_has_no_token)."
+    },
+    {
+      "dispute": "disputes/test-dispute-AC-185-issues-permanent-token.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "AC-185 называет поля способа подключения в /api/catalog обязательными, а не исчерпывающими; R-U16 обязывает дополнить публичный вид способа признаком issues_permanent_token. Запреты AC-185 не ослаблены: блоки exchange и expiry наружу не отдаются ни в каком виде (проверено AC-227 по адресам, заголовкам, description, token_field и token_id_field), у сервера без auth_methods новых ключей не появилось (AC-22, AC-227). Правки продукта не требуется. Test-агент сохранил закрытый набор и добавил проверки, что у способов без exchange признак равен false (281224e, tests/test_user_token.py::test_catalog_publishes_methods_without_secrets)."
+    }
+  ],
+  "notes": {
+    "conformance": "R-U12…R-U18 и R-U10.1 реализованы по тексту §27: порядок шагов R-U13 соблюдён (проверки без сети → verify присланным → выпуск → повторный verify выпущенного с побайтовым сравнением аккаунта → запись → уборка → срок годности); классификация исходов R-U14.1 совпадает с таблицей (4xx кроме 429 и 501 → policy_denied, 429/5xx/сеть/таймаут/несовпавший код/не-JSON/не-объект/пустое token_field или token_id_field → upstream_unavailable, провал шага 4 → token_unusable); отзыв запускается только точным признаком (сохранённый issued_token_id либо побайтовое равенство маркеру), не более 20 элементов списка за заход; при отключении отзывается только issued, присланный — никогда, OAuth revoke_url для user_token не вызывается; состав кэша conn:<user_id>:<alias> (R-M4) не изменён. Подгонки под тесты в src нет: тестовых литералов (SESSION-, PERMANENT, tokid, hub.test, OpenCode Hub, tag.magnit) в исходниках не найдено, пороги вынесены в константы ISSUED_MARKER_MAX_LENGTH=255 и CLEANUP_REVOKE_LIMIT=20.",
+    "security": "Постоянный токен шифруется тем же Fernet-механизмом, что и присланный (единый путь save_tokens → cipher.encrypt; в кэш кладётся тот же шифртекст). Заголовки всех четырёх новых запросов (exchange, exchange.list, exchange.revoke, expiry) собираются через существующий resolve_header_value → is_header_safe (src/hub/proxy.py:392), непригодное значение отсекается до сети. Тело ответа на выпуск не логируется нигде: _upstream_json возвращает разобранное тело и не пишет его в журнал, в записях только alias, auth_method и HTTP-код. Полный обход путей логирования (все logger.* в broker.py, routes/api.py, routes/web.py, web.py) значений токенов и issued_token_id не содержит; в audit_log идут только факты (upstream_token_issued {alias, auth_method}, upstream_token_revoked {alias, reason, outcome}, upstream_token_cleanup_failed {alias, stage}) и token_origin/token_origin_reason в connection_connected. Присланное значение живёт только в аргументах обработчика запроса и не переживает его.",
+    "tests": "Тесты неповторяют формул реализации и проверяют наблюдаемое: что ушло в целевую систему (заголовок, тело, адрес, метод), что лежит в БД после расшифровки, что видно в ответах API и HTML. Моки только на границе HTTP (MockTokenApi ведёт состояние списка токенов учётной записи; MockVerify отвечает по значению Authorization) — тестируемая логика не замокана. Фальсифицируемость проверена инструментально: (1) маркер без установки Hub → падают 6 тестов, включая AC-221 и AC-226; (2) приём любого непустого token_field → падают три случая AC-218; (3) отключённый отзыв → падают AC-222 (issued) и AC-226; (4) журналирование тела ответа выпуска → падают AC-224 и два случая AC-231. Единственная найденная вырожденность — уровень DEBUG в проверках утечек, см. finding 1.",
+    "mutation": "Гейт G3 локально прогнать не удалось — см. finding про tests/test_scope_set.py:252. .venv/bin/mutmut run с прежним кэшем падает BadTestExecutionCommandsException, с очищенным кэшем mutants/mutmut-stats.json доходит до сбора статистики и останавливается на падении test_both_scopes_pass_authorize_and_give_readonly_preset против преобразованных mutmut исходников (мутанты при этом не применялись). До мутантов прогон не доходит, поэтому mutation score за ревизию 4 не измерен. Кэш mutants/mutmut-stats.json восстановлен из копии, дерево оставлено как было. G3 считать неоценённым и прогнать отдельным заданием после починки; последний зелёный прогон — reports/gates-i3-plus-h5-20260820.json (74.4% при пороге 70%), он предшествует ревизиям 3.1/3.2."
+  }
+}

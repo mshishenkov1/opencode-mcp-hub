@@ -1,0 +1,9 @@
+{
+  "dispute": "disputes/test-dispute-AC-185-issues-permanent-token.json",
+  "resolution": "uphold_dispute",
+  "decided_by": "review-agent (ревью ревизии 4, reports/review-rev4-1.json)",
+  "reasoning": "Тест tests/test_user_token.py::test_catalog_publishes_methods_without_secrets требовал точного равенства набора ключей способа подключения в /api/catalog, тогда как AC-185 называет эти поля обязательными. R-U16 обязывает дополнить публичный вид способа признаком issues_permanent_token (true при объявленном exchange, иначе false). Запреты AC-185 не ослаблены: блоки exchange и expiry наружу не отдаются ни в каком виде — проверено AC-227 по адресам, заголовкам, description, token_field и token_id_field, — а у сервера без auth_methods новых ключей не появилось (AC-22). Продуктовый код правки не требует.",
+  "assignee": "test",
+  "action": "правок не требуется: test-агент уже привёл тест к контракту ревизии 4 в коммите 281224e, сохранив закрытый набор ключей и добавив проверки значений новых ключей (усиление, не ослабление)",
+  "status": "closed"
+}
