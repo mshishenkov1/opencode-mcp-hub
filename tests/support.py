@@ -510,6 +510,15 @@ VERIFY_URL = "https://tag.test/api/v4/users/me"
 # Адрес проверки из текста R-U10 (запись каталога приводится в спеке дословно).
 TAG_SPEC_VERIFY_URL = "https://tag.magnit.ru/api/v4/users/me"
 
+# I-4 ревизия 4: личные токены целевой системы — выпуск/список, отзыв и сессии (R-U12, R-U18).
+EXCHANGE_URL = "https://tag.test/api/v4/users/me/tokens"
+EXCHANGE_REVOKE_URL = "https://tag.test/api/v4/users/tokens/revoke"
+EXPIRY_URL = "https://tag.test/api/v4/users/me/sessions"
+# Те же адреса из текста R-U10.1 (запись каталога приводится в спеке дословно).
+TAG_SPEC_EXCHANGE_URL = "https://tag.magnit.ru/api/v4/users/me/tokens"
+TAG_SPEC_REVOKE_URL = "https://tag.magnit.ru/api/v4/users/tokens/revoke"
+TAG_SPEC_SESSIONS_URL = "https://tag.magnit.ru/api/v4/users/me/sessions"
+
 GL_SECRET = "gl-secret"
 GL_STATIC = "st-1"
 JIRA_SECRET = "jira-secret"
@@ -923,6 +932,9 @@ class MockVerify:
         self.account = account
         self.requests: list[RecordedRequest] = []
         self.queue: list[Any] = []
+        # R-U13.4: проверка выполняется дважды — присланным и выпущенным токеном; сценарий
+        # «на этот токен система отвечает так» задаётся по значению Authorization.
+        self.by_token: dict[str, Any] = {}
 
     @property
     def calls(self) -> int:
@@ -942,9 +954,26 @@ class MockVerify:
     def matches(self, request: httpx.Request) -> bool:
         return str(request.url).split("?")[0] in self.urls
 
+    def tokens_seen(self) -> list[str | None]:
+        """Значения токенов, с которыми выполнялась проверка (порядок обращений)."""
+        return [
+            (r.header("authorization") or "").removeprefix("Bearer ") or None for r in self.requests
+        ]
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         recorded = _record(request)
         self.requests.append(recorded)
+        token = (recorded.header("authorization") or "").removeprefix("Bearer ")
+        if token in self.by_token:
+            item = self.by_token[token]
+            if isinstance(item, list):
+                item = item.pop(0) if item else None
+            if item is not None:
+                if isinstance(item, BaseException):
+                    raise item
+                if callable(item):
+                    return item(recorded)
+                return item
         if self.queue:
             item = self.queue.pop(0)
             if isinstance(item, BaseException):
@@ -955,11 +984,153 @@ class MockVerify:
         return httpx.Response(200, json={self.account_field: self.account})
 
 
+class MockTokenApi:
+    """Мок личных токенов целевой системы: выпуск, список, отзыв и сессии (R-U12, R-U18).
+
+    Ведёт список токенов учётной записи: выпуск добавляет элемент с присланным ``description``,
+    отзыв удаляет элемент по ``token_id``. Сценарий каждого из четырёх запросов задаётся своей
+    очередью (``push_issue`` / ``push_list`` / ``push_revoke`` / ``push_sessions``): готовым
+    ``httpx.Response``, исключением (сетевая ошибка, таймаут) или функцией.
+    """
+
+    def __init__(
+        self,
+        *,
+        tokens_url: str = EXCHANGE_URL,
+        revoke_url: str = EXCHANGE_REVOKE_URL,
+        sessions_url: str = EXPIRY_URL,
+        id_prefix: str = "tokid",
+        value_prefix: str = "PERMANENT",
+    ) -> None:
+        self.tokens_url = tokens_url
+        self.revoke_url = revoke_url
+        self.sessions_url = sessions_url
+        self.id_prefix = id_prefix
+        self.value_prefix = value_prefix
+        self.items: list[dict[str, Any]] = []
+        self.sessions: list[Any] = []
+        self.seq = 0
+        self.issue_requests: list[RecordedRequest] = []
+        self.list_requests: list[RecordedRequest] = []
+        self.revoke_requests: list[RecordedRequest] = []
+        self.sessions_requests: list[RecordedRequest] = []
+        self.issue_queue: list[Any] = []
+        self.list_queue: list[Any] = []
+        self.revoke_queue: list[Any] = []
+        self.sessions_queue: list[Any] = []
+
+    # --- управление сценарием ------------------------------------------------
+
+    def push_issue(self, response: Any) -> None:
+        self.issue_queue.append(response)
+
+    def push_list(self, response: Any) -> None:
+        self.list_queue.append(response)
+
+    def push_revoke(self, response: Any) -> None:
+        self.revoke_queue.append(response)
+
+    def push_sessions(self, response: Any) -> None:
+        self.sessions_queue.append(response)
+
+    def add_item(self, token_id: str, description: Any) -> None:
+        self.items.append({"id": token_id, "description": description})
+
+    def add_raw_item(self, item: Any) -> None:
+        self.items.append(item)
+
+    @property
+    def item_ids(self) -> list[Any]:
+        return [item.get("id") if isinstance(item, dict) else item for item in self.items]
+
+    @property
+    def revoked_ids(self) -> list[Any]:
+        """Идентификаторы, на отзыв которых уходил запрос (в порядке обращений)."""
+        return [(r.json_body or {}).get("token_id") for r in self.revoke_requests]
+
+    def descriptions(self) -> list[Any]:
+        return [(r.json_body or {}).get("description") for r in self.issue_requests]
+
+    # --- обработка -----------------------------------------------------------
+
+    def matches(self, request: httpx.Request) -> bool:
+        return str(request.url).split("?")[0] in (
+            self.tokens_url,
+            self.revoke_url,
+            self.sessions_url,
+        )
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        recorded = _record(request)
+        url = str(request.url).split("?")[0]
+        if url == self.sessions_url:
+            self.sessions_requests.append(recorded)
+            return self._respond(self.sessions_queue, recorded, self._sessions)
+        if url == self.revoke_url:
+            self.revoke_requests.append(recorded)
+            return self._respond(self.revoke_queue, recorded, self._revoke)
+        if recorded.method == "GET":
+            self.list_requests.append(recorded)
+            return self._respond(self.list_queue, recorded, self._list)
+        self.issue_requests.append(recorded)
+        return self._respond(self.issue_queue, recorded, self._issue)
+
+    def _respond(self, queue: list[Any], recorded: RecordedRequest, default: Any) -> httpx.Response:
+        if queue:
+            item = queue.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            if callable(item):
+                return item(recorded)
+            return item
+        return default(recorded)
+
+    def _issue(self, recorded: RecordedRequest) -> httpx.Response:
+        self.seq += 1
+        token_id = f"{self.id_prefix}-{self.seq}"
+        description = (recorded.json_body or {}).get("description")
+        self.items.append({"id": token_id, "description": description})
+        return httpx.Response(
+            200,
+            json={
+                "id": token_id,
+                "token": f"{self.value_prefix}-{self.seq}",
+                "user_id": "u1",
+                "description": description,
+                "is_active": True,
+            },
+        )
+
+    def _list(self, recorded: RecordedRequest) -> httpx.Response:
+        return httpx.Response(200, json=copy.deepcopy(self.items))
+
+    def _sessions(self, recorded: RecordedRequest) -> httpx.Response:
+        return httpx.Response(200, json=copy.deepcopy(self.sessions))
+
+    def _revoke(self, recorded: RecordedRequest) -> httpx.Response:
+        token_id = (recorded.json_body or {}).get("token_id")
+        self.items = [
+            item
+            for item in self.items
+            if not (isinstance(item, dict) and item.get("id") == token_id)
+        ]
+        return httpx.Response(200, json={"status": "OK"})
+
+
 class MockNetwork:
     """Единая точка перехвата исходящих HTTP-запросов Hub (кроме LiteLLM)."""
 
     def __init__(self) -> None:
         self.verify = MockVerify(VERIFY_URL, TAG_SPEC_VERIFY_URL)
+        # R-U12/R-U18: личные токены и сессии — на тестовом адресе и на адресе из R-U10.1.
+        self.tokens = MockTokenApi()
+        self.spec_tokens = MockTokenApi(
+            tokens_url=TAG_SPEC_EXCHANGE_URL,
+            revoke_url=TAG_SPEC_REVOKE_URL,
+            sessions_url=TAG_SPEC_SESSIONS_URL,
+            id_prefix="mm",
+            value_prefix="MM-PERMANENT",
+        )
         self.upstreams: dict[str, MockUpstream] = {
             "gitlab": MockUpstream(GITLAB_UPSTREAM, prefix="up"),
             "jira": MockUpstream(JIRA_UPSTREAM, prefix="jira"),
@@ -986,7 +1157,14 @@ class MockNetwork:
         return self.providers["gitlab"]
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        for mock in (*self.upstreams.values(), *self.providers.values(), self.oidc, self.verify):
+        for mock in (
+            *self.upstreams.values(),
+            *self.providers.values(),
+            self.oidc,
+            self.verify,
+            self.tokens,
+            self.spec_tokens,
+        ):
             if mock.matches(request):
                 return mock.handle(request)
         self.unmatched.append(f"{request.method} {request.url}")
@@ -1173,6 +1351,56 @@ def user_token_method(method_id: str = "session_token", **overrides: Any) -> dic
     return method
 
 
+def exchange_block(
+    *,
+    url: str = EXCHANGE_URL,
+    list_url: str | None = EXCHANGE_URL,
+    revoke_url: str = EXCHANGE_REVOKE_URL,
+    description: str = "OpenCode Hub",
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Блок ``exchange`` способа ``user_token`` (R-U12): выпуск, отзыв и (по желанию) список."""
+    block: dict[str, Any] = {
+        "url": url,
+        "method": "POST",
+        "headers": {"Authorization": "Bearer {{access_token}}"},
+        "body": {"description": "{{token_description}}"},
+        "expect_status": 200,
+        "token_field": "token",
+        "token_id_field": "id",
+        "description": description,
+        "revoke": {
+            "url": revoke_url,
+            "method": "POST",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "body": {"token_id": "{{token_id}}"},
+        },
+    }
+    if list_url is not None:
+        block["list"] = {
+            "url": list_url,
+            "method": "GET",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "id_field": "id",
+            "description_field": "description",
+        }
+    block.update(overrides)
+    return block
+
+
+def expiry_block(*, url: str = EXPIRY_URL, **overrides: Any) -> dict[str, Any]:
+    """Блок ``expiry`` способа ``user_token`` (R-U18): срок годности присланного токена."""
+    block: dict[str, Any] = {
+        "url": url,
+        "method": "GET",
+        "headers": {"Authorization": "Bearer {{access_token}}"},
+        "expires_field": "expires_at",
+        "expires_unit": "ms",
+    }
+    block.update(overrides)
+    return block
+
+
 def oauth_method(
     method_id: str = "corp_oauth",
     *,
@@ -1274,6 +1502,47 @@ def tag_spec_server() -> dict[str, Any]:
         "credential_headers": {"Authorization": "Bearer {{access_token}}"},
         "permission_model": copy.deepcopy(TAG_TOOL_FILTER),
     }
+
+
+def tag_spec_server_rev4() -> dict[str, Any]:
+    """Запись каталога ``tag`` ревизии 4 дословно по R-U10.1 (AC-228).
+
+    От R-U10 отличается ровно двумя блоками способа ``session_token`` — ``exchange`` и ``expiry``;
+    прочие поля записи не меняются.
+    """
+    server = tag_spec_server()
+    method = next(m for m in server["auth_methods"] if m["id"] == "session_token")
+    method["exchange"] = {
+        "url": TAG_SPEC_EXCHANGE_URL,
+        "method": "POST",
+        "headers": {"Authorization": "Bearer {{access_token}}"},
+        "body": {"description": "{{token_description}}"},
+        "expect_status": 200,
+        "token_field": "token",
+        "token_id_field": "id",
+        "description": "OpenCode Hub",
+        "list": {
+            "url": TAG_SPEC_EXCHANGE_URL,
+            "method": "GET",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "id_field": "id",
+            "description_field": "description",
+        },
+        "revoke": {
+            "url": TAG_SPEC_REVOKE_URL,
+            "method": "POST",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "body": {"token_id": "{{token_id}}"},
+        },
+    }
+    method["expiry"] = {
+        "url": TAG_SPEC_SESSIONS_URL,
+        "method": "GET",
+        "headers": {"Authorization": "Bearer {{access_token}}"},
+        "expires_field": "expires_at",
+        "expires_unit": "ms",
+    }
+    return server
 
 
 async def connect_with_token(
