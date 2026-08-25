@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from alembic.script import ScriptDirectory
 from asgi_lifespan import LifespanManager
 from sqlalchemy import event, inspect, text
@@ -421,6 +422,134 @@ async def test_current_revision_is_none_for_empty_database(tmp_path: Path) -> No
         assert await current_revision(engine) is None
         await upgrade(engine)
         assert await current_revision(engine) == head_revision()
+    finally:
+        await engine.dispose()
+
+
+# --- AC-142: ревизия 4 над существующими строками upstream_tokens ----------
+
+
+PRE_REVISION_4 = "0003_i4_user_token"
+NEW_COLUMNS = ("issued_token_id", "token_origin", "token_origin_reason", "submitted_expires_at")
+LEGACY_CIPHERTEXT = "gAAAAA-legacy-ciphertext-not-a-real-token"
+
+
+def _run_downgrade(connection: Any, revision: str) -> None:
+    cfg = alembic_config()
+    cfg.attributes["connection"] = connection
+    command.downgrade(cfg, revision)
+
+
+async def _downgrade(engine: Any, revision: str) -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(_run_downgrade, revision)
+
+
+async def _upstream_columns(engine: Any) -> set[str]:
+    async with engine.connect() as conn:
+        return set(
+            await conn.run_sync(
+                lambda sync: {c["name"] for c in inspect(sync).get_columns("upstream_tokens")}
+            )
+        )
+
+
+async def _rows(engine: Any, sql: str) -> list[dict[str, Any]]:
+    async with engine.connect() as conn:
+        result = await conn.execute(text(sql))
+        return [dict(row) for row in result.mappings().all()]
+
+
+async def _seed_pre_revision_4(engine: Any) -> None:
+    """Строка ``upstream_tokens`` ревизии до 4-й: шифртокен без сведений о происхождении."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO users (user_id, email, groups, created_at, updated_at) "
+                "VALUES ('legacy-user','legacy@corp.test','[\"all\"]',"
+                "'2026-01-01 00:00:00','2026-01-01 00:00:00')"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO connections (user_id, alias, status, preset, groups, "
+                "created_at, updated_at, revision) VALUES ('legacy-user','tag','connected',"
+                "'readonly','[]','2026-01-01 00:00:00','2026-01-01 00:00:00',1)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO upstream_tokens (connection_id, access_token_enc, refresh_token_enc, "
+                "token_type, scopes, expires_at, obtained_at, updated_at) "
+                "SELECT id, :enc, NULL, 'Bearer', '[]', NULL, "
+                "'2026-01-01 00:00:00', '2026-01-01 00:00:00' FROM connections"
+            ),
+            {"enc": LEGACY_CIPHERTEXT},
+        )
+
+
+@pytest.mark.ac("AC-142")
+async def test_revision_4_keeps_previous_behaviour_for_existing_tokens(tmp_path: Path) -> None:
+    """Существующие строки после апгрейда ведут себя как прежде (R-U17.4, решение 95).
+
+    Прежнее поведение — это ``token_origin='submitted'`` и NULL в трёх остальных колонках:
+    предупреждения о временном подключении нет (причина пуста, R-U16), отзыв при отключении
+    не выполняется (R-U15.4 требует ``issued`` и непустой ``issued_token_id``), срока сессии нет.
+    Шифртекст токена миграция не трогает.
+    """
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'rev3.db'}")
+    try:
+        await upgrade(engine, PRE_REVISION_4)
+        assert await current_revision(engine) == PRE_REVISION_4
+        assert set(NEW_COLUMNS) & await _upstream_columns(engine) == set()
+        await _seed_pre_revision_4(engine)
+
+        await upgrade(engine)
+        assert await current_revision(engine) == head_revision()
+        assert set(NEW_COLUMNS) <= await _upstream_columns(engine)
+
+        rows = await _rows(
+            engine,
+            "SELECT access_token_enc, token_type, issued_token_id, token_origin, "
+            "token_origin_reason, submitted_expires_at FROM upstream_tokens",
+        )
+        assert len(rows) == 1, "строка не пережила апгрейд"
+        row = rows[0]
+        assert row["token_origin"] == "submitted"
+        assert row["issued_token_id"] is None
+        assert row["token_origin_reason"] is None
+        assert row["submitted_expires_at"] is None
+        # Шифртекст и прочие поля миграция не переписывает.
+        assert row["access_token_enc"] == LEGACY_CIPHERTEXT
+        assert row["token_type"] == "Bearer"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.ac("AC-142")
+async def test_revision_4_downgrade_drops_columns_without_data_loss(tmp_path: Path) -> None:
+    """Откат ревизии 4 снимает ровно четыре колонки и не теряет строк (R-M1)."""
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'rev4.db'}")
+    try:
+        await upgrade(engine, PRE_REVISION_4)
+        await _seed_pre_revision_4(engine)
+        await upgrade(engine)
+        before = await _upstream_columns(engine)
+
+        await _downgrade(engine, PRE_REVISION_4)
+        assert await current_revision(engine) == PRE_REVISION_4
+        after = await _upstream_columns(engine)
+        assert before - after == set(NEW_COLUMNS)
+
+        rows = await _rows(engine, "SELECT access_token_enc, token_type FROM upstream_tokens")
+        assert rows == [{"access_token_enc": LEGACY_CIPHERTEXT, "token_type": "Bearer"}]
+
+        # Повторный апгрейд возвращает прежний вид — миграция обратима.
+        await upgrade(engine)
+        assert await _upstream_columns(engine) == before
+        assert (await _rows(engine, "SELECT token_origin FROM upstream_tokens")) == [
+            {"token_origin": "submitted"}
+        ]
     finally:
         await engine.dispose()
 
