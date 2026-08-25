@@ -1,0 +1,28 @@
+{
+  "dispute": "disputes/test-dispute-i4-ac38-catalog-card-shape.json",
+  "subject": "Фикстура карточки витрины в тесте AC-38 осталась от прежней формы: ревизия 1.9 добавила обязательные поля state и ever_connected",
+  "resolved_by": "test-agent",
+  "date": "2026-08-25",
+  "verdict": "dev-agent прав; претензия принята",
+  "reasoning": [
+    "AC-38 не перечисляет полей карточки: он требует, чтобы витрина отдавала источник, признак протухания и карточки. Форма карточки задаётся моделью S-V6/S-V16 и меняется вместе с ней, поэтому обновление фикстуры критерий не ослабляет.",
+    "S-T10 запрещает оболочкам вычислять состояние и набор действий самостоятельно: «Набор действий обе оболочки получают из одного модуля packages/opencode/src/corp/status.ts и не вычисляют сами». Если сделать state и ever_connected необязательными, оболочке придётся домысливать состояние по actions и status — то есть завести вторую копию правила S-V16.",
+    "Различить «Соединение потеряно» и «Отключено вами» (S-V16, ключи corp.connectors.lost и corp.connectors.disconnected) по паре status+actions невозможно: набор действий у обеих подписей одинаков. Значит поле state обязано быть в ответе.",
+    "AC-185 требует того же от TUI: «взяв их из общего модуля corp/status.ts»."
+  ],
+  "resolution": [
+    "Фикстура карточки в тесте AC-38 дополнена полями state: \"never\" и ever_connected: false; проверка декодирования конверта витрины (version, source, cached_at, stale, servers, hub_error) сохранена дословно.",
+    "Добавлена проверка, что карточка БЕЗ state или БЕЗ ever_connected схемой не принимается, и что чужое значение state («почти_подключён») тоже не принимается — обязательность этих полей и есть то, что не даёт оболочке домыслить состояние.",
+    "Добавлена проверка, что множество CardAction пополнено значением forget при сохранённых прежних значениях (connect, reconnect, disconnect, permissions, open_hub).",
+    "Дополнительно закреплены схемы ревизии 1.9, которых AC-38 касается напрямую: error_class в ConnectorResult (четыре класса, чужой класс отвергается) и ForgetResult с removed и необязательным hub_error, а также маршрут DELETE /corp/connectors/:alias, отличный от disconnect."
+  ],
+  "tests": [
+    "packages/opencode/src/corp/routes.test.ts::корп-роуты — схемы ответов (AC-14, AC-15) > AC-38: витрина отдаёт источник, признак протухания и карточки",
+    "packages/opencode/src/corp/routes.test.ts::корп-роуты — схемы ответов (AC-14, AC-15) > AC-38: карточка без state или без ever_connected схемой не принимается",
+    "packages/opencode/src/corp/routes.test.ts::корп-роуты — схемы ответов (AC-14, AC-15) > AC-38: набор действий карточки пополнен значением forget, прежние сохранены (S-V16)",
+    "packages/opencode/src/corp/routes.test.ts::корп-роуты — схемы ответов (AC-14, AC-15) > AC-180: ответ connect несёт класс ошибки подключения (S-V19)",
+    "packages/opencode/src/corp/routes.test.ts::корп-роуты — схемы ответов (AC-14, AC-15) > AC-175, AC-176: ответ «Убрать из списка» описан схемой с removed и необязательным hub_error",
+    "packages/opencode/src/corp/routes.test.ts::корп-роуты — набор маршрутов (AC-14, AC-38) > AC-175: «Убрать из списка» — отдельный маршрут DELETE /corp/connectors/:alias"
+  ],
+  "status": "resolved"
+}
