@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -23,6 +22,7 @@ from tests.support import (
     TAG_ENV,
     add_key,
     bearer,
+    capture_all_levels,
     capture_json_logs,
     catalog_doc,
     connect_with_token,
@@ -277,10 +277,7 @@ async def test_unreadable_expiry_invents_no_date(
     api = hub.net.tokens
     api.push_issue(FORBIDDEN)
     api.push_sessions(outcome)
-    # Перехват логов всех уровней: одного root мало — configure_logging внутри create_app
-    # вернул логгер ``hub`` на INFO, и DEBUG-утечка тестом бы не ловилась.
-    caplog.set_level(logging.DEBUG)
-    caplog.set_level(logging.DEBUG, logger="hub")
+    capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         response = await connect_with_token(hub, alias="tag", token="SESSION-11")

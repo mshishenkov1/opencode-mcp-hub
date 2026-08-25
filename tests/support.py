@@ -405,6 +405,43 @@ def dump_kv(app: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def capture_all_levels(caplog: Any) -> None:
+    """Включить перехват логов всех уровней — и Hub, и сторонних библиотек.
+
+    Одного ``caplog.set_level(DEBUG)`` мало: он поднимает root, а логгер ``hub`` к этому моменту
+    уже возвращён на INFO вызовом ``configure_logging`` внутри ``create_app`` (autouse-фикстура
+    ``hub_logs_captured`` отрабатывает раньше приложения). Без явного уровня на ``hub`` запись
+    значения токена на DEBUG тест бы не уронил, то есть given критериев «включён перехват логов
+    всех уровней» не выполнялся бы. Вызывать строго ПОСЛЕ создания приложения.
+    """
+    import logging as _logging
+
+    caplog.set_level(_logging.DEBUG)
+    caplog.set_level(_logging.DEBUG, logger="hub")
+
+
+def all_log(caplog: Any, json_logs: Any) -> str:
+    """Журнал целиком: все записи всех логгеров всех уровней плюс JSON-sink Hub."""
+    return "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+
+
+def hub_log(caplog: Any, json_logs: Any) -> str:
+    """Только записи самого Hub — все уровни, без вывода сторонних библиотек.
+
+    Нужен для значений, которые Hub хранит открытыми и которые поэтому законно видны в DEBUG-эхе
+    SQL драйвера БД (``aiosqlite`` печатает текст запроса вместе со значениями параметров): таков
+    ``issued_token_id`` (R-U17.3 запрещает его именно в журнале Hub). Значения токенов и тела
+    ответов проверяются без этого фильтра — через ``all_log``.
+    """
+    records = [record_text(r) for r in caplog.records if r.name.split(".")[0] == "hub"]
+    lines = [
+        line
+        for line, record in zip(json_logs.raw(), json_logs.records(), strict=True)
+        if str(record.get("logger", "")).split(".")[0] == "hub"
+    ]
+    return "\n".join(records + lines)
+
+
 def record_text(record: Any) -> str:
     """Полный текст записи лога: сообщение + все дополнительные атрибуты (``extra``)."""
     extras = {k: v for k, v in record.__dict__.items() if not k.startswith("_")}
@@ -1018,6 +1055,10 @@ class MockTokenApi:
         self.list_queue: list[Any] = []
         self.revoke_queue: list[Any] = []
         self.sessions_queue: list[Any] = []
+        # R-U19.3: отзыв сироты идёт двумя учётными данными подряд, поэтому сценарий задаётся не
+        # очередью, а ответом по самому запросу: ``responder(recorded) -> httpx.Response | None``
+        # (``None`` — вести себя как обычно, то есть удалить элемент списка и ответить 200).
+        self.revoke_responder: Any = None
 
     # --- управление сценарием ------------------------------------------------
 
@@ -1033,6 +1074,13 @@ class MockTokenApi:
     def push_sessions(self, response: Any) -> None:
         self.sessions_queue.append(response)
 
+    def reset_requests(self) -> None:
+        """Забыть полученные запросы: подготовка состояния — не предмет проверки."""
+        self.issue_requests.clear()
+        self.list_requests.clear()
+        self.revoke_requests.clear()
+        self.sessions_requests.clear()
+
     def add_item(self, token_id: str, description: Any) -> None:
         self.items.append({"id": token_id, "description": description})
 
@@ -1047,6 +1095,11 @@ class MockTokenApi:
     def revoked_ids(self) -> list[Any]:
         """Идентификаторы, на отзыв которых уходил запрос (в порядке обращений)."""
         return [(r.json_body or {}).get("token_id") for r in self.revoke_requests]
+
+    @property
+    def revoke_credentials(self) -> list[str | None]:
+        """Значения Authorization запросов отзыва (в порядке обращений) — R-U19.3."""
+        return [r.header("authorization") for r in self.revoke_requests]
 
     def descriptions(self) -> list[Any]:
         return [(r.json_body or {}).get("description") for r in self.issue_requests]
@@ -1108,6 +1161,10 @@ class MockTokenApi:
         return httpx.Response(200, json=copy.deepcopy(self.sessions))
 
     def _revoke(self, recorded: RecordedRequest) -> httpx.Response:
+        if self.revoke_responder is not None:
+            answer = self.revoke_responder(recorded)
+            if answer is not None:
+                return answer
         token_id = (recorded.json_body or {}).get("token_id")
         self.items = [
             item

@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 import httpx
@@ -25,8 +24,10 @@ from tests.support import (
     TAG_ENV,
     TAG_SPEC_EXCHANGE_URL,
     add_key,
+    all_log,
     audit_rows,
     bearer,
+    capture_all_levels,
     capture_json_logs,
     catalog_doc,
     connect_with_token,
@@ -34,12 +35,12 @@ from tests.support import (
     dump_kv,
     exchange_block,
     fetch_rows,
+    hub_log,
     issue_hub_tokens,
     jsonrpc_body,
     mcp_headers,
     native_server,
     oauth_method,
-    record_text,
     tag_spec_server_rev4,
     user_token_facade,
     user_token_method,
@@ -131,41 +132,6 @@ def _authorizations(requests: list[Any]) -> list[str | None]:
 
 def _fragments(value: str, length: int = 8) -> list[str]:
     return [value[i : i + length] for i in range(len(value) - length + 1)]
-
-
-def _capture_all_levels(caplog: pytest.LogCaptureFixture) -> None:
-    """Включить перехват логов всех уровней — и Hub, и сторонних библиотек.
-
-    Одного ``caplog.set_level(DEBUG)`` мало: он поднимает root, а логгер ``hub`` к этому моменту
-    уже возвращён на INFO вызовом ``configure_logging`` внутри ``create_app`` (autouse-фикстура
-    ``hub_logs_captured`` отрабатывает раньше приложения). Без явного уровня на ``hub`` запись
-    значения токена на DEBUG тест бы не уронил — given критериев «включён перехват логов всех
-    уровней» не выполнялся бы. Вызывать строго ПОСЛЕ создания приложения.
-    """
-    caplog.set_level(logging.DEBUG)
-    caplog.set_level(logging.DEBUG, logger="hub")
-
-
-def _all_log(caplog: pytest.LogCaptureFixture, json_logs: Any) -> str:
-    """Журнал целиком: все записи всех логгеров всех уровней плюс JSON-sink Hub."""
-    return "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
-
-
-def _hub_log(caplog: pytest.LogCaptureFixture, json_logs: Any) -> str:
-    """Только записи самого Hub — все уровни, без вывода сторонних библиотек.
-
-    Нужен ровно для одного значения: ``issued_token_id`` по R-U17.3 не учётные данные и хранится
-    открытым, поэтому он законно виден в DEBUG-эхе SQL драйвера БД (``aiosqlite`` печатает текст
-    запроса вместе со значениями параметров). Правило R-U17.3 говорит о журнале Hub — его и
-    проверяем. Значения токенов и тела ответов проверяются без этого фильтра (``_all_log``).
-    """
-    records = [record_text(r) for r in caplog.records if r.name.split(".")[0] == "hub"]
-    lines = [
-        line
-        for line, record in zip(json_logs.raw(), json_logs.records(), strict=True)
-        if str(record.get("logger", "")).split(".")[0] == "hub"
-    ]
-    return "\n".join(records + lines)
 
 
 async def _connect(hub: Hub, token: str, *, alias: str = "tag", key: str = "sk-ok") -> Any:
@@ -670,7 +636,7 @@ async def test_cleanup_failure_does_not_break_the_connection(
         api.push_list(failure)
     else:
         api.push_revoke(failure)
-    _capture_all_levels(caplog)
+    capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         response = await connect_with_token(hub, alias="tag", token="SESSION-5")
@@ -683,7 +649,7 @@ async def test_cleanup_failure_does_not_break_the_connection(
     failed = await audit_rows(hub.app, "upstream_token_cleanup_failed")
     assert [row["details"]["stage"] for row in failed] == [stage]
 
-    logged = _all_log(caplog, json_logs)
+    logged = all_log(caplog, json_logs)
     assert logged, "журнал пуст — проверка вырождена"
     assert "CLEANUP-BODY-MARKER" not in logged
     assert "CLEANUP-BODY-MARKER" not in json.dumps(
@@ -814,7 +780,7 @@ async def test_submitted_token_is_not_stored_anywhere_after_successful_exchange(
     hub.net.tokens.push_issue(
         httpx.Response(200, json={"id": "tokid-6", "token": "PERMANENT-6"})
     )
-    _capture_all_levels(caplog)
+    capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         connected = await connect_with_token(hub, alias="tag", token=secret)
@@ -842,7 +808,7 @@ async def test_submitted_token_is_not_stored_anywhere_after_successful_exchange(
     audit = json.dumps(await audit_rows(hub.app), default=str, ensure_ascii=False)
     assert [f for f in fragments if f in audit] == []
 
-    logged = _all_log(caplog, json_logs)
+    logged = all_log(caplog, json_logs)
     assert logged, "журнал пуст — проверка вырождена"
     assert [f for f in fragments if f in logged] == []
 
@@ -871,7 +837,7 @@ async def test_issued_token_id_and_response_body_never_leak(
             },
         )
     )
-    _capture_all_levels(caplog)
+    capture_all_levels(caplog)
 
     with capture_json_logs() as json_logs:
         connected = await connect_with_token(hub, alias="tag", token="SESSION-8")
@@ -893,13 +859,13 @@ async def test_issued_token_id_and_response_body_never_leak(
 
     # Значение постоянного токена и тело ответа на выпуск не должны появиться ни у одного
     # логгера: фильтр по ``hub`` замаскировал бы утечку через стороннюю библиотеку.
-    everything = _all_log(caplog, json_logs)
+    everything = all_log(caplog, json_logs)
     assert everything, "журнал пуст — проверка вырождена"
     for secret in ("PERMANENT-SECRET-8", "BODY-MARKER-8"):
         assert secret not in everything, secret
     # Идентификатор выпущенного токена хранится открытым (R-U17.3) и законно виден в DEBUG-эхе
     # SQL драйвера БД; правило запрещает его в журнале Hub — там и проверяем.
-    hub_logged = _hub_log(caplog, json_logs)
+    hub_logged = hub_log(caplog, json_logs)
     assert hub_logged, "журнал Hub пуст — проверка вырождена"
     assert "tokid-SECRET-ID" not in hub_logged
 
