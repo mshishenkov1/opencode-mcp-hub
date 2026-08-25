@@ -447,7 +447,15 @@ async def test_success_response_shape_has_no_token(make_hub: HubFactory) -> None
         "groups",
         "account",
         "updated_at",
+        # §28 ревизии 4: ответ дополнен происхождением токена и сроком сессии (R-U16).
+        "token_origin",
+        "token_origin_reason",
+        "session_expires_at",
     }
+    # Способ без блока exchange: обмен не предусмотрен, предупреждать не о чем (R-U14.1).
+    assert body["token_origin"] == "submitted"
+    assert body["token_origin_reason"] is None
+    assert body["session_expires_at"] is None
     assert body["alias"] == "tag"
     assert body["preset"] == "readonly"
     assert body["groups"] == []
@@ -767,7 +775,18 @@ async def test_catalog_publishes_methods_without_secrets(make_hub: HubFactory) -
 
     methods = {m["id"]: m for m in servers["tag"]["auth_methods"]}
     assert set(methods) == {"corp_oauth", "session_token"}
-    assert set(methods["corp_oauth"]) == {"id", "title", "type", "available", "unavailable_reason"}
+    # R-U16 (ревизия 4): к публичному виду способа добавлен признак выпуска постоянного токена;
+    # у способа без блока exchange он false, сам блок наружу не отдаётся.
+    assert set(methods["corp_oauth"]) == {
+        "id",
+        "title",
+        "type",
+        "available",
+        "unavailable_reason",
+        "issues_permanent_token",
+    }
+    assert methods["corp_oauth"]["issues_permanent_token"] is False
+    assert methods["session_token"]["issues_permanent_token"] is False
     assert methods["corp_oauth"]["available"] is False
     assert methods["corp_oauth"]["unavailable_reason"]
     assert "field" not in methods["corp_oauth"]

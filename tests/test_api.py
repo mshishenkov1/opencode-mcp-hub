@@ -401,7 +401,22 @@ async def test_me_connections(hub: Hub) -> None:
     items = r2.json()
     assert len(items) == 1
     item = items[0]
-    assert set(item) == {"alias", "status", "preset", "groups", "created_at", "updated_at"}
+    # §28 ревизии 4: элемент дополнен происхождением токена и сроком сессии (R-U16); у
+    # OAuth-подключения все три ключа пусты, но присутствуют.
+    assert set(item) == {
+        "alias",
+        "status",
+        "preset",
+        "groups",
+        "created_at",
+        "updated_at",
+        "token_origin",
+        "token_origin_reason",
+        "session_expires_at",
+    }
+    assert item["token_origin"] is None
+    assert item["token_origin_reason"] is None
+    assert item["session_expires_at"] is None
     assert item["alias"] == "gitlab"
     assert item["status"] == "connected"
     assert item["preset"] == "readonly"

@@ -427,11 +427,16 @@ async def test_current_revision_is_none_for_empty_database(tmp_path: Path) -> No
 
 @pytest.mark.ac("AC-138")
 def test_head_revision_is_i3() -> None:
-    """Head — ревизия I-4 (``connections.auth_method``, R-U4), цепочка от базовой непрерывна."""
-    assert head_revision() == "0003_i4_user_token"
+    """Head — ревизия 4 I-4 (происхождение токена, R-U17.4), цепочка от базовой непрерывна."""
+    assert head_revision() == "0004_i4_token_exchange"
     script = ScriptDirectory.from_config(alembic_config())
     chain = [rev.revision for rev in script.walk_revisions()][::-1]
-    assert chain == ["0001_i1_base", "0002_i3_oauth", "0003_i4_user_token"]
+    assert chain == [
+        "0001_i1_base",
+        "0002_i3_oauth",
+        "0003_i4_user_token",
+        "0004_i4_token_exchange",
+    ]
     assert chain[0] == BASE_REVISION and chain[-1] == head_revision()
     for previous, current in itertools.pairwise(chain):
         assert script.get_revision(current).down_revision == previous

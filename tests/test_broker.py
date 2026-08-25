@@ -598,6 +598,10 @@ async def test_provider_tokens_never_leak_outside(make_hub: HubFactory) -> None:
         "groups",
         "created_at",
         "updated_at",
+        # §28 ревизии 4: три новых ключа; значений токенов среди них нет (R-U16, R-U17.3).
+        "token_origin",
+        "token_origin_reason",
+        "session_expires_at",
     }
 
 
