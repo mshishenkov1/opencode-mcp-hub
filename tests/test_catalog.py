@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,9 @@ REPO_CATALOG_VARS = {
     # TAG_OAUTH_CLIENT_ID намеренно не задаётся: он объявлен внутри недоступного способа
     # corp_oauth и не обязан быть настроен (R-U1, уточнение R-C2) — сервер остаётся видимым.
     "TAG_VERIFY_URL": "https://tag.test/api/v4/users/me",
+    # База API того же экземпляра Mattermost: из неё каталог собирает адреса выпуска, отзыва и
+    # списка личных токенов (блок exchange способа session_token, R-U12).
+    "TAG_API_BASE": "https://tag.test/api/v4",
     "GITLAB_OAUTH_CLIENT_ID": "gl-client",
     "GITLAB_PLATFORM_OAUTH_CLIENT_ID": "glp-client",
     "JIRA_OAUTH_CLIENT_ID": "jira-client",
@@ -77,6 +81,53 @@ async def test_repo_catalog_loads_at_start(
     catalog = (await hub.get("/api/catalog", headers=bearer("sk-ok"))).json()
     aliases = [s["alias"] for s in catalog["servers"]]
     assert aliases == ["tag", "gitlab", "gitlab-platform", "jira", "confluence"]
+
+
+# Переменные, которые каталог репозитория объявляет внутри **недоступного** способа: без них
+# сервер остаётся видимым (R-U1, уточнение R-C2; поведение закреплено AC-194).
+REPO_CATALOG_OPTIONAL_VARS = {"TAG_OAUTH_CLIENT_ID"}
+
+REPO_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+
+@pytest.mark.ac("AC-07")
+def test_fixture_covers_every_variable_of_the_repo_catalog() -> None:
+    """Фикстура обязана знать все ``${VAR}`` каталога репозитория, иначе сервер молча выпадет.
+
+    Сторож против устаревания: правка ``catalog.yaml`` вводит новую переменную, фикстура о ней
+    не знает, и сервер исчезает из каталога — проверка ниже падает с невнятным «нет элемента
+    списка». Здесь она падает с именем переменной.
+    """
+    declared = set(REPO_VAR_RE.findall(REPO_CATALOG.read_text(encoding="utf-8")))
+    unknown = sorted(declared - set(REPO_CATALOG_VARS) - REPO_CATALOG_OPTIONAL_VARS)
+    assert not unknown, (
+        f"в catalog.yaml появились переменные {unknown}: добавьте их в REPO_CATALOG_VARS "
+        "(или в REPO_CATALOG_OPTIONAL_VARS, если они объявлены внутри недоступного способа)"
+    )
+
+
+@pytest.mark.ac("AC-07")
+async def test_missing_variable_drops_the_server_from_the_repo_catalog(
+    make_hub: HubFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Незаданная переменная способа убирает сервер из каталога (R-C3).
+
+    Это и есть смысл проверки состава каталога выше: она обязана падать, когда сервер выпадает.
+    Здесь механизм зафиксирован явно — на ``TAG_API_BASE``, из-за которой фикстура и устарела.
+    """
+    for name, value in REPO_CATALOG_VARS.items():
+        if name != "TAG_API_BASE":
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("TAG_API_BASE", raising=False)
+    path = tmp_path / "repo-catalog.yaml"
+    shutil.copy(REPO_CATALOG, path)
+    hub: Hub = await make_hub(catalog=None, path=path)
+    await seed_user_with_key(hub.app, "sk-ok")
+
+    catalog = (await hub.get("/api/catalog", headers=bearer("sk-ok"))).json()
+    aliases = [s["alias"] for s in catalog["servers"]]
+    assert "tag" not in aliases, "сервер без переменной обязан выпасть из каталога"
+    assert aliases == ["gitlab", "gitlab-platform", "jira", "confluence"]
 
 
 @pytest.mark.ac("AC-07")
