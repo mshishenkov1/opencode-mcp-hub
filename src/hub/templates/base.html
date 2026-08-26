@@ -42,7 +42,9 @@
     // прежнее содержимое («Ожидаем подтверждения входа…»), хотя Hub недоступен.
     (function () {
       var RETRY_MS = 5000;
-      var pending = null;
+      // По одной записи на блок, чей запрос сорвался. Не одна ячейка на страницу: иначе
+      // второй упавший блок вытесняет первый, и тот навсегда остаётся без повтора.
+      var stalls = [];
       var timer = null;
 
       function byId(id) { return document.getElementById(id); }
@@ -51,11 +53,24 @@
         if (timer) { clearTimeout(timer); timer = null; }
       }
 
-      function hideNotice() {
-        stopTimer();
-        if (pending && pending.elt) { pending.elt.classList.remove('hub-stale'); }
-        var box = byId('hub-connection');
-        if (box) { box.hidden = true; }
+      function stallFor(elt) {
+        for (var i = 0; i < stalls.length; i++) {
+          if (stalls[i].elt === elt) { return stalls[i]; }
+        }
+        return null;
+      }
+
+      function drop(stall) {
+        var index = stalls.indexOf(stall);
+        if (index !== -1) { stalls.splice(index, 1); }
+        stall.elt.classList.remove('hub-stale');
+      }
+
+      // Блоки, которых уже нет на странице (их подменил успешный ответ), забываем.
+      function prune() {
+        for (var i = stalls.length - 1; i >= 0; i--) {
+          if (!document.contains(stalls[i].elt)) { drop(stalls[i]); }
+        }
       }
 
       function showNotice(title, detail) {
@@ -66,41 +81,61 @@
         box.hidden = false;
       }
 
-      // Запоминаем упавший запрос, чтобы «Повторить» повторил именно его.
+      // Плашка висит ровно столько, сколько есть незакрытые сбои.
+      function refreshNotice() {
+        if (stalls.length) { return; }
+        stopTimer();
+        var box = byId('hub-connection');
+        if (box) { box.hidden = true; }
+      }
+
+      // Запоминаем сорванный запрос, чтобы повторить именно его.
       function remember(detail) {
         var config = (detail && detail.requestConfig) || {};
         var elt = (detail && detail.elt) || config.elt;
-        if (!elt) { return false; }
+        if (!elt) { return null; }
         var verb = String(config.verb || 'get').toLowerCase();
         var path = config.path || elt.getAttribute('hx-' + verb);
-        if (!path) { return false; }
-        stopTimer();
+        if (!path) { return null; }
+        var stall = stallFor(elt) || { elt: elt };
+        stall.verb = verb;
+        stall.path = path;
+        stall.target = config.target || elt;
+        stall.swap = elt.getAttribute('hx-swap');
+        stall.inFlight = false;
+        if (stalls.indexOf(stall) === -1) { stalls.push(stall); }
         elt.classList.add('hub-stale');
-        pending = {
-          elt: elt,
-          verb: verb,
-          path: path,
-          target: config.target || elt,
-          swap: elt.getAttribute('hx-swap')
-        };
-        return true;
+        return stall;
       }
 
-      function retry() {
-        if (!pending || !window.htmx) { return; }
-        // Блока уже нет на странице (его подменил успешный ответ) — повторять нечего.
-        if (!document.contains(pending.elt)) { pending = null; return; }
+      // Единственное место, где решается, можно ли повторить запрос.
+      // userRequested — повтор запрошен человеком (кнопка «Повторить»): такому можно всё.
+      // Автоматические пути (таймер, возврат сети, успех соседнего блока) вправе повторять
+      // только выборку: молча переотправить POST/DELETE/PUT — это заново прислать токен и
+      // заново запустить обмен по R-U13, заново отключить коннектор, заново выйти из Hub.
+      function retry(stall, userRequested) {
+        if (!window.htmx || stall.inFlight) { return; }
+        if (!userRequested && stall.verb !== 'get') { return; }
+        if (!document.contains(stall.elt)) { drop(stall); return; }
+        var context = { source: stall.elt, target: stall.target };
+        if (stall.swap) { context.swap = stall.swap; }
+        stall.inFlight = true;
+        var released = function () { stall.inFlight = false; };
+        var request = window.htmx.ajax(stall.verb, stall.path, context);
+        if (request && request.then) { request.then(released, released); } else { released(); }
+      }
+
+      function retryAll(userRequested) {
         stopTimer();
-        var context = { source: pending.elt, target: pending.target };
-        if (pending.swap) { context.swap = pending.swap; }
-        window.htmx.ajax(pending.verb, pending.path, context);
+        prune();
+        var list = stalls.slice();
+        for (var i = 0; i < list.length; i++) { retry(list[i], userRequested); }
+        refreshNotice();
       }
 
-      // Сама собой возобновляется только безопасная выборка: повторять POST/DELETE молча нельзя.
       function scheduleRetry() {
-        if (!pending || pending.verb !== 'get') { return; }
         stopTimer();
-        timer = setTimeout(retry, RETRY_MS);
+        timer = setTimeout(function () { retryAll(false); }, RETRY_MS);
       }
 
       function serverMessage(xhr) {
@@ -111,24 +146,33 @@
         return '';
       }
 
-      function connectionLost(event, detail) {
-        if (!remember(event.detail)) { return; }
-        showNotice('Связь с Hub потеряна', detail);
+      // Обещать самовосстановление вправе только выборка — остальное ждёт человека.
+      function retryHint(stall) {
+        return stall.verb === 'get'
+          ? 'Страница сама повторит попытку, пока связь не вернётся.'
+          : 'Запрос менял данные, поэтому сам он не повторится: нажмите «Повторить», '
+            + 'когда связь вернётся.';
+      }
+
+      function connectionLost(event, reason) {
+        var stall = remember(event.detail);
+        if (!stall) { return; }
+        showNotice('Связь с Hub потеряна', reason + ' ' + retryHint(stall));
         scheduleRetry();
       }
 
       document.addEventListener('htmx:sendError', function (event) {
         connectionLost(event, 'Hub не отвечает: возможно, он перезапускается или пропала сеть. '
-          + 'Показанное ниже устарело. Страница сама повторит попытку, пока связь не вернётся.');
+          + 'Показанное ниже устарело.');
       });
 
       document.addEventListener('htmx:timeout', function (event) {
-        connectionLost(event, 'Hub не ответил вовремя. Показанное ниже устарело. '
-          + 'Страница сама повторит попытку, пока связь не вернётся.');
+        connectionLost(event, 'Hub не ответил вовремя. Показанное ниже устарело.');
       });
 
       document.addEventListener('htmx:responseError', function (event) {
-        if (!remember(event.detail)) { return; }
+        var stall = remember(event.detail);
+        if (!stall) { return; }
         var xhr = (event.detail && event.detail.xhr) || {};
         var status = xhr.status || 0;
         var message = serverMessage(xhr);
@@ -142,24 +186,22 @@
       document.addEventListener('htmx:afterRequest', function (event) {
         var detail = event.detail || {};
         if (!detail.successful) { return; }
-        // Любой успешный ответ доказывает, что связь есть: плашка снимается всегда.
-        var stalled = pending;
-        hideNotice();
-        pending = null;
-        // Если упал другой блок и он ещё на странице — оживляем и его.
-        if (stalled && stalled.elt !== detail.elt && document.contains(stalled.elt)) {
-          pending = stalled;
-          retry();
-        }
+        var done = stallFor(detail.elt);
+        if (done) { drop(done); }
+        // Связь есть: сорванную выборку возобновляем сами, небезопасное ждёт человека.
+        retryAll(false);
       });
 
       document.addEventListener('DOMContentLoaded', function () {
         var button = byId('hub-connection-retry');
-        if (button) { button.addEventListener('click', retry); }
+        if (button) {
+          // Нажатие человека — единственный повтор, которому позволено всё.
+          button.addEventListener('click', function () { retryAll(true); });
+        }
       });
 
       window.addEventListener('online', function () {
-        if (pending) { retry(); }
+        retryAll(false);
       });
     })();
   </script>
