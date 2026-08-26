@@ -14,7 +14,45 @@
   "evidence": "src/hub/templates/base.html:26 — `<script src=\"https://unpkg.com/htmx.org@1.9.12\" defer></script>`. Проверка 2026-08-26 с рабочей машины в корпоративной сети: unpkg.com резолвится (8.47.69.0) и отдаёт 48 101 байт JS, то есть сейчас доступ есть — но он не гарантирован и зависит от политики сети, а не от нашего развёртывания.",
   "suspected_area": "src/hub/templates/base.html (подключение скрипта), раздача статики Hub (нужен локальный файл htmx рядом с приложением и маршрут статики), deploy/ (образ должен содержать файл)",
   "iteration": 3,
-  "status": "open",
+  "status": "fixed",
   "found_by": "оркестратор, разбор зависшей страницы входа 2026-08-26",
-  "notes": "Отдельно от работоспособности это пункт для согласования ИБ: корпоративный сервис загружает исполняемый код со стороннего публичного хоста, версия не зафиксирована хешем (нет SRI), и каждое открытие страницы — исходящее обращение наружу из периметра. Ожидаемо всплывёт при согласовании распространения; дешевле закрыть заранее, положив htmx в образ. Смежно с известной проблемой №3 из docs/STATUS.md (встроенный сервер ходит в чужой репозиторий) — тот же класс «канал наружу из корпоративного контура»."
+  "notes": "Отдельно от работоспособности это пункт для согласования ИБ: корпоративный сервис загружает исполняемый код со стороннего публичного хоста, версия не зафиксирована хешем (нет SRI), и каждое открытие страницы — исходящее обращение наружу из периметра. Ожидаемо всплывёт при согласовании распространения; дешевле закрыть заранее, положив htmx в образ. Смежно с известной проблемой №3 из docs/STATUS.md (встроенный сервер ходит в чужой репозиторий) — тот же класс «канал наружу из корпоративного контура».",
+  "fixed_in": {
+    "repo": "opencode-mcp-hub",
+    "worktree": "~/Documents/opencode-mcp-hub-i3",
+    "branch": "pipeline/i3-hub-oauth-facade-proxy",
+    "commits": [
+      {
+        "hash": "c150dde",
+        "message": "fix(BUG-I3-004): htmx раздаётся самим Hub из образа, публичный CDN убран (R-W6)",
+        "files": [
+          "src/hub/assets.py",
+          "src/hub/routes/static.py",
+          "src/hub/routes/__init__.py",
+          "src/hub/app.py",
+          "src/hub/templating.py",
+          "src/hub/templates/base.html",
+          "src/hub/static/htmx-1.9.12.min.js",
+          "src/hub/static/htmx-ext-json-enc-1.9.12.js",
+          "src/hub/static/SHA256SUMS",
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "report": "reports/run-i3-bug-i3-003-004.md",
+    "pinned_assets": [
+      {
+        "file": "src/hub/static/htmx-1.9.12.min.js",
+        "bytes": 48101,
+        "sha256": "449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452"
+      },
+      {
+        "file": "src/hub/static/htmx-ext-json-enc-1.9.12.js",
+        "bytes": 360,
+        "sha256": "a09e9ae07419ae88873a595fa67e8f0bcc72783435f7cfd7326150290b1ae3ae"
+      }
+    ],
+    "verified_live": "Стенд hubi3: в образе /usr/local/lib/python3.12/site-packages/hub/static — оба файла, sha256sum -c SHA256SUMS OK. GET /static/htmx-1.9.12.min.js → 200, application/javascript; charset=utf-8, Cache-Control: public, max-age=31536000, immutable, 48101 байт, sha256 совпадает с завендоренным файлом; неизвестное имя и /static/../ → 404. В браузере на /auth/login window.htmx.version = 1.9.12, расширение json-enc зарегистрировано, внешних ресурсов в performance.getEntriesByType('resource') — ноль.",
+    "tests_needed_from_test_agent": true
+  }
 }
