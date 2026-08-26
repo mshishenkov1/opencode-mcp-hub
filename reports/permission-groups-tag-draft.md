@@ -26,6 +26,8 @@ OpenCode будет решать, что агенту в ТЭГ можно, а �
 потолок остаётся на стороне сервера: `MM_WRITE_MODE`, `MM_ALLOW_DESTRUCTIVE`, `MM_ENABLE_ADMIN` —
 scope и клиентское разрешение открывают только то, что и так разрешено настройками процесса.
 
+**Решения заказчика (2026-08-26):** `download_file` остаётся в allow (группа 6); `execute_slash_command` перенесён из группы 14 в группу 15 (`deny`) — слэш-команды могут делать что угодно; `list_*_webhooks` остаются в группе 15. Название группы 14 упрощено, названия/описания групп 14–15 обновлены.
+
 ---
 
 ## Сводка
@@ -45,8 +47,8 @@ scope и клиентское разрешение открывают тольк
 | 11 | `polls_vote` | Голосовать в опросах от вашего имени | `ask` | 2 |
 | 12 | `channels_manage` | Вступать в каналы, создавать их и менять описание | `ask` | 6 |
 | 13 | `personal_status` | Менять ваш статус и личные настройки | `ask` | 3 |
-| 14 | `marks_and_commands` | Отмечать прочитанное, сохранять сообщения, запускать слэш-команды | `ask` | 4 |
-| 15 | `destructive_and_integrations` | Удалять и архивировать, управлять вебхуками | `deny` | 7 |
+| 14 | `marks_and_commands` | Отмечать прочитанное и сохранять сообщения | `ask` | 3 |
+| 15 | `destructive_and_integrations` | Удалять и архивировать, вебхуки и слэш-команды | `deny` | 8 |
 | — | `rest` | Остальные возможности ТЭГ | `ask` | 0 |
 
 **Итого 77.**
@@ -157,7 +159,7 @@ scope и клиентское разрешение открывают тольк
 самый широкий инструмент группы: она выполняет то, что за ней стоит на стороне ТЭГ, включая команды
 сторонних интеграций.
 
-`mark_channel_read`, `mark_post_read`, `save_post`, `execute_slash_command`
+`mark_channel_read`, `mark_post_read`, `save_post`
 
 ### 15. `destructive_and_integrations` — «Удалять и архивировать, управлять вебхуками» · `deny`
 
@@ -166,7 +168,7 @@ scope и клиентское разрешение открывают тольк
 запрещены; включать группу стоит осознанно и на время конкретной задачи.
 
 `delete_post`, `remove_channel_member`, `archive_channel`, `close_poll`, `create_incoming_webhook`,
-`list_incoming_webhooks`, `list_outgoing_webhooks`
+`list_incoming_webhooks`, `list_outgoing_webhooks`, `execute_slash_command`
 
 > Два инструмента группы (`list_incoming_webhooks`, `list_outgoing_webhooks`) помечены как чтение.
 > Они здесь потому, что группа про интеграции целиком, а конфигурация вебхуков содержит адреса и
@@ -252,12 +254,12 @@ groups:
     title: "Отмечать прочитанное, сохранять сообщения, запускать слэш-команды"
     description: "Отметки о прочтении, сохранение сообщений в личный список и запуск слэш-команд ТЭГ, включая команды сторонних интеграций."
     default: ask
-    tools: [mark_channel_read, mark_post_read, save_post, execute_slash_command]
+    tools: [mark_channel_read, mark_post_read, save_post]
   - id: destructive_and_integrations
     title: "Удалять и архивировать, управлять вебхуками"
     description: "Необратимое: удаление сообщений, исключение участников, архивация каналов, закрытие опросов, вебхуки и интеграции. Отменить эти действия из ТЭГ нельзя."
     default: deny
-    tools: [delete_post, remove_channel_member, archive_channel, close_poll, create_incoming_webhook, list_incoming_webhooks, list_outgoing_webhooks]
+    tools: [delete_post, remove_channel_member, archive_channel, close_poll, create_incoming_webhook, list_incoming_webhooks, list_outgoing_webhooks, execute_slash_command]
 rest:
   title: "Остальные возможности ТЭГ"
   description: "Инструменты коннектора, не попавшие ни в одну группу, — например появившиеся у сервера после публикации этого словаря."
