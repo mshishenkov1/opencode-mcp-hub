@@ -23,7 +23,8 @@
     label { display: block; margin: .25rem 0; }
     code { background: rgba(128,128,128,.15); padding: .1rem .3rem; border-radius: .25rem; }
   </style>
-  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+  <script src="{{ htmx_url }}" defer></script>
+  <script src="{{ htmx_json_enc_url }}" defer></script>
   <script>
     // Double-submit CSRF: значение берётся из cookie, в HTML страницы токен не попадает (R-W6).
     document.addEventListener('htmx:configRequest', function (event) {

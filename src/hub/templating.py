@@ -12,17 +12,23 @@ from typing import Any
 from fastapi.responses import HTMLResponse
 from jinja2 import Environment, PackageLoader, select_autoescape
 
+from hub.assets import HTMX_FILE, HTMX_JSON_ENC_FILE, static_url
+
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 HTML_CACHE_CONTROL = "private, no-store"
 
 
 def build_environment() -> Environment:
-    return Environment(
+    env = Environment(
         loader=PackageLoader("hub", "templates"),
         autoescape=select_autoescape(["html"]),
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    # Адреса статики — один источник правды (hub.assets), CDN в шаблонах нет (R-W6).
+    env.globals["htmx_url"] = static_url(HTMX_FILE)
+    env.globals["htmx_json_enc_url"] = static_url(HTMX_JSON_ENC_FILE)
+    return env
 
 
 class Templates:

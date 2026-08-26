@@ -47,7 +47,14 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hub = ["templates/*.html", "migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
+hub = [
+    "templates/*.html",
+    "static/*.js",
+    "static/SHA256SUMS",
+    "migrations/*.py",
+    "migrations/*.mako",
+    "migrations/versions/*.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -65,10 +72,10 @@ source = ["src"]
 source_paths = ["src/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Тесты запускаются из каталога mutants/; AC-07 читает catalog.yaml из корня репозитория.
-# Шаблоны Jinja здесь же: copy_src_dir() копирует не-Python файлы только если их ещё нет, поэтому
-# без also_copy в mutants/ навсегда остаются устаревшие копии (copy_also_copy_files() перезаписывает
-# их каждый прогон) — на них падал сбор статистики G3.
-also_copy = ["catalog.yaml", "deploy", "src/hub/templates"]
+# Шаблоны Jinja и статика (htmx) здесь же: copy_src_dir() копирует не-Python файлы только если их
+# ещё нет, поэтому без also_copy в mutants/ навсегда остаются устаревшие копии
+# (copy_also_copy_files() перезаписывает их каждый прогон) — на них падал сбор статистики G3.
+also_copy = ["catalog.yaml", "deploy", "src/hub/templates", "src/hub/static"]
 
 [tool.ruff]
 line-length = 100

@@ -34,6 +34,7 @@ from hub.routes import (
     cli_router,
     mcp_router,
     oauth_router,
+    static_router,
     system_router,
     web_router,
 )
@@ -296,6 +297,7 @@ def create_app(
     app.add_exception_handler(Exception, _internal_error_handler)
 
     app.include_router(system_router)
+    app.include_router(static_router)
     app.include_router(cli_router)
     app.include_router(api_router)
     app.include_router(admin_router)
