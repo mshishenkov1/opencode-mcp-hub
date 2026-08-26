@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from hub.app import create_app
 from hub.crypto import jwt_decode
@@ -51,6 +52,8 @@ REQUIRED_I1_ENV = {
 }
 REPO_CATALOG_VARS = {
     "TAG_MCP_URL": "https://tag-mcp.test/mcp",
+    "TAG_VERIFY_URL": "https://tag.test/api/v4/users/me",
+    "TAG_API_BASE": "https://tag.test/api/v4",
     "GITLAB_OAUTH_CLIENT_ID": "gl-client",
     "GITLAB_PLATFORM_OAUTH_CLIENT_ID": "glp-client",
     "JIRA_OAUTH_CLIENT_ID": "jira-client",
@@ -406,6 +409,53 @@ def test_env_example_lists_all_new_settings() -> None:
     names = set(_env_example_values())
     missing = [name for name in I3_SETTINGS_VARS if name not in names]
     assert not missing, f"в deploy/.env.example нет переменных: {missing}"
+
+
+CATALOG_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+
+def _vars_affecting_visibility(node: Any, hidden: bool = False) -> set[str]:
+    """``${VAR}`` каталога, без которых сервер выпадает из витрины (R-C3).
+
+    Переменные внутри способа с ``available: false`` пропускаются: их отсутствие сервер не
+    прячет (R-U1, уточнение R-C2, поведение закреплено AC-194).
+    """
+    found: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "auth_methods" and isinstance(value, list):
+                for method in value:
+                    unavailable = isinstance(method, dict) and method.get("available") is False
+                    found |= _vars_affecting_visibility(method, hidden or unavailable)
+                continue
+            found |= _vars_affecting_visibility(value, hidden)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _vars_affecting_visibility(item, hidden)
+    elif isinstance(node, str) and not hidden:
+        found |= set(CATALOG_VAR_RE.findall(node))
+    return found
+
+
+@pytest.mark.ac("AC-145")
+def test_env_example_lists_every_catalog_variable_that_hides_a_server() -> None:
+    """BUG-I3-005: переменная каталога без строки в ``deploy/.env.example`` уносит коннектор.
+
+    ``.env.example`` — образец окружения развёртывания: по нему заполняют ``deploy/.env``.
+    Переменная, которой там нет, на новом стенде останется незаданной, сервер каталога станет
+    unconfigured и **молча исчезнет** из витрины и из ``/api/catalog`` (R-C3). Именно так
+    ``TAG_API_BASE`` (добавлена в ``catalog.yaml`` вместе с блоком ``exchange``) уносит
+    коннектор ТЭГ — тот самый, ради которого делались ревизии 4 и 4.1.
+    """
+    document = yaml.safe_load(REPO_CATALOG.read_text(encoding="utf-8"))
+    required = _vars_affecting_visibility(document)
+    assert required, "в каталоге репозитория нет ни одной переменной — проверка вырождена"
+    documented = set(_env_example_values())
+    missing = sorted(required - documented)
+    assert not missing, (
+        f"в deploy/.env.example нет переменных каталога {missing}: "
+        "на новом стенде их серверы исчезнут из витрины"
+    )
 
 
 @pytest.mark.ac("AC-145")

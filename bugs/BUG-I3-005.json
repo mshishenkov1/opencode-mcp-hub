@@ -1,0 +1,20 @@
+{
+  "id": "BUG-I3-005",
+  "related_ac": "AC-145",
+  "severity": "high",
+  "title": "deploy/.env.example не содержит TAG_API_BASE — на новом стенде коннектор ТЭГ исчезает из витрины",
+  "repro_steps": [
+    "Развернуть Hub по образцу: скопировать deploy/.env.example в deploy/.env и заполнить значения",
+    "Поднять Hub с репозиторным catalog.yaml",
+    "Открыть GET /api/catalog (или витрину /ui/connections)"
+  ],
+  "expected": "Сервер tag присутствует в каталоге: deploy/.env.example перечисляет все переменные каталога, без которых сервер становится unconfigured и скрывается (R-C3). Так уже сделано для TAG_MCP_URL и TAG_VERIFY_URL",
+  "actual": "В catalog.yaml блок exchange способа session_token использует ${TAG_API_BASE} (адреса выпуска, отзыва и списка личных токенов), но в deploy/.env.example такой строки нет. На стенде, заполненном по образцу, переменная остаётся незаданной, сервер tag становится unconfigured и молча пропадает из /api/catalog и витрины — вместе со всей работой ревизий 4 и 4.1. В рабочем deploy/.env переменная есть (строка 18), то есть её задали вручную и забыли внести в образец",
+  "failing_test": "tests/test_settings_i3.py::test_env_example_lists_every_catalog_variable_that_hides_a_server",
+  "stacktrace": "E   AssertionError: в deploy/.env.example нет переменных каталога ['TAG_API_BASE']: на новом стенде их серверы исчезнут из витрины",
+  "evidence": "catalog.yaml:55,66,73 — ${TAG_API_BASE}; deploy/.env:18 — TAG_API_BASE задана; deploy/.env.example — строки нет (есть TAG_MCP_URL:37 и TAG_VERIFY_URL:39). Тот же корень уронил фикстуру tests/test_catalog.py::test_repo_catalog_loads_at_start: сервер tag выпал из ожидаемого состава каталога",
+  "suspected_area": "deploy/.env.example (гипотеза: строку не добавили вместе с блоком exchange в коммите 9af13e9). Правка — одна строка с комментарием рядом с TAG_VERIFY_URL; проверить заодно deploy/helm/*/values*.yaml, если каталог разворачивается и оттуда",
+  "iteration": 1,
+  "status": "open",
+  "found_by": "test-агент при починке фикстуры REPO_CATALOG_VARS"
+}
