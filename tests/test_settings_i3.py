@@ -439,7 +439,7 @@ def _vars_affecting_visibility(node: Any, hidden: bool = False) -> set[str]:
 
 @pytest.mark.ac("AC-145")
 def test_env_example_lists_every_catalog_variable_that_hides_a_server() -> None:
-    """BUG-I3-005: переменная каталога без строки в ``deploy/.env.example`` уносит коннектор.
+    """BUG-I3-006: переменная каталога без строки в ``deploy/.env.example`` уносит коннектор.
 
     ``.env.example`` — образец окружения развёртывания: по нему заполняют ``deploy/.env``.
     Переменная, которой там нет, на новом стенде останется незаданной, сервер каталога станет

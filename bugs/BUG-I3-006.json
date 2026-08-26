@@ -1,5 +1,5 @@
 {
-  "id": "BUG-I3-005",
+  "id": "BUG-I3-006",
   "related_ac": "AC-145",
   "severity": "high",
   "title": "deploy/.env.example не содержит TAG_API_BASE — на новом стенде коннектор ТЭГ исчезает из витрины",
@@ -15,6 +15,9 @@
   "evidence": "catalog.yaml:55,66,73 — ${TAG_API_BASE}; deploy/.env:18 — TAG_API_BASE задана; deploy/.env.example — строки нет (есть TAG_MCP_URL:37 и TAG_VERIFY_URL:39). Тот же корень уронил фикстуру tests/test_catalog.py::test_repo_catalog_loads_at_start: сервер tag выпал из ожидаемого состава каталога",
   "suspected_area": "deploy/.env.example (гипотеза: строку не добавили вместе с блоком exchange в коммите 9af13e9). Правка — одна строка с комментарием рядом с TAG_VERIFY_URL; проверить заодно deploy/helm/*/values*.yaml, если каталог разворачивается и оттуда",
   "iteration": 1,
-  "status": "open",
-  "found_by": "test-агент при починке фикстуры REPO_CATALOG_VARS"
+  "status": "fixed",
+  "found_by": "test-агент при починке фикстуры REPO_CATALOG_VARS",
+  "notes": "Перенумерован из BUG-I3-005: номер занят багом про переподключение Redis в реестре ветки I-1.",
+  "fix": "deploy/.env.example дополнен строкой TAG_API_BASE=https://tag.magnit.ru/api/v4 (боевой хост, в стиле соседней TAG_VERIFY_URL). Общий тест-сторож test_settings_i3.py требует строку в образце для каждой переменной каталога, без которой сервер выпадает.",
+  "fixed_by": "оркестратор (зона deploy)"
 }
