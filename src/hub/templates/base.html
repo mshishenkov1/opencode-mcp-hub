@@ -7,6 +7,7 @@
   {% block head %}{% endblock %}
   <style>
     :root { color-scheme: light dark; }
+    [hidden] { display: none !important; }
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;
            padding: 2rem 1rem; line-height: 1.5; }
     main { max-width: 46rem; margin: 0 auto; }
@@ -22,6 +23,9 @@
     button.primary { border-color: #2f6f3e; }
     label { display: block; margin: .25rem 0; }
     code { background: rgba(128,128,128,.15); padding: .1rem .3rem; border-radius: .25rem; }
+    /* Связь с Hub потеряна: заметная плашка и погашенный блок с устаревшим содержимым (R-W6). */
+    #hub-connection { border-color: #a05a00; }
+    .hub-stale { opacity: .45; }
   </style>
   <script src="{{ htmx_url }}" defer></script>
   <script src="{{ htmx_json_enc_url }}" defer></script>
@@ -32,9 +36,143 @@
       if (match) { event.detail.headers['X-CSRF-Token'] = decodeURIComponent(match[1]); }
     });
   </script>
+  <script>
+    // Общая обработка сбоев htmx для всех страниц Hub (R-W6).
+    // Без неё htmx при ошибке ничего не подменяет, и страница неограниченно долго показывает
+    // прежнее содержимое («Ожидаем подтверждения входа…»), хотя Hub недоступен.
+    (function () {
+      var RETRY_MS = 5000;
+      var pending = null;
+      var timer = null;
+
+      function byId(id) { return document.getElementById(id); }
+
+      function stopTimer() {
+        if (timer) { clearTimeout(timer); timer = null; }
+      }
+
+      function hideNotice() {
+        stopTimer();
+        if (pending && pending.elt) { pending.elt.classList.remove('hub-stale'); }
+        var box = byId('hub-connection');
+        if (box) { box.hidden = true; }
+      }
+
+      function showNotice(title, detail) {
+        var box = byId('hub-connection');
+        if (!box) { return; }
+        byId('hub-connection-title').textContent = title;
+        byId('hub-connection-detail').textContent = detail;
+        box.hidden = false;
+      }
+
+      // Запоминаем упавший запрос, чтобы «Повторить» повторил именно его.
+      function remember(detail) {
+        var config = (detail && detail.requestConfig) || {};
+        var elt = (detail && detail.elt) || config.elt;
+        if (!elt) { return false; }
+        var verb = String(config.verb || 'get').toLowerCase();
+        var path = config.path || elt.getAttribute('hx-' + verb);
+        if (!path) { return false; }
+        stopTimer();
+        elt.classList.add('hub-stale');
+        pending = {
+          elt: elt,
+          verb: verb,
+          path: path,
+          target: config.target || elt,
+          swap: elt.getAttribute('hx-swap')
+        };
+        return true;
+      }
+
+      function retry() {
+        if (!pending || !window.htmx) { return; }
+        // Блока уже нет на странице (его подменил успешный ответ) — повторять нечего.
+        if (!document.contains(pending.elt)) { pending = null; return; }
+        stopTimer();
+        var context = { source: pending.elt, target: pending.target };
+        if (pending.swap) { context.swap = pending.swap; }
+        window.htmx.ajax(pending.verb, pending.path, context);
+      }
+
+      // Сама собой возобновляется только безопасная выборка: повторять POST/DELETE молча нельзя.
+      function scheduleRetry() {
+        if (!pending || pending.verb !== 'get') { return; }
+        stopTimer();
+        timer = setTimeout(retry, RETRY_MS);
+      }
+
+      function serverMessage(xhr) {
+        try {
+          var body = JSON.parse(xhr.responseText);
+          if (body && body.message) { return String(body.message); }
+        } catch (error) { /* тело не JSON — покажем только код ответа */ }
+        return '';
+      }
+
+      function connectionLost(event, detail) {
+        if (!remember(event.detail)) { return; }
+        showNotice('Связь с Hub потеряна', detail);
+        scheduleRetry();
+      }
+
+      document.addEventListener('htmx:sendError', function (event) {
+        connectionLost(event, 'Hub не отвечает: возможно, он перезапускается или пропала сеть. '
+          + 'Показанное ниже устарело. Страница сама повторит попытку, пока связь не вернётся.');
+      });
+
+      document.addEventListener('htmx:timeout', function (event) {
+        connectionLost(event, 'Hub не ответил вовремя. Показанное ниже устарело. '
+          + 'Страница сама повторит попытку, пока связь не вернётся.');
+      });
+
+      document.addEventListener('htmx:responseError', function (event) {
+        if (!remember(event.detail)) { return; }
+        var xhr = (event.detail && event.detail.xhr) || {};
+        var status = xhr.status || 0;
+        var message = serverMessage(xhr);
+        showNotice('Hub ответил ошибкой', message
+          || ('Код ответа: ' + (status || '—') + '. Повторите попытку или обновите страницу.'));
+        // 5xx — это, как правило, перезапуск Hub или потеря его зависимости: такое проходит само,
+        // поэтому выборку возобновляем без участия пользователя. 4xx сам не пройдёт — только вручную.
+        if (status >= 500) { scheduleRetry(); }
+      });
+
+      document.addEventListener('htmx:afterRequest', function (event) {
+        var detail = event.detail || {};
+        if (!detail.successful) { return; }
+        // Любой успешный ответ доказывает, что связь есть: плашка снимается всегда.
+        var stalled = pending;
+        hideNotice();
+        pending = null;
+        // Если упал другой блок и он ещё на странице — оживляем и его.
+        if (stalled && stalled.elt !== detail.elt && document.contains(stalled.elt)) {
+          pending = stalled;
+          retry();
+        }
+      });
+
+      document.addEventListener('DOMContentLoaded', function () {
+        var button = byId('hub-connection-retry');
+        if (button) { button.addEventListener('click', retry); }
+      });
+
+      window.addEventListener('online', function () {
+        if (pending) { retry(); }
+      });
+    })();
+  </script>
 </head>
 <body>
 <main>
+  <div id="hub-connection" class="card" role="status" aria-live="polite" hidden>
+    <p class="status" id="hub-connection-title">Связь с Hub потеряна</p>
+    <p class="muted" id="hub-connection-detail"></p>
+    <div class="actions">
+      <button type="button" id="hub-connection-retry">Повторить</button>
+    </div>
+  </div>
   <h1>{% block heading %}Hub{% endblock %}</h1>
   {% block content %}{% endblock %}
 </main>

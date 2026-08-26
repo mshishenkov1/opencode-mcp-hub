@@ -10,7 +10,12 @@
     {% endfor %}
   </div>
   {% elif error %}
-  <p class="status">{{ error }}</p>
+  <p class="status login-error">{{ error }}</p>
+  {% if restart_url %}
+  <div class="actions">
+    <a class="btn" href="{{ restart_url }}">Начать вход заново</a>
+  </div>
+  {% endif %}
   {% else %}
   <p class="muted">Ожидаем подтверждения входа…</p>
   {% endif %}

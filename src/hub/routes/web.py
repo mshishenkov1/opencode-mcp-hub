@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, Response
@@ -15,6 +16,7 @@ from hub.errors import HubError
 from hub.oidc import OIDCError, user_id_from_claims
 from hub.web import (
     EXCHANGE_HINT,
+    LOGIN_PATH,
     current_session,
     group_definitions,
     group_titles,
@@ -152,14 +154,24 @@ async def _login_litellm(request: Request, next_url: str) -> Response:
 
 def _login_fragment(
     request: Request, *, poll: bool = False, teams: list[dict[str, Any]] | None = None,
-    error: str | None = None, login_id: str = ""
+    error: str | None = None, login_id: str = "", next_url: str | None = None
 ) -> Response:
+    """Фрагмент состояния входа: ожидание, выбор команды или сорванный вход (R-W2).
+
+    У сорванного входа всегда есть действие «Начать вход заново»: сессия входа живёт в Redis
+    без сохранения на диск, поэтому после перезапуска стенда открытая страница входа
+    обесценивается — это штатный исход, а не редкий край (BUG-I3-003).
+    """
     state = request.app.state
+    restart_url = None
+    if error:
+        restart_url = f"{LOGIN_PATH}?next={quote(safe_next(next_url), safe='')}"
     return state.templates.page(
         "login_status.html",
         poll=poll,
         teams=teams or [],
         error=error,
+        restart_url=restart_url,
         poll_url=f"/auth/login/poll/{login_id}",
         team_url=f"/auth/login/team/{login_id}",
     )
@@ -176,7 +188,10 @@ async def auth_login_poll(login_id: str, request: Request) -> Response:
         result = await state.login.poll(login_id, str(record.get("poll_secret")))
     except HubError as exc:
         return _login_fragment(
-            request, error=exc.message or "Вход не удался", login_id=login_id
+            request,
+            error=exc.message or "Вход не удался",
+            login_id=login_id,
+            next_url=record.get("next"),
         )
     body = result.body
     status = str(body.get("status", ""))
@@ -186,12 +201,17 @@ async def auth_login_poll(login_id: str, request: Request) -> Response:
         return _login_fragment(request, poll=True, login_id=login_id)
     if status != "ready":
         return _login_fragment(
-            request, error=str(body.get("message") or "Вход не удался"), login_id=login_id
+            request,
+            error=str(body.get("message") or "Вход не удался"),
+            login_id=login_id,
+            next_url=record.get("next"),
         )
     user = body.get("user") or {}
     user_id = str(user.get("user_id") or "")
     if not user_id:
-        return _login_fragment(request, error="Вход не удался", login_id=login_id)
+        return _login_fragment(
+            request, error="Вход не удался", login_id=login_id, next_url=record.get("next")
+        )
     await state.kv.delete(WEB_LOGIN_PREFIX + login_id)
     return await _start_web_session(request, user_id, "litellm", safe_next(record.get("next")))
 
@@ -210,7 +230,10 @@ async def auth_login_team(login_id: str, request: Request) -> Response:
         )
     except HubError as exc:
         return _login_fragment(
-            request, error=exc.message or "Не удалось выбрать команду", login_id=login_id
+            request,
+            error=exc.message or "Не удалось выбрать команду",
+            login_id=login_id,
+            next_url=record.get("next"),
         )
     return _login_fragment(request, poll=True, login_id=login_id)
 
