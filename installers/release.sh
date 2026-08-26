@@ -15,6 +15,7 @@ EX_FAIL=1
 EX_ARGS=2
 
 MSG_ERR_NEED_ARG='Не задан обязательный аргумент: %s'
+MSG_ERR_NEED_ENDPOINT='Не задан ни --hub-url, ни --catalog-url: пакету нужна хотя бы одна точка входа'
 MSG_ERR_UNKNOWN_ARG='Неизвестный аргумент: %s'
 MSG_ERR_NO_ARTIFACTS_DIR='Каталог артефактов не найден: %s'
 MSG_ERR_NO_CA='Файл CA не найден: %s'
@@ -44,18 +45,24 @@ usage() {
 Сборка пакетов OpenCode Magnit для выкладки на портал.
 
 Использование:
-  release.sh --artifacts <каталог> --version <версия> --ca <файл> --hub-url <адрес>
+  release.sh --artifacts <каталог> --version <версия> --ca <файл>
+             (--hub-url <адрес> | --catalog-url <адрес> | оба)
              [--out <каталог>] [--targets darwin-arm64,darwin-x64,linux-x64,windows-x64]
-             [--publish]
+             [--signed] [--publish]
 
 Аргументы:
   --artifacts <каталог>  локальный каталог с готовыми артефактами конвейера форка
   --version <версия>     версия сборки, например 1.17.9-magnit.1
   --ca <файл>            корпоративный CA-bundle в формате PEM
   --hub-url <адрес>      адрес Hub, попадает в манифест и в отчёт установщика
+  --catalog-url <адрес>  адрес статического каталога коннекторов (сборка без Hub)
   --out <каталог>        куда класть архивы (по умолчанию installers/dist)
   --targets <список>     цели через запятую (по умолчанию все четыре)
+  --signed               пометить сборку Desktop подписанной: установщик не снимает карантин
   --publish              создать черновик релиза с архивами; без флага публикации нет
+
+Задать нужно хотя бы один из адресов --hub-url / --catalog-url: пакет без точки входа
+бесполезен. В манифест попадает тот, что задан (или оба).
 
 Границы (N5-B5):
   * скрипт не собирает форк OpenCode — сборка выполняется отдельно, в конвейере форка;
@@ -84,9 +91,14 @@ artifacts_dir=""
 version=""
 ca_file=""
 hub_url=""
+catalog_url=""
 out_dir=""
 targets="darwin-arm64,darwin-x64,linux-x64,windows-x64"
 do_publish=0
+# Подпись сборки Desktop (S-B17). Умолчание — «не подписана»: сертификатов ИБ пока нет, а
+# умолчание «подписана» дало бы пакеты, установщик которых не снимает карантин, — на macOS 15+
+# такое приложение не запускается вовсе. Флаг --signed переключит умолчание, когда подпись появится.
+is_signed=0
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -94,8 +106,10 @@ while [ $# -gt 0 ]; do
     --version) shift; [ $# -gt 0 ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--version"; }; version=$1 ;;
     --ca) shift; [ $# -gt 0 ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--ca"; }; ca_file=$1 ;;
     --hub-url) shift; [ $# -gt 0 ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--hub-url"; }; hub_url=$1 ;;
+    --catalog-url) shift; [ $# -gt 0 ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--catalog-url"; }; catalog_url=$1 ;;
     --out) shift; [ $# -gt 0 ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--out"; }; out_dir=$1 ;;
     --targets) shift; [ $# -gt 0 ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--targets"; }; targets=$1 ;;
+    --signed) is_signed=1 ;;
     --publish) do_publish=1 ;;
     --help|-h) usage; exit "$EX_OK" ;;
     *) usage >&2; die "$EX_ARGS" "$MSG_ERR_UNKNOWN_ARG" "$1" ;;
@@ -109,7 +123,11 @@ self_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 [ -n "$artifacts_dir" ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--artifacts"; }
 [ -n "$version" ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--version"; }
 [ -n "$ca_file" ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--ca"; }
-[ -n "$hub_url" ] || { usage >&2; die "$EX_ARGS" "$MSG_ERR_NEED_ARG" "--hub-url"; }
+# Адрес точки входа: Hub, каталог коннекторов или оба (S-C10). Оба пустые — пакет собирать незачем.
+if [ -z "$hub_url" ] && [ -z "$catalog_url" ]; then
+  usage >&2
+  die "$EX_ARGS" "$MSG_ERR_NEED_ENDPOINT"
+fi
 [ -d "$artifacts_dir" ] || die "$EX_ARGS" "$MSG_ERR_NO_ARTIFACTS_DIR" "$artifacts_dir"
 [ -f "$ca_file" ] || die "$EX_ARGS" "$MSG_ERR_NO_CA" "$ca_file"
 
@@ -245,15 +263,38 @@ find_cli_binary() {
   die "$EX_ARGS" "$MSG_ERR_NO_CLI" "$os-$arch" "opencode-$os-$arch-$version.zip" "opencode-$os-$arch/bin/$bin_name"
 }
 
-# Desktop собирается форком только для darwin-arm64 и windows-x64 (S-B3).
+# Desktop собирается форком для обеих архитектур macOS (S-B16, ревизия 1.10) и для windows-x64.
+#
+# Прежняя редакция искала dmg только для darwin-arm64: пакет darwin-x64 собирался БЕЗ Desktop и
+# молча — установщик печатал «Desktop: не входит в пакет», и это выглядело как штатная сборка.
+# Архитектура выбирается по имени файла (artifactName electron-builder — `…-mac-<arch>.dmg`);
+# если по имени не различить, берётся единственный dmg — так работают пакеты, собранные вручную
+# одной архитектурой.
 find_desktop_artifact() {
-  local os=$1 arch=$2 candidate
-  if [ "$os" = "darwin" ] && [ "$arch" = "arm64" ]; then
+  local os=$1 arch=$2 candidate name only="" count=0 typed=0
+  if [ "$os" = "darwin" ]; then
     for candidate in "$artifacts_dir"/*.dmg; do
       [ -f "$candidate" ] || continue
-      printf '%s' "$candidate"
-      return 0
+      count=$((count + 1))
+      only=$candidate
+      name=$(basename "$candidate")
+      case $name in
+        *arm64*|*x64*) typed=1 ;;
+      esac
+      case $name in
+        *"$arch".dmg|*"$arch"-*.dmg)
+          printf '%s' "$candidate"
+          return 0
+          ;;
+      esac
     done
+    # Ни в одном имени нет архитектуры и dmg ровно один — это ручная сборка, берём его.
+    # Если архитектура в именах ЕСТЬ, но нужной среди них нет, Desktop в пакет не кладётся:
+    # положить arm64-бандл в x64-пакет хуже, чем не положить ничего.
+    if [ "$count" -eq 1 ] && [ "$typed" -eq 0 ]; then
+      printf '%s' "$only"
+      return 0
+    fi
   fi
   if [ "$os" = "windows" ]; then
     for candidate in "$artifacts_dir"/*.msi "$artifacts_dir"/*.exe; do
@@ -302,11 +343,31 @@ write_manifest() {
   local ca_sha=$5 cli_sha=$6 cli_size=$7
   local desktop_rel=$8 desktop_sha=$9 desktop_size=${10} desktop_type=${11} desktop_app=${12}
   local built_at purge_a purge_b desktop_block="" hub_url_json desktop_rel_json desktop_app_json
+  local endpoint_block="" signed_json
 
   built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  hub_url_json=$(json_escape "$hub_url")
   desktop_rel_json=$(json_escape "$desktop_rel")
   desktop_app_json=$(json_escape "$desktop_app")
+
+  # В манифест попадает тот адрес, что задан (S-C10): пустое поле хуже отсутствующего — схема
+  # требует непустую строку, а установщик печатал бы «Hub: » вместо честного «адреса Hub нет».
+  if [ -n "$hub_url" ]; then
+    hub_url_json=$(json_escape "$hub_url")
+    endpoint_block="$endpoint_block
+  \"hub_url\": \"$hub_url_json\","
+  fi
+  if [ -n "$catalog_url" ]; then
+    endpoint_block="$endpoint_block
+  \"catalog_url\": \"$(json_escape "$catalog_url")\","
+  fi
+
+  # Подпись (S-B17): поле пишется всегда и явно. Отсутствие поля установщик трактует как
+  # «не подписана», но «явно false» и «поля нет» — разные вещи для человека, читающего манифест.
+  if [ "$is_signed" -eq 1 ]; then
+    signed_json="true"
+  else
+    signed_json="false"
+  fi
   if [ "$os" = "windows" ]; then
     purge_a='%USERPROFILE%\\.config\\opencode'
     purge_b='%USERPROFILE%\\.local\\share\\opencode'
@@ -341,8 +402,8 @@ write_manifest() {
   "product": "opencode-magnit",
   "version": "$version",
   "os": "$os",
-  "arch": "$arch",
-  "hub_url": "$hub_url_json",
+  "arch": "$arch",$endpoint_block
+  "signed": $signed_json,
   "built_at": "$built_at",
   "source_release": "v$version",
   "ca": {

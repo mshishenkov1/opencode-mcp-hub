@@ -20,7 +20,7 @@ setup() {
   [ ! -d "$OUT" ]
 }
 
-@test "AC-111: вызов без --artifacts, без --ca и без --hub-url → код 2 в каждом случае" {
+@test "AC-111: вызов без --artifacts, без --ca и без единого адреса → код 2 в каждом случае" {
   make_artifacts "$ART" "$VER" linux-x64
   release_run --version "$VER" --ca "$ART/tander-ca-bundle.pem" --hub-url https://hub.test --out "$OUT"
   assert_status 2
@@ -28,10 +28,133 @@ setup() {
   release_run --artifacts "$ART" --version "$VER" --hub-url https://hub.test --out "$OUT"
   assert_status 2
   assert_output_contains "--ca"
+  # Ревизия 1.10 (S-C10): --hub-url перестал быть обязательным сам по себе, но пакет без единой
+  # точки входа собирать незачем — отказ остаётся, меняется его формулировка.
   release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" --out "$OUT"
   assert_status 2
   assert_output_contains "--hub-url"
+  assert_output_contains "--catalog-url"
   [ ! -d "$OUT" ]
+}
+
+# ------------------------------------------------------------------ адреса точки входа (S-C10)
+
+@test "S-C10: --catalog-url без --hub-url собирает пакет; в манифесте только catalog_url" {
+  make_artifacts "$ART" "$VER" linux-x64
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --catalog-url https://updates.test/catalog/v1/catalog.json --out "$OUT" --targets linux-x64
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  local mf="$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/common/manifest.json"
+  [ "$(manifest_field "$mf" catalog_url)" = "https://updates.test/catalog/v1/catalog.json" ]
+  # Пустого hub_url в манифесте быть не должно: схема требует непустую строку, а установщик
+  # напечатал бы «Hub: » вместо честного «адреса Hub нет».
+  refute_file_contains "$mf" '"hub_url"'
+}
+
+@test "S-C10: пакет без hub_url устанавливается, отчёт печатает каталог вместо Hub" {
+  make_artifacts "$ART" "$VER" "$HOST_TARGET"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --catalog-url https://updates.test/catalog/v1/catalog.json --out "$OUT" --targets "$HOST_TARGET"
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-$HOST_TARGET-$VER.tar.gz" -C "$SANDBOX/unpack"
+  run bash "$SANDBOX/unpack/opencode-magnit-$HOST_TARGET-$VER/install.sh" --prefix "$PREFIX_DIR" --no-launch
+  assert_status 0
+  assert_output_contains "Каталог: https://updates.test/catalog/v1/catalog.json"
+  refute_output_contains "  Hub: "
+}
+
+@test "S-C10: оба адреса вместе попадают в манифест и в отчёт" {
+  make_artifacts "$ART" "$VER" "$HOST_TARGET"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --catalog-url https://updates.test/catalog.json \
+    --out "$OUT" --targets "$HOST_TARGET"
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-$HOST_TARGET-$VER.tar.gz" -C "$SANDBOX/unpack"
+  local mf="$SANDBOX/unpack/opencode-magnit-$HOST_TARGET-$VER/common/manifest.json"
+  [ "$(manifest_field "$mf" hub_url)" = "https://hub.test" ]
+  [ "$(manifest_field "$mf" catalog_url)" = "https://updates.test/catalog.json" ]
+  run bash "$SANDBOX/unpack/opencode-magnit-$HOST_TARGET-$VER/install.sh" --prefix "$PREFIX_DIR" --check
+  assert_output_contains "Hub: https://hub.test"
+  assert_output_contains "Каталог: https://updates.test/catalog.json"
+}
+
+# ------------------------------------------------------------------ подпись сборки (S-B17)
+
+@test "S-B17: без --signed в манифест пишется \"signed\": false" {
+  make_artifacts "$ART" "$VER" linux-x64
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets linux-x64
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  assert_file_contains "$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/common/manifest.json" '"signed": false'
+}
+
+@test "S-B17: --signed пишет \"signed\": true — установщик перестаёт снимать карантин" {
+  make_artifacts "$ART" "$VER" linux-x64
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --signed --out "$OUT" --targets linux-x64
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-linux-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  assert_file_contains "$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/common/manifest.json" '"signed": true'
+}
+
+# ------------------------------------------------------------------ Desktop для обеих архитектур
+
+@test "S-B16: dmg каждой архитектуры macOS попадает в свой пакет, а не только в arm64" {
+  # Прежняя редакция find_desktop_artifact искала dmg только для darwin-arm64: пакет darwin-x64
+  # собирался БЕЗ Desktop и молча — установщик печатал «Desktop: не входит в пакет».
+  make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64 linux-x64
+  printf 'FIXTURE dmg arm64\n' >"$ART/opencode-magnit-desktop-mac-arm64.dmg"
+  printf 'FIXTURE dmg x64\n' >"$ART/opencode-magnit-desktop-mac-x64.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-arm64,darwin-x64,linux-x64
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  local t
+  for t in darwin-arm64 darwin-x64 linux-x64; do
+    tar -xzf "$OUT/opencode-magnit-$t-$VER.tar.gz" -C "$SANDBOX/unpack"
+  done
+  [ -f "$SANDBOX/unpack/opencode-magnit-darwin-arm64-$VER/desktop/opencode-magnit-desktop-mac-arm64.dmg" ]
+  [ -f "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/desktop/opencode-magnit-desktop-mac-x64.dmg" ]
+  # Архитектуры не перепутаны: в x64-пакете нет arm64-бандла и наоборот.
+  [ ! -e "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/desktop/opencode-magnit-desktop-mac-arm64.dmg" ]
+  [ ! -e "$SANDBOX/unpack/opencode-magnit-darwin-arm64-$VER/desktop/opencode-magnit-desktop-mac-x64.dmg" ]
+  [ ! -e "$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/desktop" ]
+}
+
+@test "S-B16: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop, а не с чужим бандлом" {
+  # Положить arm64-бандл в x64-пакет хуже, чем не положить ничего: установка «успешна», а
+  # приложение не запускается.
+  make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64
+  printf 'FIXTURE dmg arm64\n' >"$ART/opencode-magnit-desktop-mac-arm64.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-arm64,darwin-x64
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-darwin-arm64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-darwin-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  [ -d "$SANDBOX/unpack/opencode-magnit-darwin-arm64-$VER/desktop" ]
+  [ ! -e "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/desktop" ]
+  refute_file_contains "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/common/manifest.json" '"kind": "desktop"'
+}
+
+@test "S-B16: единственный dmg без архитектуры в имени — ручная сборка, идёт в оба пакета" {
+  make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64
+  printf 'FIXTURE dmg\n' >"$ART/OpenCode.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-arm64,darwin-x64
+  assert_status 0
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-darwin-arm64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-darwin-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  [ -f "$SANDBOX/unpack/opencode-magnit-darwin-arm64-$VER/desktop/OpenCode.dmg" ]
+  [ -f "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/desktop/OpenCode.dmg" ]
 }
 
 @test "AC-112: сборка linux-x64 из фикстурных артефактов даёт дерево N5-P2 и корректный манифест" {

@@ -44,17 +44,23 @@ awk '
   /^    type: / { if (id != "") { print id, $2; id = "" } }
 ' "$criteria_file" >"$work/criteria"
 
-# 2. Покрытие: "<id> <файл>" по маркерам в именах тестов
+# 2. Покрытие: "<id> <файл>" по маркерам в именах тестов.
+#
+# `|| true` на конвейере обязателен: набор может целиком относиться к правилу спецификации без
+# номера AC (например, 38-quarantine.bats — S-B17), и тогда внутренний grep не находит ничего и
+# возвращает 1. Под `set -e -o pipefail` это роняло весь скрипт с пустым выводом — трассировка
+# сообщала о несходимости покрытия там, где покрытие в порядке, а причина не называлась вовсе.
 : >"$work/coverage"
 for file in "$bats_dir"/*.bats; do
   [ -f "$file" ] || continue
-  grep '^@test ' "$file" | grep -o 'AC-[0-9][0-9]*' | while IFS= read -r id; do
+  { grep '^@test ' "$file" || true; } | { grep -o 'AC-[0-9][0-9]*' || true; } | while IFS= read -r id; do
     printf '%s %s\n' "$id" "$(basename "$file")" >>"$work/coverage"
   done
 done
 for file in "$pester_dir"/*.Tests.ps1; do
   [ -f "$file" ] || continue
-  grep -E "^[[:space:]]*(It|Context|Describe) " "$file" | grep -o 'AC-[0-9][0-9]*' | while IFS= read -r id; do
+  { grep -E "^[[:space:]]*(It|Context|Describe) " "$file" || true; } |
+    { grep -o 'AC-[0-9][0-9]*' || true; } | while IFS= read -r id; do
     printf '%s %s\n' "$id" "$(basename "$file")" >>"$work/coverage"
   done
 done

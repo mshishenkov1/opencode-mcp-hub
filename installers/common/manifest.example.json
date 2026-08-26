@@ -5,6 +5,8 @@
   "os": "darwin",
   "arch": "arm64",
   "hub_url": "https://mcp-hub.magnit.ru",
+  "catalog_url": "https://updates.magnit.ru/opencode/catalog/v1/catalog.json",
+  "signed": false,
   "built_at": "2026-08-18T09:41:07Z",
   "source_release": "v1.17.9-magnit.1",
   "ca": {

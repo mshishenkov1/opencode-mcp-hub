@@ -62,6 +62,7 @@ $script:MsgSumCa = '  CA: {0}'
 $script:MsgSumDesktop = '  Desktop: {0}'
 $script:MsgSumConfig = '  Конфиг: {0} (не изменялся)'
 $script:MsgSumHub = '  Hub: {0}'
+$script:MsgSumCatalog = '  Каталог: {0}'
 $script:MsgNext = 'Дальше:'
 $script:MsgNextTerminal = '  1. Откройте новое окно терминала'
 $script:MsgNextRun = '  2. Запустите: opencode'
@@ -109,6 +110,7 @@ $script:MsgCheckDesktopOk = 'Desktop: установлен ({0})'
 $script:MsgCheckDesktopNone = 'Desktop: не установлен'
 $script:MsgCheckConfig = 'Конфиг: {0} (не изменяется установщиком)'
 $script:MsgCheckHub = 'Hub: {0}'
+$script:MsgCheckCatalog = 'Каталог: {0}'
 $script:MsgCheckSumOk = 'Итог: всё установлено'
 $script:MsgCheckSumNeed = 'Итог: требуется установка'
 
@@ -235,6 +237,25 @@ function Get-Prop {
     return $prop.Value
 }
 
+# Адреса корпоративной точки входа для отчёта, -Check и -DryRun (S-C10).
+#
+# Печатается тот адрес, что есть в манифесте: Hub, каталог коннекторов или оба. Строка с пустым
+# значением была бы хуже отсутствия строки — 'Hub: ' читается как «адрес потерялся», а не как
+# «сборка ходит в каталог напрямую». Паритет с print_endpoints_check в install-posix.sh.
+function Get-EndpointLines {
+    param($Manifest, [string]$HubFormat, [string]$CatalogFormat)
+    $lines = New-Object System.Collections.ArrayList
+    $hub = Get-Prop $Manifest 'hub_url'
+    if (-not [string]::IsNullOrEmpty($hub)) {
+        [void]$lines.Add(($HubFormat -f $hub))
+    }
+    $catalog = Get-Prop $Manifest 'catalog_url'
+    if (-not [string]::IsNullOrEmpty($catalog)) {
+        [void]$lines.Add(($CatalogFormat -f $catalog))
+    }
+    return $lines.ToArray()
+}
+
 function Test-Sha256Value {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return $false }
@@ -307,11 +328,17 @@ function Read-Manifest {
     if ((Get-Prop $manifest 'product') -ne $script:Product) {
         Invoke-ManifestFieldFailure -Path $manifestPath -Field 'product' -Reason $script:MsgErrFieldProduct
     }
-    foreach ($field in @('version', 'os', 'arch', 'hub_url', 'built_at', 'source_release')) {
+    foreach ($field in @('version', 'os', 'arch', 'built_at', 'source_release')) {
         $value = Get-Prop $manifest $field
         if ([string]::IsNullOrEmpty($value)) {
             Invoke-ManifestFieldFailure -Path $manifestPath -Field $field -Reason $script:MsgErrFieldRequired
         }
+    }
+    # Точка входа (S-C10): Hub, каталог коннекторов или оба. Прямая авторизация без Hub делает
+    # hub_url необязательным, но пакет без единого адреса принимать нельзя.
+    if ([string]::IsNullOrEmpty((Get-Prop $manifest 'hub_url')) -and
+        [string]::IsNullOrEmpty((Get-Prop $manifest 'catalog_url'))) {
+        Invoke-ManifestFieldFailure -Path $manifestPath -Field 'hub_url' -Reason $script:MsgErrFieldRequired
     }
     $osValue = Get-Prop $manifest 'os'
     if (@('darwin', 'linux', 'windows') -notcontains $osValue) {
@@ -797,7 +824,9 @@ function Write-InstallReport {
     Write-Line ($script:MsgSumCa -f $Layout.CaTarget)
     Write-Line ($script:MsgSumDesktop -f $DesktopSummary)
     Write-Line ($script:MsgSumConfig -f $Layout.ConfigFile)
-    Write-Line ($script:MsgSumHub -f (Get-Prop $Manifest 'hub_url'))
+    foreach ($line in (Get-EndpointLines $Manifest $script:MsgSumHub $script:MsgSumCatalog)) {
+        Write-Line $line
+    }
     Write-Line $script:MsgNext
     if ($PathChanged) {
         Write-Line $script:MsgNextTerminal
@@ -906,7 +935,9 @@ function Invoke-Check {
     }
 
     Write-Line ($script:MsgCheckConfig -f $Layout.ConfigFile)
-    Write-Line ($script:MsgCheckHub -f (Get-Prop $Manifest 'hub_url'))
+    foreach ($line in (Get-EndpointLines $Manifest $script:MsgCheckHub $script:MsgCheckCatalog)) {
+        Write-Line $line
+    }
     if ($diff) {
         Write-Line $script:MsgCheckSumNeed
         return $script:ExitDiff
@@ -1068,7 +1099,9 @@ function Get-InstallPlan {
         $n++
         [void]$lines.Add(($script:MsgPlanStep -f $n, ($script:MsgPlanCorpStatus -f $Layout.BinTarget)))
     }
-    [void]$lines.Add(($script:MsgCheckHub -f (Get-Prop $Manifest 'hub_url')))
+    foreach ($line in (Get-EndpointLines $Manifest $script:MsgCheckHub $script:MsgCheckCatalog)) {
+        [void]$lines.Add($line)
+    }
     return $lines.ToArray()
 }
 

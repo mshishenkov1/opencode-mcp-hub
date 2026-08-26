@@ -219,6 +219,9 @@ write_noversion_binary() {
 # Переопределения через переменные окружения: PKG_OS, PKG_ARCH, PKG_VERSION, PKG_HUB,
 # PKG_DESKTOP (1 — добавить артефакт desktop), PKG_SHA_UPPER (1 — хеши заглавными),
 # PKG_PURGE (список путей purge_paths, по одному в строке).
+# Ревизия 1.10: PKG_HUB_OMIT=1 (не печатать hub_url — сборка без Hub, S-C10),
+# PKG_CATALOG (значение catalog_url), PKG_SIGNED (значение поля signed; не задано — поля нет,
+# как в пакетах, собранных до появления поля, S-B17).
 # Путевые поля манифеста задаются ПАРАМЕТРАМИ ФАБРИКИ, а не sed-подстановкой по литералу
 # значения (N5-T1): PKG_APP_NAME (значение artifacts[].app_name, по умолчанию $OM_APP_NAME),
 # PKG_APP_NAME_OMIT=1 (поле app_name не печатать вовсе), PKG_INSTALLER_TYPE,
@@ -232,7 +235,22 @@ write_manifest() {
   local hub=${PKG_HUB:-https://hub.test}
   local bin_name=opencode
   local ca_sha cli_sha cli_size desktop_block="" purge_block="" item first=1 list
-  local ca_install cli_install
+  local ca_install cli_install endpoint_block="" signed_block=""
+
+  # Точка входа и подпись — ПАРАМЕТРАМИ фабрики (N5-T1): sed-подстановка по литералу значения
+  # после переименования поля перестала бы срабатывать молча.
+  if [ "${PKG_HUB_OMIT:-0}" != "1" ]; then
+    endpoint_block="$endpoint_block
+  \"hub_url\": \"$(json_escape "$hub")\","
+  fi
+  if [ -n "${PKG_CATALOG:-}" ]; then
+    endpoint_block="$endpoint_block
+  \"catalog_url\": \"$(json_escape "$PKG_CATALOG")\","
+  fi
+  if [ -n "${PKG_SIGNED:-}" ]; then
+    signed_block="
+  \"signed\": $PKG_SIGNED,"
+  fi
 
   [ "$os" != "windows" ] || bin_name=opencode.exe
   ca_install=$(json_escape "${PKG_CA_INSTALL_NAME-tander-ca-bundle.pem}")
@@ -287,8 +305,7 @@ PURGE
   "product": "opencode-magnit",
   "version": "$ver",
   "os": "$os",
-  "arch": "$arch",
-  "hub_url": "$hub",
+  "arch": "$arch",$endpoint_block$signed_block
   "built_at": "2026-08-18T09:41:07Z",
   "source_release": "v$ver",
   "ca": {

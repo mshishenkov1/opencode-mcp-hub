@@ -60,6 +60,10 @@ MSG_SUM_CA='  CA: %s'
 MSG_SUM_DESKTOP='  Desktop: %s'
 MSG_SUM_CONFIG='  Конфиг: %s (не изменялся)'
 MSG_SUM_HUB='  Hub: %s'
+MSG_SUM_CATALOG='  Каталог: %s'
+# Подпись (S-B17). Строка отчёта обязательна: пользователь должен понимать, почему приложение
+# запускается без предупреждения Gatekeeper, хотя сборка не подписана.
+MSG_SUM_UNSIGNED='  Сборка не подписана: карантин снят, приложение запустится без предупреждения'
 MSG_NEXT='Дальше:'
 MSG_NEXT_TERMINAL='  1. Откройте новый терминал (или выполните: source %s)'
 MSG_NEXT_RUN='  2. Запустите: opencode'
@@ -91,6 +95,13 @@ MSG_DESKTOP_INSTALLED='Desktop: установлен (%s)'
 MSG_DESKTOP_MANUAL_AT='Desktop: запустите установщик вручную: %s'
 MSG_DESKTOP_ERROR='Desktop: ошибка (код %s)'
 MSG_DESKTOP_USER_DIR='Предупреждение: нет прав на %s, Desktop установлен в %s'
+# Карантин Gatekeeper (S-B17). Неподписанный бандл, скопированный из dmg, наследует атрибут
+# com.apple.quarantine, и macOS 15+ отказывается его запускать — с сообщением «повреждено», а не
+# «не подписано». Снятие атрибута — best-effort: неудача выводится предупреждением и не отменяет
+# установку, потому что приложение уже скопировано и работоспособно, а атрибут пользователь может
+# снять сам.
+MSG_DESKTOP_QUARANTINE='Desktop: карантин снят (сборка не подписана)'
+MSG_DESKTOP_QUARANTINE_FAILED='Предупреждение: не удалось снять карантин с %s — при первом запуске macOS может сообщить о повреждении; снимите вручную: xattr -dr com.apple.quarantine %s'
 
 # --- --check (N5-C2), построчный контракт
 MSG_CHECK_PKG='Пакет: opencode-magnit %s (%s-%s)'
@@ -111,6 +122,7 @@ MSG_CHECK_DESKTOP_OK='Desktop: установлен (%s)'
 MSG_CHECK_DESKTOP_NONE='Desktop: не установлен'
 MSG_CHECK_CONFIG='Конфиг: %s (не изменяется установщиком)'
 MSG_CHECK_HUB='Hub: %s'
+MSG_CHECK_CATALOG='Каталог: %s'
 MSG_CHECK_SUM_OK='Итог: всё установлено'
 MSG_CHECK_SUM_NEED='Итог: требуется установка'
 
@@ -125,6 +137,7 @@ MSG_PLAN_BIN_BACKUP='Сохранить прежний бинарник: %s -> %
 MSG_PLAN_PROFILE='Обновить блок в профиле: %s (%s=%s)'
 MSG_PLAN_PATH='Добавить в PATH через профиль: %s'
 MSG_PLAN_DESKTOP_DMG='Установить Desktop: %s -> %s/%s'
+MSG_PLAN_QUARANTINE='Снять карантин Gatekeeper: %s/%s (сборка не подписана)'
 MSG_PLAN_CONFIG='Конфиг: %s не изменяется; резервная копия %s'
 MSG_PLAN_CORP_STATUS='Показать состояние: %s corp status'
 MSG_PLAN_REMOVE='Удалить: %s'
@@ -219,6 +232,9 @@ plan_step=0
 check_diff=0
 desktop_summary=""
 desktop_failed=0
+# Карантин Gatekeeper снят (S-B17): отчёт называет это отдельной строкой, чтобы «запустилось без
+# предупреждения» не выглядело как подписанная сборка.
+desktop_unsigned=0
 profile_did_change=0
 
 MANIFEST_KV=""
@@ -226,6 +242,11 @@ MF_version=""
 MF_os=""
 MF_arch=""
 MF_hub_url=""
+MF_catalog_url=""
+# Подпись сборки Desktop (S-B17). Значение по умолчанию — «не подписана»: пакеты, собранные до
+# ревизии 1.10, поля не содержат, а неподписанный бандл без снятия карантина не запускается вовсе.
+# Умолчание «подписана» дало бы молчаливый отказ приложения там, где установщик отчитался успехом.
+MF_signed="false"
 MF_ca_file=""
 MF_ca_sha=""
 MF_ca_name=""
@@ -768,7 +789,22 @@ manifest_load() {
   mf_require "version" "version"; MF_version=$REPLY
   mf_require "os" "os"; MF_os=$REPLY
   mf_require "arch" "arch"; MF_arch=$REPLY
-  mf_require "hub_url" "hub_url"; MF_hub_url=$REPLY
+  # Адрес корпоративной точки входа (S-C10, ревизия 1.10). Hub перестал быть единственным:
+  # сборка может идти на прямую авторизацию со статическим каталогом коннекторов. Обязателен
+  # хотя бы один из двух — пакет без единого адреса бесполезен, и молчаливо принимать его нельзя.
+  MF_hub_url=$(mf_val "hub_url")
+  MF_catalog_url=$(mf_val "catalog_url")
+  if [ -z "$MF_hub_url" ] && [ -z "$MF_catalog_url" ]; then
+    manifest_field_error "hub_url" "$MSG_ERR_FIELD_REQUIRED"
+  fi
+  # Подпись сборки Desktop (S-B17): любое значение, кроме литерального true, означает
+  # «не подписана» — снять карантин с уже подписанного бандла безвредно, а не снять с
+  # неподписанного означает приложение, которое не запускается.
+  if [ "$(to_lower "$(mf_val "signed")")" = "true" ]; then
+    MF_signed="true"
+  else
+    MF_signed="false"
+  fi
   mf_require "built_at" "built_at"
   mf_require "source_release" "source_release"
 
@@ -1489,6 +1525,35 @@ desktop_installed_version() {
   return 1
 }
 
+# Снятие карантина Gatekeeper с установленного бандла (S-B17).
+#
+# Зачем: бандл, скопированный из dmg, наследует расширенный атрибут com.apple.quarantine. Для
+# ПОДПИСАННОГО приложения это значит одно предупреждение при первом запуске, для неподписанного на
+# macOS 15+ — отказ запуска с сообщением «приложение повреждено и не может быть открыто». То есть
+# без этого шага установка неподписанной сборки формально успешна, а приложение не работает.
+#
+# Условность: шаг выполняется только при "signed": false в манифесте. Когда ИБ выдаст сертификаты
+# и release.sh начнёт писать true, шаг погаснет сам — правки установщика не потребуется.
+#
+# Best-effort: неудача (нет xattr, нет прав, атрибута и не было) — предупреждение с ручной
+# командой, а не отказ. Приложение к этому моменту уже скопировано и работоспособно; ронять
+# установку из-за атрибута нельзя, а молчать — тем более.
+desktop_needs_quarantine_removal() {
+  [ "$MF_signed" != "true" ] && [ "$platform" = "macos" ]
+}
+
+remove_quarantine() {
+  local app=$1
+  desktop_needs_quarantine_removal || return 0
+  if run_priv xattr -dr com.apple.quarantine "$app" 2>/dev/null; then
+    say "$MSG_DESKTOP_QUARANTINE"
+    desktop_unsigned=1
+    return 0
+  fi
+  say "$MSG_DESKTOP_QUARANTINE_FAILED" "$app" "$app"
+  return 0
+}
+
 install_desktop() {
   local dest app_dest mount_point app_src app_version
   if [ -z "$MF_desktop_file" ]; then
@@ -1544,6 +1609,7 @@ install_desktop() {
   if run_priv ditto "$app_src" "$app_dest"; then
     say "$MSG_DESKTOP_INSTALLED" "$app_dest"
     desktop_summary="$app_dest"
+    remove_quarantine "$app_dest"
   else
     say "$MSG_DESKTOP_ERROR" "1"
     desktop_summary="ошибка (код 1)"
@@ -1574,6 +1640,18 @@ handle_user_config() {
   say "$MSG_CONFIG_KEPT" "$cfg"
 }
 
+# Адреса корпоративной точки входа в --check и --dry-run (S-C10). Печатается то, что есть в
+# манифесте: Hub, каталог коннекторов или оба. Строка с пустым значением была бы хуже отсутствия
+# строки — «Hub: » читается как «адрес потерялся», а не как «сборка ходит в каталог напрямую».
+print_endpoints_check() {
+  if [ -n "$MF_hub_url" ]; then
+    out "$MSG_CHECK_HUB" "$MF_hub_url"
+  fi
+  if [ -n "$MF_catalog_url" ]; then
+    out "$MSG_CHECK_CATALOG" "$MF_catalog_url"
+  fi
+}
+
 # При --system отдельной строкой печатается, от имени какого пользователя выполнена
 # пользовательская часть: пути CA и конфига лежат в его доме, а не в доме root (N5-I14).
 print_source_user() {
@@ -1589,8 +1667,18 @@ print_report() {
   out "$MSG_SUM_BIN" "$bin_target"
   out "$MSG_SUM_CA" "$ca_target"
   out "$MSG_SUM_DESKTOP" "$desktop_summary"
+  # Строка про подпись — только когда карантин действительно сняли (S-B17). В пакете без Desktop,
+  # при --no-desktop и при неудаче снятия (там уже напечатано предупреждение) её быть не должно.
+  if [ "$desktop_unsigned" -eq 1 ]; then
+    out "$MSG_SUM_UNSIGNED"
+  fi
   out "$MSG_SUM_CONFIG" "$config_dir/opencode.json"
-  out "$MSG_SUM_HUB" "$MF_hub_url"
+  if [ -n "$MF_hub_url" ]; then
+    out "$MSG_SUM_HUB" "$MF_hub_url"
+  fi
+  if [ -n "$MF_catalog_url" ]; then
+    out "$MSG_SUM_CATALOG" "$MF_catalog_url"
+  fi
   out "$MSG_NEXT"
   if [ "$profile_changed" -eq 1 ]; then
     out "$MSG_NEXT_TERMINAL" "$profile_file"
@@ -1732,7 +1820,7 @@ do_check() {
   fi
 
   out "$MSG_CHECK_CONFIG" "$config_dir/opencode.json"
-  out "$MSG_CHECK_HUB" "$MF_hub_url"
+  print_endpoints_check
   if [ "$check_diff" -eq 1 ]; then
     out "$MSG_CHECK_SUM_NEED"
     exit "$EX_DIFF"
@@ -1796,6 +1884,11 @@ do_plan_install() {
     plan_line "$MSG_DESKTOP_SKIPPED"
   elif [ "$MF_desktop_type" = "dmg" ] && [ "$platform" = "macos" ]; then
     plan_line "$MSG_PLAN_DESKTOP_DMG" "$pkg_root/$MF_desktop_file" "$(desktop_dest_dir)" "$MF_desktop_app"
+    # Шаг снятия карантина виден в плане ровно тогда, когда он будет выполнен (S-B17): план
+    # обязан совпадать с установкой, иначе «изменения не вносятся» перестаёт быть полным списком.
+    if desktop_needs_quarantine_removal; then
+      plan_line "$MSG_PLAN_QUARANTINE" "$(desktop_dest_dir)" "$MF_desktop_app"
+    fi
   else
     plan_line "$MSG_DESKTOP_MANUAL_AT" "$pkg_root/$MF_desktop_file"
   fi
@@ -1803,7 +1896,7 @@ do_plan_install() {
   if [ "$opt_no_launch" -eq 0 ]; then
     plan_line "$MSG_PLAN_CORP_STATUS" "$bin_target"
   fi
-  out "$MSG_CHECK_HUB" "$MF_hub_url"
+  print_endpoints_check
   exit "$EX_OK"
 }
 
