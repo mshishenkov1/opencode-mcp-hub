@@ -20,6 +20,7 @@ import pytest
 from hub.assets import (
     HTMX_FILE,
     HTMX_JSON_ENC_FILE,
+    HTMX_VERSION,
     JS_CONTENT_TYPE,
     STATIC_CACHE_CONTROL,
     STATIC_DIR,
@@ -113,29 +114,57 @@ async def test_unknown_static_name_is_404(make_hub: HubFactory, name: str) -> No
     assert response.status_code == 404, f"{name}: {response.status_code}"
 
 
+# Payload'ы подобраны так, чтобы на наивной реализации (склейка имени с каталогом статики,
+# без белого списка) каждый разрешался в **существующий** файл и отдавал его содержимое.
+# Слэш в пути маршрут не пропускает сам по себе — значит, «..» и разделители обязаны быть
+# закодированы, иначе проверка выродится: она не упадёт и на дырявом обработчике.
 _TRAVERSAL = [
-    "/static/../catalog.yaml",
-    "/static/../../catalog.yaml",
-    "/static/../templates/base.html",
-    "/static/%2e%2e/%2e%2e/catalog.yaml",
-    "/static/..%2fcatalog.yaml",
-    "/static/../assets.py",
+    # src/hub/static/../assets.py — исходник рядом с каталогом статики.
+    ("..%2fassets.py", b"STATIC_FILES"),
+    # src/hub/static/../templates/base.html — шаблон страницы.
+    ("..%2ftemplates%2fbase.html", b"<!DOCTYPE html>"),
+    # src/hub/static/../../../catalog.yaml — каталог в корне репозитория.
+    ("..%2f..%2f..%2fcatalog.yaml", b"servers:"),
+    # Те же цели незакодированным путём и смешанным кодированием.
+    ("../assets.py", b"STATIC_FILES"),
+    ("../templates/base.html", b"<!DOCTYPE html>"),
+    ("../../../catalog.yaml", b"servers:"),
+    ("%2e%2e%2fassets.py", b"STATIC_FILES"),
+    ("..%2F..%2F..%2Fcatalog.yaml", b"servers:"),
 ]
 
 
-@pytest.mark.parametrize("path", _TRAVERSAL, ids=range(len(_TRAVERSAL)))
-async def test_path_traversal_never_serves_a_file(make_hub: HubFactory, path: str) -> None:
+@pytest.mark.parametrize(
+    ("suffix", "leak"), _TRAVERSAL, ids=[case[0] for case in _TRAVERSAL]
+)
+async def test_path_traversal_never_serves_a_file(
+    make_hub: HubFactory, suffix: str, leak: bytes
+) -> None:
     """Выход за каталог статики невозможен: имя ищется только в белом списке.
 
     Запрос идёт прямым вызовом ASGI: httpx нормализовал бы ``..`` ещё в клиенте, и проверка
     выродилась бы — приложение получило бы уже безопасный путь.
     """
     hub = await _hub(make_hub)
+    path = f"/static/{suffix}"
     async with asgi_stream(hub.app, "GET", path) as stream:
         body = await stream.read_all()
     assert stream.status_code != 200, f"{path}: отдан файл"
-    for leak in (b"servers:", b"<!DOCTYPE html>\n<html", b"STATIC_FILES"):
-        assert leak not in body, f"{path}: в ответе содержимое файла вне статики"
+    assert leak not in body, f"{path}: в ответе содержимое файла вне каталога статики"
+
+
+def test_traversal_payloads_resolve_to_existing_files() -> None:
+    """Сторож самой проверки обхода: каждая цель обязана существовать на диске.
+
+    Иначе тест выше «зелёный» просто потому, что файла нет, и уязвимую реализацию он
+    пропустит — ровно этим была вырождена прежняя редакция набора.
+    """
+    from urllib.parse import unquote
+
+    for suffix, _leak in _TRAVERSAL:
+        target = (STATIC_DIR / unquote(suffix)).resolve()
+        assert target.is_file(), f"{suffix} ведёт в несуществующий {target}"
+        assert STATIC_DIR.resolve() not in target.parents, f"{suffix} не выходит за каталог"
 
 
 # --- целостность файлов в образе -------------------------------------------
@@ -152,6 +181,22 @@ def test_static_files_match_sha256sums() -> None:
         path = STATIC_DIR / name
         assert path.is_file(), f"в SHA256SUMS есть {name}, а файла нет"
         assert _sha256(path.read_bytes()) == digest, f"{name}: содержимое не совпадает с суммой"
+
+
+VERSION_IN_NAME_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+@pytest.mark.parametrize("name", sorted(STATIC_FILES))
+def test_served_file_name_carries_its_version(name: str) -> None:
+    """Имя раздаваемого файла обязано нести версию — иначе immutable-кэш залипнет на год.
+
+    ``Cache-Control: immutable`` с ``max-age`` на год допустим ровно потому, что смена версии
+    даёт новый адрес. Безверсионное имя в раздаче сделало бы обновление невозможным: у всех,
+    кто открыл страницу, осталась бы прежняя копия.
+    """
+    assert VERSION_IN_NAME_RE.search(name), f"в имени {name} нет версии"
+    assert HTMX_VERSION in name, f"{name} не несёт текущую версию {HTMX_VERSION}"
+    assert "31536000" in STATIC_CACHE_CONTROL and "immutable" in STATIC_CACHE_CONTROL
 
 
 def test_every_static_file_is_covered_by_sums_and_whitelist() -> None:
