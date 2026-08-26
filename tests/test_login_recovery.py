@@ -254,18 +254,235 @@ def test_base_template_has_connection_notice_markup() -> None:
     assert "hub-stale" in html
 
 
-@pytest.mark.parametrize(
-    "event",
-    ["htmx:sendError", "htmx:timeout", "htmx:responseError", "htmx:afterRequest", "online"],
-)
-def test_base_template_handles_every_failure_event(event: str) -> None:
-    """Обработчик есть для каждого события, которым htmx сообщает о сбое и об успехе."""
-    html = BASE_TEMPLATE.read_text(encoding="utf-8")
-    listener = f"addEventListener('{event}'"
-    assert listener in html, f"в base.html нет обработчика {event}"
+# --- разбор скрипта плашки -------------------------------------------------
+#
+# Проверки ниже разбирают сам скрипт, а не ищут подстроки: ревью показало, что подстрочный
+# поиск не падает на осмысленной поломке — guard снимают из кода, а строку оставляют в
+# комментарии, и тест остаётся зелёным. Поэтому комментарии и строковые литералы вырезаются,
+# тела функций и обработчиков выделяются по скобкам, и утверждается, ГДЕ стоит проверка и
+# какие пути её проходят.
+
+SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
 
 
-def test_base_template_does_not_retry_unsafe_requests_silently() -> None:
-    """Автоповтор — только для выборки: молча повторять POST/DELETE нельзя."""
+def _strip_comments(js: str) -> str:
+    """Убрать комментарии, не тронув строковые литералы (в них бывают «//» и «/*»)."""
+    out: list[str] = []
+    i, n = 0, len(js)
+    quote: str | None = None
+    while i < n:
+        ch = js[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(js[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if js.startswith("//", i):
+            end = js.find("\n", i)
+            i = n if end == -1 else end
+            continue
+        if js.startswith("/*", i):
+            end = js.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _connection_script() -> str:
+    """Скрипт обработки сбоев из base.html — без комментариев."""
     html = BASE_TEMPLATE.read_text(encoding="utf-8")
-    assert "verb !== 'get'" in html, "в base.html нет ограничения автоповтора на GET"
+    blocks = [b for b in SCRIPT_RE.findall(html) if "hub-connection-retry" in b]
+    assert len(blocks) == 1, "ожидается ровно один скрипт обработки сбоев"
+    return _strip_comments(blocks[0])
+
+
+def _block_after(js: str, marker: str) -> str:
+    """Тело в фигурных скобках, начинающееся после ``marker`` (с учётом вложенности)."""
+    at = js.find(marker)
+    assert at != -1, f"в скрипте нет {marker!r}"
+    open_at = js.find("{", at)
+    assert open_at != -1, f"после {marker!r} нет тела"
+    depth = 0
+    for pos in range(open_at, len(js)):
+        if js[pos] == "{":
+            depth += 1
+        elif js[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[open_at + 1 : pos]
+    raise AssertionError(f"не закрыто тело после {marker!r}")
+
+
+def _function_body(js: str, name: str) -> str:
+    return _block_after(js, f"function {name}(")
+
+
+def _handler_body(js: str, event: str) -> str:
+    return _block_after(js, f"addEventListener('{event}'")
+
+
+def _function_params(js: str, name: str) -> list[str]:
+    match = re.search(rf"function {re.escape(name)}\(([^)]*)\)", js)
+    assert match, f"в скрипте нет функции {name}"
+    return [p.strip() for p in match.group(1).split(",") if p.strip()]
+
+
+# Вызов повтора: имя, открывающая скобка, аргументы до закрывающей.
+RETRY_CALL_RE = re.compile(r"\b(retry|retryAll)\(([^)]*)\)")
+
+
+def _retry_calls(js: str) -> list[tuple[str, str]]:
+    """Все вызовы ``retry``/``retryAll`` (без объявлений) как ``(имя, аргументы)``."""
+    calls: list[tuple[str, str]] = []
+    for match in RETRY_CALL_RE.finditer(js):
+        head = js[max(0, match.start() - 9) : match.start()]
+        if head.rstrip().endswith("function"):
+            continue
+        calls.append((match.group(1), match.group(2).strip()))
+    return calls
+
+
+# --- must_fix ревью: автоповтор касается только выборки --------------------
+
+
+def test_retry_guard_lives_inside_the_single_decision_point() -> None:
+    """Проверка метода стоит внутри ``retry`` — до отправки запроса (must_fix ревью i8).
+
+    Раньше проверка стояла в ``scheduleRetry``, а ``retry`` вызывался ещё с двух путей без
+    неё; ревью сняло guard из единственного места, оставив строку в комментарии, и набор
+    остался зелёным. Здесь утверждается расположение: guard обязан быть в теле ``retry``,
+    сравнивать метод с ``get``, зависеть от признака «повтор запрошен человеком» и стоять
+    раньше вызова ``htmx.ajax``.
+    """
+    js = _connection_script()
+    params = _function_params(js, "retry")
+    assert len(params) >= 2, f"у retry нет признака ручного повтора: {params}"
+    user_requested = params[-1]
+
+    body = _function_body(js, "retry")
+    guard = re.search(
+        rf"if\s*\(\s*!\s*{re.escape(user_requested)}\s*&&\s*\w+\.verb\s*!==\s*'get'\s*\)"
+        r"\s*\{\s*return",
+        body,
+    )
+    assert guard, (
+        "в теле retry нет проверки «повтор не запрошен человеком и метод не get → выход»; "
+        f"тело: {body.strip()[:400]}"
+    )
+    ajax_at = body.find("htmx.ajax")
+    assert ajax_at != -1, "retry не отправляет запрос — проверка вырождена"
+    assert guard.start() < ajax_at, "guard стоит после отправки запроса"
+
+
+def test_only_the_retry_button_may_request_an_unsafe_repeat() -> None:
+    """Признак «можно всё» приходит ровно от кнопки; автоматические пути просят безопасный повтор."""
+    js = _connection_script()
+    calls = _retry_calls(js)
+    assert calls, "в скрипте нет вызовов повтора — проверка вырождена"
+
+    truthy = [call for call in calls if call[1].split(",")[-1].strip() == "true"]
+    assert len(truthy) == 1, f"признак ручного повтора передаётся не из одного места: {calls}"
+
+    # Единственный «true» обязан быть внутри обработчика нажатия на кнопку плашки.
+    ready = _handler_body(js, "DOMContentLoaded")
+    assert "hub-connection-retry" in ready
+    click = _block_after(ready, "addEventListener('click'")
+    assert _retry_calls(click) == [(truthy[0][0], "true")], (
+        f"ручной повтор запрашивает не кнопка: {click.strip()!r}"
+    )
+
+    # Все прочие вызовы — с явным «false» либо с прокинутым параметром (retryAll → retry).
+    passthrough = set(_function_params(js, "retryAll"))
+    for name, args in calls:
+        last = args.split(",")[-1].strip()
+        assert last in {"false", "true", *passthrough}, f"{name}({args}) — непонятный признак"
+
+
+@pytest.mark.parametrize("event", ["online", "htmx:afterRequest"])
+def test_automatic_paths_never_request_an_unsafe_repeat(event: str) -> None:
+    """Пути без участия человека (возврат сети, успех соседнего блока) просят только безопасный."""
+    js = _connection_script()
+    body = _handler_body(js, event)
+    calls = _retry_calls(body)
+    assert calls, f"обработчик {event} не возобновляет запросы — проверка вырождена"
+    for name, args in calls:
+        assert args.split(",")[-1].strip() == "false", f"{event}: {name}({args}) повторяет всё"
+
+
+def test_scheduled_retry_is_automatic_too() -> None:
+    """Повтор по таймеру — тоже автоматический путь."""
+    js = _connection_script()
+    body = _function_body(js, "scheduleRetry")
+    calls = _retry_calls(body)
+    assert calls, "scheduleRetry ничего не планирует — проверка вырождена"
+    for name, args in calls:
+        assert args.split(",")[-1].strip() == "false", f"{name}({args}) в таймере повторяет всё"
+
+
+def test_user_is_told_that_unsafe_request_will_not_repeat_itself() -> None:
+    """Обещание самовосстановления даётся только выборке: остальное ждёт человека."""
+    js = _connection_script()
+    body = _function_body(js, "retryHint")
+    assert re.search(r"\w+\.verb\s*===\s*'get'", body), (
+        "подсказка не различает выборку и небезопасный запрос"
+    )
+    assert "сама повторит" in body
+    assert "Повторить" in body
+
+
+# --- обработчики делают дело, а не просто существуют -----------------------
+
+
+_HANDLERS = [
+    ("htmx:sendError", ["connectionLost"]),
+    ("htmx:timeout", ["connectionLost"]),
+    ("htmx:responseError", ["remember", "showNotice", "scheduleRetry"]),
+    # drop(done) обязателен: без него запись об удавшемся блоке остаётся в списке сорванных
+    # и её продолжают повторять, а плашка не гаснет.
+    ("htmx:afterRequest", ["successful", "stallFor", "drop", "retryAll"]),
+    ("online", ["retryAll"]),
+]
+
+
+@pytest.mark.parametrize(("event", "expected"), _HANDLERS, ids=[c[0] for c in _HANDLERS])
+def test_failure_handler_body_does_its_job(event: str, expected: list[str]) -> None:
+    """Обработчик каждого события не просто зарегистрирован — он делает то, ради чего заведён.
+
+    Прежняя проверка искала подстроку ``addEventListener('<событие>')`` и не различала, что
+    внутри: пустой обработчик прошёл бы её.
+    """
+    js = _connection_script()
+    body = _handler_body(js, event)
+    assert body.strip(), f"обработчик {event} пуст"
+    for call in expected:
+        assert call in body, f"обработчик {event} не вызывает {call}: {body.strip()[:300]}"
+
+
+def test_connection_lost_shows_notice_and_schedules_retry() -> None:
+    """Сбой связи всегда показывает плашку и заводит автоповтор (решение о нём — внутри retry)."""
+    js = _connection_script()
+    body = _function_body(js, "connectionLost")
+    for call in ("remember", "showNotice", "retryHint", "scheduleRetry"):
+        assert call in body, f"connectionLost не вызывает {call}"
+
+
+def test_server_error_resumes_only_on_5xx() -> None:
+    """4xx сам не пройдёт — автоповтор заводится только на 5xx."""
+    js = _connection_script()
+    body = _handler_body(js, "htmx:responseError")
+    assert re.search(r"status\s*>=\s*500", body), "нет условия на 5xx"
+    at = body.find("scheduleRetry")
+    assert at != -1
+    assert re.search(r"status\s*>=\s*500", body[:at]), "автоповтор заводится независимо от кода"
