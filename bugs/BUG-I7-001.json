@@ -16,7 +16,34 @@
   "evidence": "tag_mcp/httpauth.py:118-125 — `except TagError as exc: logger.warning(\"токен %s отклонён Mattermost: %s\", …); return None`. Перехватывается ВЕСЬ TagError, включая UpstreamError (tag_mcp/errors.py:114, code=\"upstream_unavailable\"), а не только AuthError (errors.py:75). Возврат None FastMCP превращает в 401 invalid_token. Живое наблюдение 2026-08-26: в 14:58:07 стартовый пинг ТЭГ-MCP дал 200 OK; в 14:58:42 при пропавшем VPN — «Auth error returned: invalid_token (status=401)» (middleware.py:175); в 14:59:00 сторож подтвердил причину: «[upstream_unavailable] не удалось достучаться до https://tag-test.corp.tander.ru: [Errno 8] nodename nor servname provided». Аудит Hub в 11:58:43 UTC: connection_needs_reauth, details.reason = «Токен целевой системы больше не действует — подключитесь заново, указав новый токен». В БД connections.status стал needs_reauth при живом upstream_tokens.token_origin='issued'.",
   "suspected_area": "tag_mcp/httpauth.py::PassthroughVerifier.verify_token — сузить перехват до AuthError (и явных кодов отказа), а недоступность пробрасывать, чтобы наружу шёл код недоступности, а не invalid_token. Смежно: политика Hub «401 от upstream → needs_reauth» (src/hub/proxy.py, mark_needs_reauth) верна для настоящего отказа авторизации, но опирается на честность кода от MCP-сервера. Комментарий «отказы не кэшируются вовсе» усугубляет: во время недоступности каждый вызов заново пробует и заново «отклоняет».",
   "iteration": 7,
-  "status": "open",
+  "status": "fixed",
   "found_by": "оркестратор, живая проверка стенда 2026-08-26 после обрыва VPN",
-  "notes": "Бьёт ровно по цели ревизии 4 («чтобы ТЭГ не отваливался»): постоянный токен решает проблему выхода из мессенджера, но обрыв сети, сон ноутбука или перезапуск целевой системы всё равно рвут подключение и заставляют вводить токен заново. Побочный эффект — лишний выпуск личных токенов в учётной записи пользователя при каждом таком переподключении (уборка сироты R-U19 их отзывает, но выпуск всё равно происходит). Проверено, что после восстановления сети переподключение проходит штатно: старый токен отозван (upstream_token_revoked, reason=reconnect, outcome=ok), на стороне ТЭГ остаётся ровно один наш токен."
+  "notes": "Бьёт ровно по цели ревизии 4 («чтобы ТЭГ не отваливался»): постоянный токен решает проблему выхода из мессенджера, но обрыв сети, сон ноутбука или перезапуск целевой системы всё равно рвут подключение и заставляют вводить токен заново. Побочный эффект — лишний выпуск личных токенов в учётной записи пользователя при каждом таком переподключении (уборка сироты R-U19 их отзывает, но выпуск всё равно происходит). Проверено, что после восстановления сети переподключение проходит штатно: старый токен отозван (upstream_token_revoked, reason=reconnect, outcome=ok), на стороне ТЭГ остаётся ровно один наш токен.",
+  "fixed_in": {
+    "repo": "magnit-tag-mcp",
+    "branch": "feature/oauth-mode",
+    "commits": [
+      {
+        "hash": "82fd235",
+        "message": "fix(httpauth): BUG-I7-001 — недоступность ТЭГ больше не читается как отклонённый токен",
+        "files": [
+          "tag_mcp/httpauth.py",
+          "tests/auth/test_http_auth.py"
+        ]
+      },
+      {
+        "hash": "eeab4d5",
+        "message": "fix(oauth): BUG-I7-001 — тот же ответ о недоступности в режиме входа через ТЭГ",
+        "files": [
+          "tag_mcp/oauth.py",
+          "tests/oauth/test_edge_branches.py",
+          "tests/oauth/test_mcp_access.py",
+          "docs/HTTP_AUTH.md"
+        ]
+      }
+    ],
+    "report": "reports/run-i7-bug-i7-001.md"
+  },
+  "fix": "Отказ и недоступность разведены по признаку `retryable` из таксономии errors.py: отказ (auth_failed, auth_expired, permission_denied, …) по-прежнему None → 401 invalid_token; недоступность (upstream_unavailable, rate_limited) выходит наружу как AuthUnavailableError (наследник starlette AuthenticationError) — подменённый on_error у AuthenticationMiddleware отвечает 503 upstream_unavailable (или 429 rate_limited) с исходной причиной в теле. Кэш: проверенный токен переживает обрыв связи, пока не истёк MM_HTTP_AUTH_CACHE_TTL (в Mattermost при этом не ходят), за TTL кэш не растягивается — иначе отозванный токен жил бы столько, сколько молчит ТЭГ; отказ запись кэша удаляет. Режим oauth: причина передаётся через ContextVar, потому что OAuthProxy.load_access_token глушит любое исключение верификатора; событие лога oauth.unavailable вместо oauth.reject; _extract_upstream_claims ловит недоступность и не роняет обмен кода. Режим token изменений не потребовал: общий секрет сверяется в процессе.",
+  "verification": "1066 passed, 69 skipped (--deselect tests/resilience/test_supervisor.py::TestLoggingAndEntry::test_module_is_executable); tag_mcp/httpauth.py и tag_mcp/oauth.py — 100 % покрытия; ruff и mypy чисты. Новые тесты: tests/auth/test_http_auth.py (TestUpstreamUnavailable, TestUnavailableResponse, сквозной test_outage_answers_unavailability_and_not_401), tests/oauth/test_mcp_access.py::test_unavailable_mattermost_is_not_a_rejected_token, tests/oauth/test_edge_branches.py::test_upstream_claims_are_absent_when_the_token_is_rejected. Docker-ярус не гонялся: стенда ТЭГ нет (colima запущена, контейнера Mattermost нет)."
 }
