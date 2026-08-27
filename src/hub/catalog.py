@@ -43,6 +43,11 @@ DEFAULT_OAUTH_METHOD_TITLE = "Корпоративная авторизация"
 # Потолок длины пользовательского токена (R-U2, решение 63).
 TOKEN_MAX_LENGTH = 4096
 
+# R-C7: сквозной узел карточки — Hub его не читает, не подставляет и не раскрывает.
+PASSTHROUGH_GROUPS_FIELD = "permission_groups"
+# R-C7.5 (решение 106): каталог словарей разрешений рядом с файлом каталога (HUB_CATALOG_PATH).
+PERMISSIONS_DIR_NAME = "permissions"
+
 
 class EnvRef:
     """Ссылка на секрет в переменной окружения. Значение читается лениво; наружу не сериализуется."""
@@ -327,6 +332,31 @@ class ServerModel(_Strict):
     credential_headers: dict[str, HeaderValue] | None = None
     static_headers: dict[str, HeaderValue] | None = None
     permission_model: PermissionModel
+    # R-C7.1 (решения 104, 105): сквозные поля карточки. Hub — транспорт: внутрь
+    # ``permission_groups`` схема не заглядывает (проверено только «это mapping»), у ``type`` нет
+    # закрытого набора значений. Ни одно правило Hub эти поля не читает (R-C7.4).
+    permission_groups: Any = None
+    type: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_passthrough_raw(cls, data: Any) -> Any:
+        """R-C7.1: ``permission_groups`` — mapping, ``type`` — непустая строка; больше ничего.
+
+        Проверка идёт по сырому узлу: явный ``null`` — это заданное значение неверного типа, а не
+        отсутствие поля, и отличить одно от другого после разбора уже нельзя.
+        """
+        if not isinstance(data, dict):
+            return data
+        if "permission_groups" in data and not isinstance(data["permission_groups"], dict):
+            raise _PathError(("permission_groups",), "ожидается объект")
+        if "type" in data:
+            value = data["type"]
+            if not isinstance(value, str):
+                raise _PathError(("type",), "ожидается строка")
+            if not value:
+                raise _PathError(("type",), "значение не может быть пустым")
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -598,6 +628,12 @@ class ServerEntry:
         # R-C6/R-U8 (решение 69): ключ auth_methods есть только у серверов, объявивших его в каталоге.
         if m.auth_methods is not None:
             view["auth_methods"] = self.public_auth_methods()
+        # R-C7.2, R-C7.3: сквозные поля отдаются дословно и только у объявивших их серверов —
+        # ключи, порядок, вложенность и типы значений те же, что в каталоге.
+        if m.permission_groups is not None:
+            view["permission_groups"] = copy.deepcopy(m.permission_groups)
+        if m.type is not None:
+            view["type"] = m.type
         return view
 
 
@@ -677,6 +713,13 @@ def _resolve_refs(servers: list[Any]) -> list[Any]:
                         "(ожидается '#/servers/<alias>/<поле>')"
                     )
                 alias, fld = m.group(1), m.group(2)
+                if fld == PASSTHROUGH_GROUPS_FIELD:
+                    # R-C7.7: сквозной узел не раскрывается и ссылкой извне (решение 108).
+                    raise CatalogError(
+                        f"{path}: ссылка {ref!r} на сквозное поле "
+                        f"'{PASSTHROUGH_GROUPS_FIELD}' недопустима "
+                        "(узел уходит клиенту дословно и не раскрывается)"
+                    )
                 target_server = by_alias.get(alias)
                 if target_server is None:
                     raise CatalogError(f"{path}: ссылка {ref!r} указывает на неизвестный alias '{alias}'")
@@ -698,10 +741,24 @@ def _resolve_refs(servers: list[Any]) -> list[Any]:
 
     result: list[Any] = []
     for i, raw in enumerate(servers):
-        if isinstance(raw, dict):
-            result.append({k: resolve(v, f"servers[{i}].{k}") for k, v in raw.items()})
-        else:
+        if not isinstance(raw, dict):
             result.append(raw)
+            continue
+        resolved: dict[Any, Any] = {}
+        for k, v in raw.items():
+            path = f"servers[{i}].{k}"
+            if k == PASSTHROUGH_GROUPS_FIELD:
+                # R-C7.7: $ref **на месте самого поля** — ошибка (автор имел в виду ссылку R-C3);
+                # вложенный внутрь узла $ref — это данные и уходит клиенту дословно.
+                if isinstance(v, dict) and "$ref" in v:
+                    raise CatalogError(
+                        f"{path}: ссылка $ref недопустима в этом поле "
+                        "(узел уходит клиенту дословно и не раскрывается)"
+                    )
+                resolved[k] = v
+                continue
+            resolved[k] = resolve(v, path)
+        result.append(resolved)
     return result
 
 
@@ -722,6 +779,25 @@ def _substitute_vars(value: Any, path: str, env: Mapping[str, str], missing: lis
     if isinstance(value, list):
         return [_substitute_vars(v, f"{path}[{i}]", env, missing) for i, v in enumerate(value)]
     return value
+
+
+def _substitute_server_vars(
+    raw: Any, path: str, env: Mapping[str, str], missing: list[tuple[str, str]]
+) -> Any:
+    """``${VAR}`` по карточке сервера, кроме сквозного узла ``permission_groups`` (R-C7.7).
+
+    Решение 108: узел уходит наружу дословно, поэтому подстановка в нём не выполняется — иначе
+    опечатка внутри непонятного Hub'у словаря молча пометила бы сервер ``unconfigured`` (R-C2).
+    """
+    if not isinstance(raw, dict):
+        return _substitute_vars(raw, path, env, missing)
+    out: dict[Any, Any] = {}
+    for k, v in raw.items():
+        if k == PASSTHROUGH_GROUPS_FIELD:
+            out[k] = v
+            continue
+        out[k] = _substitute_vars(v, f"{path}.{k}", env, missing)
+    return out
 
 
 def _env_ref_allowed(rel: tuple[Any, ...]) -> bool:
@@ -907,7 +983,7 @@ def parse_catalog(document: Any, env: Mapping[str, str] | None = None, *, source
     seen_alias: dict[str, int] = {}
     for i, raw in enumerate(servers_resolved):
         missing: list[tuple[str, str]] = []
-        substituted = _substitute_vars(raw, f"servers[{i}]", environ, missing)
+        substituted = _substitute_server_vars(raw, f"servers[{i}]", environ, missing)
         missing = _drop_unavailable_method_vars(missing, raw, i)
         status = raw.get("status") if isinstance(raw, dict) else None
         if missing and status != "beta":
@@ -931,8 +1007,71 @@ def parse_catalog(document: Any, env: Mapping[str, str] | None = None, *, source
     return Catalog(version=version, servers=tuple(entries), defaults=defaults, source=source)
 
 
+def _load_permission_groups_file(directory: Path, alias: str) -> Any | None:
+    """Словарь разрешений сервера из ``permissions/<alias>.yaml``; ``None`` — файла нет (R-C7.5).
+
+    Имя ищется точно: ``<alias>.yml`` и любые другие имена этим файлом не считаются. Файл, который
+    существует, но непригоден, — ошибка загрузки каталога, а не молчаливый пропуск (R-C7.6):
+    он явно адресован этому серверу, и тихий пропуск отдал бы клиентам карточку без словаря.
+    """
+    file = directory / f"{alias}.yaml"
+    rel = f"{PERMISSIONS_DIR_NAME}/{alias}.yaml"
+    if not file.is_file():
+        return None
+    try:
+        text = file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CatalogError(f"{rel}: не удалось прочитать файл: {exc}") from exc
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise CatalogError(f"{rel}: ошибка разбора YAML: {exc}") from exc
+    if document is None:
+        raise CatalogError(f"{rel}: файл пуст")
+    if not isinstance(document, dict):
+        raise CatalogError(f"{rel}: ожидается объект (словарь групп разрешений)")
+    # R-C7.7, R-K3: узел уходит наружу целиком, поэтому ссылкам на секреты в нём места нет.
+    _check_env_refs(document, (), rel)
+    return document
+
+
+def _apply_permission_files(document: Any, directory: Path) -> Any:
+    """Подставить ``permissions/<alias>.yaml`` в карточки серверов (R-C7.5).
+
+    Файл главнее карточки и берётся целиком (решение 107): поэлементного слияния нет — сливать
+    словари, устройства которых Hub не понимает, запрещено. Файл, имя которого не совпадает ни с
+    одним alias каталога, не читается вовсе и ошибкой не является.
+    """
+    if not isinstance(document, dict) or not directory.is_dir():
+        return document
+    servers = document.get("servers")
+    if not isinstance(servers, list):
+        return document
+    patched: list[Any] = []
+    replaced = False
+    for raw in servers:
+        alias = raw.get("alias") if isinstance(raw, dict) else None
+        # Alias ещё не проверен схемой: читаем файл только по имени допустимого формата.
+        groups = (
+            _load_permission_groups_file(directory, alias)
+            if isinstance(alias, str) and ALIAS_RE.match(alias)
+            else None
+        )
+        if groups is None:
+            patched.append(raw)
+            continue
+        patched.append({**raw, PASSTHROUGH_GROUPS_FIELD: groups})
+        replaced = True
+    return {**document, "servers": patched} if replaced else document
+
+
 def load_catalog(path: str | os.PathLike[str], env: Mapping[str, str] | None = None) -> Catalog:
-    """Прочитать и разобрать файл каталога. Любая ошибка → ``CatalogError``."""
+    """Прочитать и разобрать файл каталога. Любая ошибка → ``CatalogError``.
+
+    Здесь же (и только здесь — R-C7.5) подставляются словари разрешений из соседнего каталога
+    ``permissions``: когда каталог разбирается не из файла, соседнего каталога не существует по
+    определению, поэтому ``parse_catalog`` о файлах ничего не знает.
+    """
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
@@ -946,6 +1085,7 @@ def load_catalog(path: str | os.PathLike[str], env: Mapping[str, str] | None = N
         raise CatalogError(f"ошибка разбора YAML в {p}: {exc}") from exc
     if document is None:
         raise CatalogError(f"файл каталога пуст: {p}")
+    document = _apply_permission_files(document, p.parent / PERMISSIONS_DIR_NAME)
     return parse_catalog(document, env, source=str(p))
 
 
