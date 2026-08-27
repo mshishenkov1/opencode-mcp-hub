@@ -1,0 +1,224 @@
+{
+  "review": "review-i4-rev112-1",
+  "iteration": "I-4 форк, ревизия 1.12 «выход из приложения» + микроревизия 1.12.1 + правки живой витрины",
+  "cycle": 1,
+  "kind": "full_review",
+  "date": "2026-08-27",
+  "reviewer": "REVIEW-AGENT",
+  "verdict": "request_changes",
+
+  "scope": {
+    "repo": "~/Documents/opencode, ветка corp/i4-sso-connectors (только локальные коммиты)",
+    "base": "574aa10d4e",
+    "head": "ecb1eeb16a",
+    "diff": "git diff 574aa10d4e..HEAD — 44 файла, +4356/-203",
+    "spec": ["5ecd51f3e9", "5fe60e0359", "a56780fc7a", "98cc2658e3"],
+    "rules": ["S-A14", "S-A15", "S-A16", "S-A17", "S-A8", "S-A1", "S-C11", "S-C7", "S-C9", "S-T11", "S-I1", "S-D6", "S-V11", "S-V12", "S-D10", "S-T10", "S-Q3", "S-Q9", "S-Q11", "D-43", "D-48…D-53"],
+    "criteria": "AC-279 … AC-301 (новые), AC-89/AC-184/AC-218/AC-221/AC-222/AC-225/AC-228 (переформулированы)",
+    "implementation": ["95bd5ab332", "b8183cc2d7", "2adc7a6edf", "c1e8815149", "db0fc0d189", "eb2b985e75", "4590b8bafa", "73141288b5", "14d76bffef"],
+    "tests": ["7a2b61bfe4", "79b38560e5", "a717bc1d51", "bbe7bb883e", "96cf88aca6", "ecb1eeb16a"],
+    "disputes": ["78c55c4783"],
+    "out_of_scope": "13909a192d — WIP спеки ревизии 1.13 («подключение без Hub», ПРЕРВАНО на S-V24…S-V27). Проверено отдельно: коммит трогает только corp/docs/spec.md, объявляет «не изменено этой ревизией: вход и выход (S-A*)», ничего в 1.12 не ломает. Единственное наблюдение — заголовок spec.md поднят до «Ревизия 1.13», тогда как acceptance-criteria.yaml остался на version: \"1.12.1\"; тестов на согласование этих двух значений в репозитории нет, поэтому это не finding, а признак незакрытой 1.13."
+  },
+
+  "runs": {
+    "packages/opencode/src/corp/": {"command": "bun test src/corp/ (cwd packages/opencode)", "result": "499 pass, 0 fail, 2561 expect, 18 файлов, 54.07s", "matches_reference": true},
+    "packages/app/src/corp + src/i18n": {"command": "bun test --preload ./happydom.ts ./src/corp ./src/i18n (cwd packages/app)", "result": "158 pass, 0 fail, 1713 expect, 9 файлов", "matches_reference": true},
+    "packages/tui/src/corp/": {"command": "bun test src/corp/ (cwd packages/tui)", "result": "95 pass, 0 fail, 1083 expect, 7 файлов", "matches_reference": true},
+    "corp/patches.test.ts": {"command": "bun test patches.test.ts (cwd corp)", "result": "12 pass, 0 fail, 546 expect", "matches_reference": true},
+    "packages/app/test-layout (Playwright)": {"command": "bun x playwright test --config test-layout/playwright.config.ts (cwd packages/app)", "result": "20 passed, 47.4s", "matches_reference": true},
+    "note": "Все пять наборов совпали с ориентирами задания до теста. Расхождений нет."
+  },
+
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "major",
+      "where": "packages/app/src/components/corp/dialog-connectors.tsx:~365 (слот action окна CorpDialog)",
+      "what": "Кнопка «Войти» показывается по признаку needsLogin() (catalog.data?.hub_error === \"unauthorized\"), а не по отсутствию ключа. S-D6 «Ряд заголовка» (ревизия 1.12) требует «ОДНУ из взаимоисключающих кнопок «Войти»/«Выйти» — ПО НАЛИЧИЮ КЛЮЧА (S-A16)»; S-A16 — «Войти» показывается, когда ключа нет»; AC-287 — «без ключа — кнопка «Войти»». Взаимоисключаемость соблюдена (Show/fallback), а условие показа «Войти» — нет. Следствие наблюдаемое и лежит ровно в сценарии S-A16 «После выхода приложение предлагает вход»: в сборке со статическим каталогом (S-C10) или при недоступном Hub каталог отдаётся без hub_error, needsLogin() ложно, signedIn() ложно — в ряду заголовка нет НИ ОДНОЙ из двух кнопок, и вернуться в аккаунт из витрины нечем. TUI ту же строку ревизией 1.12 исправил (`hidden: authenticated() !== false`, dialog-connectors.tsx), Desktop — нет: асимметрия оболочек указывает на пропуск, а не на замысел.",
+      "must_fix": true,
+      "assignee": "dev",
+      "suggested_fix": "Условие fallback-ветки — отсутствие ключа (status.data?.authenticated === false, тот же признак, что у signedIn()), а не hub_error каталога. Пустое состояние S-V12 п.4 «Требуется вход» при этом не трогается."
+    },
+    {
+      "id": "F-2",
+      "severity": "major",
+      "where": "packages/app/src/corp/logout-view.test.ts::«AC-289: успех целиком — success, оба текста разные для not_revoked и unavailable»; packages/tui/src/corp/logout-command.test.ts::«AC-296: исход — как у Desktop…»",
+      "what": "Запрет сливать hub:\"not_revoked\" с hub:\"unavailable\" — единственное утверждение, ради которого микроревизия 1.12.1 заводила четвёртый исход, — на стороне оболочек НЕ проверен. Оба теста сравнивают только ИТОГОВУЮ СТРОКУ (title/message), а она остаётся разной и после слияния ветвей, потому что различается подставленная причина. Доказано инъекцией: ветка `unavailable` направлена в ту же ветку, что `not_revoked` (то есть пользователю показывается «ключ на сервере НЕ отозван, причина …» вместо «связаться с сервером не удалось») — app 157 pass/0 fail, TUI 95 pass/0 fail. Ни один тест не покраснел. Роутовая половина запрета покрыта хорошо (login.test.ts, logout-route.test.ts), UI-половина — нет.",
+      "must_fix": true,
+      "assignee": "test",
+      "suggested_fix": "Сравнивать не итоговый текст, а КЛЮЧ словаря/ветку: для hub:\"unavailable\" ожидать corp.logout.revokeFailed + corp.logout.reason.unreachable, для hub:\"not_revoked\" — corp.logout.notRevoked + ключ по revoke_error; проверять, что ключ сообщения у двух исходов разный, а не только результат подстановки."
+    },
+    {
+      "id": "F-3",
+      "severity": "major",
+      "where": "packages/app/src/context/corp.ts::logoutReasonKey; packages/tui/src/corp/i18n.ts::revokeReasonText; packages/opencode/src/cli/cmd/corp.ts::revokeReasonText",
+      "what": "Правило S-I1 «Неизвестный код revoke_error — не повод показать код машины человеку: показывается corp.logout.reason.invalidResponse, а сам код уходит в лог» и соответствующий пункт AC-300 не проверены НИ В ОДНОЙ из трёх оболочек. Обе UI-проверки подменяют функцию отображения своей заглушкой (`logoutReasonKey` в logout-view.test.ts, `revokeReasonText` в logout-command.test.ts), а cli.test.ts гоняет только код not_permitted. Доказано инъекцией: все три функции изменены так, чтобы при неизвестном коде печатать сам код (ровно то, что правило запрещает) — opencode 499 pass, TUI 95 pass, app 158 pass, 0 fail. Дословный перенос кода до роута и до лога покрыт (login.test.ts, «unheard_of_code»); отображение — нет.",
+      "must_fix": true,
+      "assignee": "test",
+      "suggested_fix": "Тест на сами функции (они экспортированы во всех трёх местах): три известных кода → три разных ключа набора; неизвестный код и undefined → corp.logout.reason.invalidResponse; ни при каком входе результат не содержит самого кода."
+    },
+    {
+      "id": "F-4",
+      "severity": "major",
+      "where": "packages/opencode/src/corp/login.test.ts::«AC-291: отменённый и неудавшийся вход не вызывают auth-store вовсе, прежняя запись цела» и ::«AC-291: успешный перелогин — ровно одна запись, метаданные перезаписаны целиком»",
+      "what": "Два из трёх тестов AC-291 не способны упасть. Первый создаёт свежий mockAuth и тут же утверждает, что calls пуст, а запись на месте, — ни одна строка продуктового кода в нём не исполняется, никакой вход не проигрывается; комментарий это фактически признаёт («симуляция «ничего не произошло»»). Второй сам вызывает auth.set(...) и затем проверяет мок на значение, которое сам туда положил (newMetadata фигурирует и в set, и в ожидании). Информацию несёт только третий, сканирующий исходник CorpLoginCommand на отсутствие CorpLogout/.remove(. S-A17 («клиент не вызывает выход перед входом и не удаляет ключ до успеха») наблюдаемо не проверен: сценарии «вход отменён» и «вход завершился ошибкой» не проиграны.",
+      "must_fix": true,
+      "assignee": "test",
+      "suggested_fix": "Проиграть обе неудачные ветви входа фактически — на том же mockAuth и подменённом fetch, что в AC-115/AC-279 (отмена сессии и status:\"error\" от Hub), и утверждать отсутствие auth.remove/auth.set в записанном calls. Успешный перелогин проигрывать через продуктовый путь записи ключа, а не прямым auth.set из теста."
+    },
+    {
+      "id": "F-5",
+      "severity": "minor",
+      "where": "packages/app/src/corp/connectors-view.test.ts::«AC-218: «Подключённые» — две строки, «Все» — пять, третьей вкладки не существует»",
+      "what": "Сторож набора вкладок — expect(source).toContain('export type ConnectorsTab = \"all\" | \"connected\"'). Дописанный третий член типа (… | \"not_connected\") подстроку не рушит, и утверждение остаётся зелёным. Доказано инъекцией: возврат третьей вкладки в app поймал только AC-225 (not.toContain на TabsV2.Trigger), а AC-218 — нет. S-Q9 п. (е) в редакции 98cc2658e3 требует брать набор вкладок «из того же перечислимого типа, которым он объявлен в коде, поэтому появление третьей валит тест»; TUI это делает верно (expect(TABS).toEqual([\"all\",\"connected\"])), app — нет.",
+      "must_fix": false,
+      "assignee": "test",
+      "suggested_fix": "Сверять полный список value у TabsV2.Trigger (регэксп, как в сторожe test-layout) либо полное объявление типа с закрывающим переводом строки."
+    },
+    {
+      "id": "F-6",
+      "severity": "minor",
+      "where": "packages/app/src/corp/connectors-view.test.ts:~359 и packages/tui/src/corp/connectors-view.test.ts:~70 (комментарии над тестами AC-218)",
+      "what": "Комментарии устарели после резолюции DISPUTE-I12-04-01 (98cc2658e3): они утверждают, что «тело самого критерия AC-218 этой правки не получило и до сих пор перечисляет вкладку «Неподключённые»», и ссылаются на corp/disputes/dispute-AC218-body-not-updated.json — файла с таким именем в репозитории нет (реальный — dispute-I12-04-ac218-body-not-updated.json), а тело AC-218 приведено к двум вкладкам. Читатель отправляется по несуществующему пути за расхождением, которого больше нет.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "id": "F-7",
+      "severity": "minor",
+      "where": "packages/tui/src/config/keybind.ts:220",
+      "what": "Последний в форке текст, всё ещё описывающий трёхвкладочный цикл: «corp: вкладки фильтра витрины (S-V11, S-T10) — циклом «Все → Подключённые → Неподключённые»». Сам keybind верен, цикл в коде двухвкладочный (nextTab), правило S-T10 приведено к двум вкладкам той же резолюцией — не выправлен только этот комментарий.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "id": "F-8",
+      "severity": "minor",
+      "where": "packages/tui/src/corp/logout-command.test.ts::«AC-296: команда зарегистрирована со слэшем logout, отдельной горячей клавиши нет»",
+      "what": "Утверждение об отсутствии горячей клавиши проверяется там, где её и не могло быть: в блоке команды appCommands и в списке appBindingCommands (app.tsx). Фактическая привязка живёт в packages/tui/src/config/keybind.ts («dialog.corp.logout»: keybind(\"l\")) и подключена органом витрины в dialog-connectors.tsx. Тест остался бы зелёным, если бы выходу дали ДЕЙСТВИТЕЛЬНО отдельную клавишу. Сам код правилу не противоречит: «l» — та же клавиша и та же позиция, что у «Войти» (S-A16 «одна позиция с двумя взаимоисключающими состояниями»), второго ускорителя нет. Это дыра в покрытии, а не дефект кода.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "id": "F-9",
+      "severity": "minor",
+      "where": "packages/tui/src/config/keybind.ts (\"dialog.corp.provider_enable\": keybind(\"e\"))",
+      "what": "Действию «Включить» заведён собственный ускоритель. Ни S-C11 п.4, ни S-T11 клавиши для него не называют — там сказано только «та же строка предупреждения с действием «Включить»». Поведение, которого нет в спеке; безвредное (действие спрашивает подтверждение, S-C11 п.5), но не описанное. Либо назвать его в S-T11, либо снять.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "id": "F-10",
+      "severity": "minor",
+      "where": "packages/app/test-layout/README.md, раздел «Как гонять локально»",
+      "what": "Инструкция «bun --cwd packages/app run test:layout» неисполнима: скрипта test:layout в packages/app/package.json нет. Рабочая команда — та, что стоит в .github/workflows/corp-ci.yml:72 («bun --cwd packages/app x playwright test --config test-layout/playwright.config.ts»). Та же строка продублирована в шапке connectors-layout.layout.test.ts.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+
+  "old_contract_traces": {
+    "verdict": "следов не осталось",
+    "checked": "сплошной поиск по corp/ и packages/ подстрок «cli/logout», «/cli/logout», «cli.logout», «POST {hub}/cli»",
+    "code": "packages/opencode/src/corp/hub.ts:189 — raw({ method: \"DELETE\", path: \"/api/me/key\", successStatuses: [401, 403] }); тела у запроса нет, аутентификация только Bearer этого ключа, 200 разбирается схемой KeyRevoke (revoked + revoke_error), 401/403 — успех без тела, 5xx/таймаут/сеть/нечитаемое тело — hub_unavailable/hub_invalid_response. Соответствует §3.1 и R-L11 дословно.",
+    "tests": "login.test.ts и cli.test.ts проверяют путь и метод фактически (перехваченный fetch и мини-Hub, отвечающий только на DELETE /api/me/key; всё прочее — 404). Ни один тест не знает старого пути.",
+    "sdk_and_openapi": "packages/sdk/openapi.json, sdk.gen.ts, types.gen.ts — только /corp/logout и /corp/provider/enable; CorpLogoutHubOutcome = revoked|not_revoked|unavailable|skipped, revoke_error?: string; методы плоские (corp.logout(), corp.providerEnable()), body?: never у обоих.",
+    "texts_and_dictionaries": "ни в одном из трёх словарей и ни в одном показанном тексте старого пути нет.",
+    "remaining_mentions": "исторические и датированные: corp/disputes/dispute-I12-01-logout-endpoint.json (сам диспут), блоки «Микроревизия 1.12.1» в spec.md и acceptance-criteria.yaml (объясняют, что было заменено), spec.md §3.1 (строка «был POST /cli/logout → стал DELETE /api/me/key»), комментарий login.test.ts:270 («не POST /cli/logout»). Все — про прошлое, ни одно не требует старого контракта."
+  },
+
+  "errata_98cc2658e3_assessment": {
+    "verdict": "errata корректна; подгонки текста под тесты нет, ослабления критериев нет",
+    "ac218": "Новое тело СТРОЖЕ прежнего. Сохранены дословно обе проверки, которые revision-note обещала сохранить («умолчание при открытии — Все», «выбор вкладки не сохраняется между запусками»). Содержательное утверждение прежнего трёхшагового сценария (needs_auth, unavailable и not_connected — не подключённые) не потеряно: оно перенесено на вкладку «Подключённые» в явной форме («а needs_auth, unavailable и not_connected в неё не попадают ни по одному»), где раньше выражалось косвенно — через состав третьей вкладки. Добавлены две проверки, которых не было: «доступных вкладок РОВНО ДВЕ» и «третьей нет ни в разметке, ни в перечислимом типе, и выбрать её нечем». Проверок стало больше, а не меньше.",
+    "ac228": "Замена вкладки в given «Неподключённые» → «Подключённые» вынуждена (первой не существует) и нейтральна: сценарию нужна вкладка НЕ по умолчанию, и «Подключённые» ею остаётся. Все три проверки возврата (вкладка, строка поиска, позиция прокрутки) сохранены дословно, добавлено уточнение «не сбрасывается в умолчание «Все»».",
+    "s_q9_e": "Усилен, а не ослаблен: к «две вкладки» добавлено требование брать набор вкладок из перечислимого типа, объявленного в коде, «чтобы возвращение третьей роняло тест». Прежняя редакция требовала трёх вкладок и провалилась бы на верной реализации — исправление обязательное.",
+    "s_t10": "Цикл клавиши f приведён к «Все → Подключённые → Все»; клавиша, её роль и требование полноты перечня не тронуты.",
+    "s_v12_1_11_paragraph": "Утверждение редакции 1.11 «число пустых состояний остаётся шесть» не стёрто, а помечено датой и отменено ссылкой на ревизию 1.12 — правильный приём для документа, который обязан хранить историю.",
+    "direction_check": "Проверено обратное направление, о котором и был вопрос: правки errata идут ОТ решения заказчика (две вкладки — S-V11, D-53, AC-221, AC-225: четыре независимых места ревизии 1.12) К тексту, а не от тестов к тексту. Тесты, приведённые к двум вкладкам, легли раньше (79b38560e5, 7a2b61bfe4) — но ни одно из четырёх мест, задающих требование, ими не создано и не изменено. Место, где errata подстроилась бы под тест в ущерб требованию, не найдено ни одно.",
+    "residue": "Единственный остаток — устаревшие комментарии в двух тестовых файлах, всё ещё утверждающие, что тело AC-218 не выправлено (см. F-6)."
+  },
+
+  "injections": [
+    {"n": 1, "target": "packages/opencode/src/corp/logout.ts", "injection": "hub = \"not_revoked\" → \"unavailable\" (слияние двух исходов в модуле выхода)", "caught": true, "result": "opencode: 496 pass, 3 fail (login.test.ts AC-300 ×2, cli.test.ts AC-284)"},
+    {"n": 2, "target": "packages/opencode/src/corp/logout.ts", "injection": "Auth.remove перенесён ПЕРЕД вызовом Hub (обратный порядок, S-A14 п.3)", "caught": true, "result": "opencode: 497 pass, 2 fail (AC-279 порядок вызовов и 401/403)"},
+    {"n": 3, "target": "packages/opencode/src/corp/logout.ts", "injection": "при hub:\"unavailable\" локальное удаление отменяется (отказ Hub откатывает выход, D-49)", "caught": true, "result": "opencode: 496 pass, 3 fail (AC-280, AC-284 «сервер не ответил»)"},
+    {"n": 4, "target": "packages/opencode/src/cli/cmd/corp.ts", "injection": "hub:\"unavailable\" даёт код выхода 1 (недоступность Hub влияет на код выхода, S-A15/D-49)", "caught": true, "result": "cli.test.ts: 29 pass, 1 fail (AC-284)"},
+    {"n": 5, "target": "app dialog-connectors.tsx + tui dialog-connectors.tsx", "injection": "возврат третьей вкладки not_connected (тип, TAB_KEY, TabsV2.Trigger, TABS)", "caught": true, "result": "app: 1 fail (AC-225); TUI: 2 fail (AC-218 цикл f, AC-217/218); Playwright: 1 failed (сторож фикстуры). ЧАСТИЧНО: тест AC-218 в app не покраснел — см. F-5"},
+    {"n": 6, "target": "packages/tui/src/component/corp/dialog-corp-logout.tsx", "injection": "исход not_revoked показан variant \"error\" вместо \"warning\" (отказ как ошибка, S-A16)", "caught": true, "result": "TUI: 94 pass, 1 fail (AC-296)"},
+    {"n": 7, "target": "packages/app/src/context/corp.ts", "injection": "ветка unavailable слита с not_revoked в UI Desktop (одно сообщение на два исхода)", "caught": false, "result": "app: 157 pass, 0 fail — НЕ ПОЙМАНО, см. F-2"},
+    {"n": 8, "target": "packages/tui/src/component/corp/dialog-corp-logout.tsx", "injection": "то же слияние в TUI", "caught": false, "result": "TUI: 95 pass, 0 fail — НЕ ПОЙМАНО, см. F-2"},
+    {"n": 9, "target": "packages/opencode/src/corp/config.ts", "injection": "enableProviderPatch сортирует остаток массива (порядок disabled_providers не сохраняется, S-C11 п.4)", "caught": true, "result": "logout-route.test.ts: 15 pass, 2 fail (AC-293 ×2)"},
+    {"n": 10, "target": "packages/app/test-layout/fixture/shell.tsx", "injection": "фикстура возвращает третью вкладку (расхождение со стороны фикстуры)", "caught": true, "result": "Playwright: 1 failed — «набор вкладок фикстуры разошёлся с исходником (TabsV2.Trigger value)». Сторож ловит расхождение с ОБЕИХ сторон (см. также инъекцию 5)"},
+    {"n": 11, "target": "app context/corp.ts + tui corp/i18n.ts + cli/cmd/corp.ts", "injection": "неизвестный код revoke_error показывается пользователю как есть (S-I1 запрещает)", "caught": false, "result": "opencode 499 pass, TUI 95 pass, app 158 pass, 0 fail — НЕ ПОЙМАНО НИГДЕ, см. F-3"},
+    {"n": 12, "target": "packages/app/src/context/corp.ts", "injection": "исход not_revoked показан variant \"error\" (отказ как ошибка, Desktop)", "caught": true, "result": "app: 156 pass, 1 fail (AC-289)"}
+  ],
+  "injections_summary": "12 инъекций, поймано 9, не поймано 3 (№7, №8, №11) — все три лежат в текстовой половине запрета «сливать not_revoked с unavailable нельзя» и в закрытом наборе причин. Все исходники возвращены через git checkout --; git status --short пуст.",
+
+  "accidentally_passing_tests_found": [
+    {
+      "where": "packages/opencode/src/corp/login.test.ts::«AC-291: отменённый и неудавшийся вход…»",
+      "why": "не исполняет ни строки продуктового кода: проверяет свежесозданный мок на пустоту",
+      "severity": "major (F-4)"
+    },
+    {
+      "where": "packages/opencode/src/corp/login.test.ts::«AC-291: успешный перелогин…»",
+      "why": "проверяет мок на значение, которое сам в него положил (auth.set в теле теста, newMetadata и в set, и в ожидании)",
+      "severity": "major (F-4)"
+    },
+    {
+      "where": "packages/app/src/corp/logout-view.test.ts::AC-289 и packages/tui/src/corp/logout-command.test.ts::AC-296",
+      "why": "проходят «случайно»: различие двух исходов подтверждается только тем, что различается подставленная причина; при слиянии ветвей тексты всё равно не совпадают — и тест не краснеет",
+      "severity": "major (F-2)"
+    },
+    {
+      "where": "packages/app/src/corp/connectors-view.test.ts::AC-218",
+      "why": "toContain на объявлении типа: дописанный третий член подстроку не рушит",
+      "severity": "minor (F-5)"
+    }
+  ],
+  "accidentally_passing_tests_already_fixed_by_iteration": [
+    "dictionary.test.ts::AC-233 «три подписи вкладок» — Set со снятым ключом добирал размер через undefined; исправлено на две вкладки, а тест пяти пустых состояний получил filter(Boolean) перед подсчётом (79b38560e5, ecb1eeb16a)",
+    "tui connectors-view.test.ts::AC-218 — литеральный массив вкладок заменён на импортированный TABS, набор берётся из кода (ecb1eeb16a)",
+    "test-layout: набор из 21 зелёного сценария мерил геометрию трёхвкладочной двустрочной разметки, которой у приложения не было; фикстура приведена к компоненту, добавлен сторож, вычисляющий ожидание из текста dialog-connectors.tsx (7a2b61bfe4)"
+  ],
+
+  "verified_ok": {
+    "S-A14": "две части и их порядок описаны ровно в одном модуле (corp/logout.ts), общем для роута и CLI; отзыв строго до удаления (проверено фактической последовательностью перехваченных вызовов, инъекция 2); удаление безусловно (инъекция 3); закрытая таблица из четырёх исходов в схеме (пятое значение схемой отвергается); not_revoked и unavailable не сливаются в модуле и в ответе (инъекция 1); идемпотентность hub:\"skipped\" без запроса; сборка без Hub — ноль запросов, hub:\"skipped\", без hub_error, в сериализации ответа слова «Hub» нет (D-43); границы п.7 — модуль структурно не импортирует ничего про коннекторы, конфиг и кэш каталога, прочие записи auth-store целы; п.8 — ни ключ, ни Bearer в ответ, события и лог не попадают, в логе — факт, исход и код.",
+    "S-A15": "построчный контракт исполняется настоящей командой против мини-Hub (не мок): пять случаев, код выхода 0 во всех, 1 — только при неудаче записи auth-store (chmod 0400), причём строка серверной части печатается по своему исходу и кода выхода не определяет; «Корпоративный режим не настроен» + код 1 при выключенных корп-функциях, ключ при этом не тронут.",
+    "S-A16": "одна позиция с двумя взаимоисключающими состояниями (Show/fallback, обе разом не рендерятся); подтверждение называет обе части и имеет отдельный ключ для сборки без Hub; три различимых исхода; второй и третий — не error (в app «warning» как варианта тоста нет вовсе, взят «default» — верное решение, ToastVariant = default|success|error|loading); после выхода показывается существующий экран входа. Условие показа «Войти» — см. F-1.",
+    "S-I1": "закрытый набор corp.logout.reason.* из четырёх причин в трёх словарях; message Hub не пересылается ни в одной ветви (в разборе KeyRevoke его нет вовсе); «Войти»/«Выйти» — разные ключи; пара *Local для сборки без Hub; паритет app/TUI проверяется отдельным тестом. Отображение неизвестного кода — см. F-3.",
+    "S-C11": "роут POST /corp/provider/enable без тела запроса; три состояния конфига; not_disabled проверяется раньше foreign_layer; правится только глобальный слой (updateGlobal, не update), решение о слое принимается по фактическому файлу (isGlobalConfigFile); снимается ровно один элемент, порядок прочих сохраняется (инъекция 9), пустой массив остаётся массивом; признак и файл считает сервер тем же CorpDiagnostics.inspect, второй копии разбора слоёв нет; предупреждение не модальное; подтверждение называет файл; после правки — инвалидация и пересчёт состояния.",
+    "S-T11": "обе оболочки зовут corp.logout() и corp.providerEnable() ровно по одному разу и сами ничего не вычисляют; ни один корп-компонент app и ни одна строка кода context/corp.ts не упоминает disabled_providers.",
+    "AC-301": "идентификатор операции плоский — corp.providerEnable; в SDK получился corp.providerEnable(), вложенного класса corp.provider.enable() нет.",
+    "витрина": "две вкладки в обеих оболочках и в фикстуре; пять пустых состояний в app, TUI, обеих матрицах no-hub-texts и в Playwright-наборе; ключи corp.connectors.tabNotConnected и corp.empty.tabNotConnected отсутствуют во всех трёх словарях и проверяются на отсутствие; обновление — IconButton с aria-label и title из corp.connectors.refresh, текстовой кнопки нет, своего SVG корп-компоненты не заводят; alias снят со строки таблицы, остался в matchesQuery и на странице коннектора.",
+    "сторож фикстуры test-layout": "ожидание вычисляется из текста dialog-connectors.tsx регэкспом при каждом прогоне, второй копии литералов нет; ловит расхождение с обеих сторон (инъекции 5 и 10); третье утверждение связывает число resetFilter-состояний EMPTY_STATES с числом филируемых вкладок исходника — тоже вычислено, не выписано. Сама фикстура приведена к компоненту (две вкладки, однострочный ряд).",
+    "реестр правок": "corp/patches.test.ts зелёный (12/12): каждый затронутый upstream-файл имеет строку в corp/patches.md — i18n/en.ts, i18n/ru.ts, sdk/openapi.json, sdk.gen.ts, types.gen.ts, tui/app.tsx, tui/config/keybind.ts. Все 17 коммитов диапазона начинаются с «corp: »."
+  },
+
+  "dispute_resolutions": [
+    {
+      "dispute": "corp/disputes/dispute-I12-01-logout-endpoint.json",
+      "resolution": "uphold_dispute (закрыт до ревью)",
+      "reasoning": "Разобран микроревизией 1.12.1 (a56780fc7a) и применён в коде 14d76bffef; status уже \"resolved\". Проверено сплошным поиском: следов POST /cli/logout в коде, тестах, текстах и SDK не осталось. Разбор к тому же нашёл расхождение серьёзнее названного (200 при неудавшемся отзыве) и завёл четвёртый исход — это усиление, а не размен."
+    },
+    {
+      "dispute": "corp/disputes/dispute-I12-02-provider-enable-route.json",
+      "resolution": "uphold_dispute (закрыт до ревью)",
+      "reasoning": "Пробел был именно в таблице S-A1: правило требовало действия, S-T11 — одного роута на обе оболочки, а роута названо не было. Микроревизия достроила таблицу; контракт роута, форма ответа и плоский идентификатор SDK совпадают с реализацией."
+    },
+    {
+      "dispute": "corp/disputes/dispute-I12-03-logout-unavailable-reason.json",
+      "resolution": "uphold_dispute",
+      "reasoning": "Противоречие спеки реально: S-A16 отсылает причину третьего исхода к S-A5, S-I1 микроревизии 1.12.1 требует брать её ТОЛЬКО из закрытого набора и называет для hub:\"unavailable\" один ключ. Редакция S-I1 позже и конкретнее, и оба критерия (AC-289, AC-300) на её стороне: пользователю адресован факт «о судьбе ключа не известно ничего», а не разница между «не ответил» и «ответил бессмыслицей». Выбор dev-агента верен, правок кода не требуется. Спеке нужна errata в S-A16 (зона spec-agent). Резолюция записана в corp/disputes/dispute-I12-03-logout-unavailable-reason.resolution.json.",
+      "code_change_required": false
+    },
+    {
+      "dispute": "corp/disputes/dispute-I12-04-ac218-body-not-updated.json",
+      "resolution": "uphold_dispute (закрыт до ревью, резолюция spec-agent проверена и подтверждена)",
+      "reasoning": "Резолюция и errata 98cc2658e3 проверены сплошным перебором: тело AC-218 приведено к объявленной редакции и усилено, AC-228/S-T10/S-Q9(е) найдены и выправлены, ни один критерий не ослаблен, подгонки текста под тесты нет. Единственный остаток — устаревшие комментарии в двух тестовых файлах (F-6)."
+    }
+  ],
+
+  "conclusion": "Ревизия 1.12 + 1.12.1 реализованы по спеке в серверной части и в CLI — там покрытие плотное и инъекции ловятся. Вердикт request_changes из-за четырёх must_fix: одного дефекта кода (F-1, видимость «Войти» в Desktop не по наличию ключа — асимметрия с уже исправленным TUI и тупик после выхода в сборке со статическим каталогом) и трёх дыр покрытия (F-2, F-3, F-4), две из которых приходятся ровно на то утверждение, ради которого микроревизия 1.12.1 и была написана. Все четыре чинятся точечно и не затрагивают ни контракт, ни спеку."
+}
