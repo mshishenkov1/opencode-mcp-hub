@@ -40,6 +40,12 @@ STATE_KEY_PENDING = "key_pending"
 KEY_KIND_PERSISTENT = "persistent"
 KEY_KIND_JWT = "jwt"
 
+# R-L12.4: закрытый набор ``outcome`` события ``key_revoked``. ``skipped`` — алиас не попал в лимит
+# R-L12.3, запрос по нему не отправлялся (решение 118); возможен только при ``reason: "relogin"``.
+REVOKE_OUTCOME_OK = "ok"
+REVOKE_OUTCOME_FAILED = "failed"
+REVOKE_OUTCOME_SKIPPED = "skipped"
+
 MSG_LOGIN_EXPIRED = "Сессия входа не найдена или истекла"
 MSG_LITELLM_UNAVAILABLE = "LiteLLM недоступен, повторите попытку позже"
 MSG_LITELLM_INVALID = "LiteLLM вернул неожиданный ответ"
@@ -388,9 +394,16 @@ class LoginService:
         Отзываются только собственные ключи Hub'а (решение 114): ``key_kind = "persistent"`` и
         алиас с ``HUB_KEY_ALIAS_PREFIX``; ключи ``jwt`` Hub не выпускал и не отзывает никогда.
         Значений прежних ключей у Hub нет (R-L5), поэтому отзыв идёт по алиасам — один запрос и не
-        более ``REVOKE_ALIAS_LIMIT`` алиасов в нём. Строки удаляются при любом исходе вместе со
-        сбросом ``keyauth:<sha256>`` (R-L12.5): прежний ключ обязан немедленно перестать открывать
-        Hub. Неудача удалённого отзыва вход не ломает (R-L12.4) — остаётся след в аудите (R-L12.6).
+        более ``REVOKE_ALIAS_LIMIT`` алиасов в нём, **самых свежих по ``created_at``**. Строки
+        удаляются при любом исходе вместе со сбросом ``keyauth:<sha256>`` (R-L12.5): прежний ключ
+        обязан немедленно перестать открывать Hub. Неудача удалённого отзыва вход не ломает
+        (R-L12.4) — остаётся след в аудите (R-L12.6).
+
+        Решение 118 (диспут ``reports/dispute-rev43-R-L12-alias-limit.md``): остатка, который
+        «уберётся следующим входом», не существует — строки удаляются все, алиасы за пределами
+        лимита Hub забывает. Поэтому по каждому такому алиасу пишется ``key_revoked`` с
+        ``outcome: "skipped"``: это единственный след, по которому администратор LiteLLM уберёт
+        наследство вручную.
         """
         if not self.revoke_previous_keys:
             return
@@ -410,7 +423,9 @@ class LoginService:
                             ApiKey.key_sha256 != keep_sha256,
                             ApiKey.key_alias.startswith(self.key_alias_prefix),
                         )
-                        .order_by(ApiKey.id.desc())
+                        # R-L12.3: отбор задаётся запросом, а не порядком вставки — двадцать самых
+                        # свежих по ``created_at`` (``id`` лишь разводит одинаковые отметки времени).
+                        .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
                     )
                 ).scalars()
             ]
@@ -418,7 +433,9 @@ class LoginService:
             # R-L12.7: после выхода отзывать нечего — запрос в LiteLLM не отправляется вовсе.
             return
 
-        aliases = list(dict.fromkeys(alias for _, _, alias in rows))[:REVOKE_ALIAS_LIMIT]
+        ordered = list(dict.fromkeys(alias for _, _, alias in rows))
+        aliases = ordered[:REVOKE_ALIAS_LIMIT]
+        skipped = ordered[REVOKE_ALIAS_LIMIT:]
         credential = self.admin_key or jwt
         status: int | None = None
         revoke_error: str | None
@@ -440,18 +457,29 @@ class LoginService:
                 "revoke_error": revoke_error,
             },
         )
+        if skipped:
+            # R-L12.4: одна запись на вход и только число — перечень алиасов остаётся в аудите.
+            logger.warning(
+                "previous_keys_revoke_skipped",
+                extra={"user_id": user_id, "skipped": len(skipped)},
+            )
 
         async with self.db.session() as session, session.begin():
             await session.execute(sa_delete(ApiKey).where(ApiKey.id.in_([row[0] for row in rows])))
         for _, key_sha256, _alias in rows:
             await invalidate_key_cache(self.kv, key_sha256)
 
-        outcome = "ok" if revoked else "failed"
-        for alias in aliases:
+        outcome = REVOKE_OUTCOME_OK if revoked else REVOKE_OUTCOME_FAILED
+        for alias, alias_outcome in [(a, outcome) for a in aliases] + [
+            # R-L12.4 (решение 118): по одной записи на каждый алиас за пределами лимита —
+            # запрос по нему не отправлялся, и это единственный след для ручной уборки.
+            (a, REVOKE_OUTCOME_SKIPPED)
+            for a in skipped
+        ]:
             await self.db.audit(
                 "key_revoked",
                 user_id=user_id,
-                details={"key_alias": alias, "reason": "relogin", "outcome": outcome},
+                details={"key_alias": alias, "reason": "relogin", "outcome": alias_outcome},
                 ts=self.clock.now(),
             )
 
@@ -534,6 +562,9 @@ class LoginService:
 __all__ = [
     "KEY_KIND_JWT",
     "KEY_KIND_PERSISTENT",
+    "REVOKE_OUTCOME_FAILED",
+    "REVOKE_OUTCOME_OK",
+    "REVOKE_OUTCOME_SKIPPED",
     "SESSION_PREFIX",
     "LoginService",
     "PollResult",
