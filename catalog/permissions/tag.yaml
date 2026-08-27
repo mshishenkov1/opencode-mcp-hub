@@ -75,13 +75,13 @@ groups:
     default: ask
     tools: [set_my_status, set_my_custom_status, set_my_preference]
   - id: marks_and_commands
-    title: "Отмечать прочитанное, сохранять сообщения, запускать слэш-команды"
-    description: "Отметки о прочтении, сохранение сообщений в личный список и запуск слэш-команд ТЭГ, включая команды сторонних интеграций."
+    title: "Отмечать прочитанное и сохранять сообщения"
+    description: "Отметки о прочтении и сохранение сообщений в личный список."
     default: ask
     tools: [mark_channel_read, mark_post_read, save_post]
   - id: destructive_and_integrations
-    title: "Удалять и архивировать, управлять вебхуками"
-    description: "Необратимое: удаление сообщений, исключение участников, архивация каналов, закрытие опросов, вебхуки и интеграции. Отменить эти действия из ТЭГ нельзя."
+    title: "Удалять и архивировать, вебхуки и слэш-команды"
+    description: "Необратимое и внешнее: удаление сообщений, исключение участников, архивация каналов, закрытие опросов, вебхуки и запуск слэш-команд, включая команды сторонних интеграций. Отменить эти действия из ТЭГ нельзя."
     default: deny
     tools: [delete_post, remove_channel_member, archive_channel, close_poll, create_incoming_webhook, list_incoming_webhooks, list_outgoing_webhooks, execute_slash_command]
 rest:
