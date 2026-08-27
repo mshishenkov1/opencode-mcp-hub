@@ -580,53 +580,140 @@ async def test_admin_key_is_used_for_relogin_revocation_too(make_hub: HubFactory
     assert key_delete_credentials(hub.litellm) == [f"Bearer {ADMIN_KEY}"]
 
 
-# --- граница R-L12.3 / R-L12.5: больше 20 прежних ключей -------------------
+# --- AC-250: больше двадцати прежних ключей --------------------------------
 
 
-@pytest.mark.ac("AC-248")
-async def test_more_than_twenty_previous_keys_are_capped_in_the_request(hub: Hub) -> None:
-    """Больше 20 прежних ключей: в запрос уходят 20 алиасов, локально удаляются ВСЕ.
+# Наследство установки, где настройка долго была выключена: 25 прежних постоянных ключей.
+LEGACY_KEYS = 25
+# Порядок ``created_at`` намеренно расходится с порядком вставки (и с ``id``): смещение
+# ``(7 * i) % 25`` — биекция, поэтому ни «первые по id», ни «последние по id» не совпадают
+# с «самыми свежими по created_at». Без такого расхождения отбор по id прошёл бы проверку.
+CREATED_OFFSETS = [(7 * index) % LEGACY_KEYS for index in range(LEGACY_KEYS)]
 
-    Так это сделано в реализации, и здесь поведение зафиксировано как есть. Оговорка: правило
-    R-L12.3 обещает, что «остаток убирается следующим входом», а при удалении всех строк
-    остатка не остаётся — следующий вход о неотозванных ключах уже не узнает. Расхождение
-    вынесено в диспут ``reports/dispute-rev43-R-L12-alias-limit.md``; тест не закрепляет его
-    как верное, а фиксирует наблюдаемое, чтобы решение спеки было видно изменением этого теста.
+
+async def _seed_legacy_keys(hub: Hub, count: int = LEGACY_KEYS) -> list[tuple[str, str, Any]]:
+    """``count`` прежних постоянных ключей u1; вернуть ``(ключ, алиас, created_at)``."""
+    from datetime import timedelta
+
+    from tests.support import insert_user
+
+    await insert_user(hub.app, "u1", "u1@corp.test")
+    base = hub.clock.now() - timedelta(days=30)
+    seeded: list[tuple[str, str, Any]] = []
+    for index in range(count):
+        key = f"sk-old-{index:02d}"
+        alias = f"opencode-u1-legacy-{index:02d}"
+        created = base + timedelta(minutes=CREATED_OFFSETS[index] if count == LEGACY_KEYS else index)
+        await insert_key(hub.app, key, "u1", key_alias=alias, created_at=created)
+        seeded.append((key, alias, created))
+    return seeded
+
+
+@pytest.mark.ac("AC-250")
+async def test_more_than_twenty_previous_keys_revoke_freshest_and_audit_the_rest(
+    hub: Hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Отзываются 20 самых свежих по ``created_at``, остальные — в аудит как пропущенные.
+
+    Резолюция диспута ``reports/dispute-rev43-R-L12-alias-limit.md`` (решение 118): остатка «на
+    следующий вход» не существует — строки удаляются все, поэтому по каждому неотозванному алиасу
+    остаётся запись аудита, единственный след для ручной уборки администратором LiteLLM.
     """
     from hub.litellm import REVOKE_ALIAS_LIMIT
 
-    await add_key(hub, "sk-anchor", "u1")
-    previous = []
-    for index in range(REVOKE_ALIAS_LIMIT + 5):
-        key = f"sk-old-{index:02d}"
-        await insert_key(hub.app, key, "u1", key_alias=f"opencode-u1-20260101-{index:04d}")
-        previous.append(key)
-    total_before = len(await _api_keys(hub, "u1"))
-    assert total_before == REVOKE_ALIAS_LIMIT + 6
+    seeded = await _seed_legacy_keys(hub)
+    assert len(seeded) == LEGACY_KEYS
+    # Ожидание строится сортировкой по created_at, а не порядком вставки (R-L12.3).
+    by_freshness = [alias for _key, alias, _created in sorted(seeded, key=lambda e: e[2], reverse=True)]
+    expected_revoked = by_freshness[:REVOKE_ALIAS_LIMIT]
+    expected_skipped = by_freshness[REVOKE_ALIAS_LIMIT:]
+    assert len(expected_skipped) == LEGACY_KEYS - REVOKE_ALIAS_LIMIT == 5
+    # Сторож самой проверки: отбор по id дал бы другой набор — иначе инъекция была бы незаметна.
+    by_insertion = [alias for _key, alias, _created in seeded]
+    assert set(expected_revoked) != set(by_insertion[-REVOKE_ALIAS_LIMIT:])
+    assert set(expected_revoked) != set(by_insertion[:REVOKE_ALIAS_LIMIT])
 
     route = mock_key_delete(hub.litellm)
-    await _login(hub, "sk-new", ll_id="ll-1")
+    capture_all_levels(caplog)
+    with capture_json_logs() as json_logs:
+        await _login(hub, "sk-new", ll_id="ll-1")
 
-    # Один запрос и ровно 20 алиасов в нём — страховка от массового отзыва (R-L12.3).
+    # Один запрос, ровно 20 алиасов — двадцать самых свежих, без алиаса нового ключа.
     assert route.call_count == 1
     calls = key_delete_calls(hub.litellm)
     assert len(calls) == 1
-    aliases = calls[0]["key_aliases"]
-    assert len(aliases) == REVOKE_ALIAS_LIMIT, aliases
+    sent = calls[0]["key_aliases"]
+    assert len(sent) == REVOKE_ALIAS_LIMIT
+    assert set(sent) == set(expected_revoked), "в запрос попали не самые свежие по created_at"
+    assert sent == expected_revoked, "порядок отбора не по убыванию created_at"
+    new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
+    assert new_alias not in sent
 
-    # Локально не осталось ни одной прежней строки: все прежние ключи сразу перестали
-    # открывать Hub (R-L12.5), включая те, чьи алиасы в запрос не попали.
-    remaining = await _api_keys(hub, "u1")
-    assert len(remaining) == 1
+    # Локально не осталось ни одной прежней строки; все 25 прежних ключей мертвы (R-L12.5).
+    assert len(await _api_keys(hub, "u1")) == 1
     assert (await hub.get("/api/me", headers=bearer("sk-new"))).status_code == 200
-    for key in (*previous, "sk-anchor"):
+    for key, _alias, _created in seeded:
         assert (await hub.get("/api/me", headers=bearer(key))).status_code == 401, key
 
-    # Следующий вход уже не знает о неотозванных ключах — «остатка» для него не существует.
+    # Аудит: 20 ok и 5 skipped — по одной записи на каждый неотозванный алиас (R-L12.4).
+    revoked_rows = await audit_rows(hub.app, "key_revoked")
+    ok_rows = [r for r in revoked_rows if r["details"]["outcome"] == "ok"]
+    skipped_rows = [r for r in revoked_rows if r["details"]["outcome"] == "skipped"]
+    assert len(ok_rows) == REVOKE_ALIAS_LIMIT
+    assert len(skipped_rows) == 5
+    assert len(revoked_rows) == LEGACY_KEYS, "появились записи сверх двадцати пяти алиасов"
+    assert {r["details"]["key_alias"] for r in ok_rows} == set(expected_revoked)
+    assert {r["details"]["key_alias"] for r in skipped_rows} == set(expected_skipped)
+    for row in revoked_rows:
+        assert row["details"]["reason"] == "relogin"
+        assert set(row["details"]) == {"key_alias", "reason", "outcome"}
+
+    # Журнал: одна запись WARNING с числом пропущенных — без алиасов, значений и хешей.
+    skipped_records = [
+        r for r in json_logs.records() if r.get("message") == "previous_keys_revoke_skipped"
+    ]
+    assert len(skipped_records) == 1, json_logs.raw()
+    record = skipped_records[0]
+    assert record["level"] == "WARNING"
+    assert record["skipped"] == 5
+    assert record["user_id"] == "u1"
+    dumped = json.dumps(record, ensure_ascii=False)
+    for alias in by_freshness:
+        assert alias not in dumped, f"алиас {alias} попал в запись о пропущенных"
+
+    everything = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+    for key, _alias, _created in seeded:
+        assert key not in everything, f"значение ключа {key} в журнале"
+    hub_only = hub_log(caplog, json_logs)
+    for key, _alias, _created in seeded:
+        assert sha256_hex(key) not in hub_only, "хеш ключа в журнале Hub"
+
+    # Остатка не существует: второй вход отзывает ровно один алиас — ключа первого входа.
     hub.clock.advance(120)
     await _login(hub, "sk-newer", ll_id="ll-2")
     second = key_delete_calls(hub.litellm)[1]["key_aliases"]
-    assert len(second) == 1, (
-        f"во второй запрос попал только ключ предыдущего входа, а не остаток из {len(previous)} "
-        f"прежних: неотозванные ключи для Hub уже не существуют — {second}"
+    assert second == [new_alias], (
+        f"во второй запрос попал не только ключ предыдущего входа: {second}"
     )
+
+
+@pytest.mark.ac("AC-250")
+async def test_without_overflow_there_are_no_skipped_records(
+    hub: Hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Лимит не переполнен — записей ``skipped`` нет вовсе, и WARNING о пропуске тоже."""
+    from hub.litellm import REVOKE_ALIAS_LIMIT
+
+    seeded = await _seed_legacy_keys(hub, count=REVOKE_ALIAS_LIMIT)
+    mock_key_delete(hub.litellm)
+    capture_all_levels(caplog)
+    with capture_json_logs() as json_logs:
+        await _login(hub, "sk-new", ll_id="ll-1")
+
+    revoked_rows = await audit_rows(hub.app, "key_revoked")
+    assert len(revoked_rows) == len(seeded)
+    assert {r["details"]["outcome"] for r in revoked_rows} == {"ok"}
+    assert [r for r in revoked_rows if r["details"]["outcome"] == "skipped"] == []
+    assert [
+        r for r in json_logs.records() if r.get("message") == "previous_keys_revoke_skipped"
+    ] == [], "запись о пропущенных при непереполненном лимите"
