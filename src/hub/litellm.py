@@ -144,13 +144,18 @@ def revoke_error_for(status: int | None, body: Any) -> str | None:
     """Закрытая таблица исходов отзыва ключа (R-L11.4); ``None`` — ключ отозван.
 
     ``status is None`` — сеть или таймаут. 404 считается успехом: отзывать нечего.
+
+    Успехом 2xx считается только **JSON-объект**: правило относит к ``invalid_response`` не только
+    не-JSON, но и «неожиданное тело», а `` []``, ``0`` или строка телом ответа ``/key/delete`` быть
+    не могут — считать их подтверждением отзыва значило бы отчитаться об успехе по ответу, который
+    Hub не понял. Разбор содержимого объекта правилом не предусмотрен и здесь не делается.
     """
     if status is None:
         return REVOKE_UPSTREAM_UNAVAILABLE
     if status == 404:
         return None
     if 200 <= status < 300:
-        return None if body is not None else REVOKE_INVALID_RESPONSE
+        return None if isinstance(body, dict) else REVOKE_INVALID_RESPONSE
     if status in (401, 403):
         return REVOKE_NOT_PERMITTED
     if status == 429 or status >= 500:
