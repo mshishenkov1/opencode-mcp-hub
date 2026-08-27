@@ -214,6 +214,45 @@ def mock_key_generate(
     return router.post("/key/generate").respond(status, json=body)
 
 
+def mock_key_delete(
+    router: respx.MockRouter,
+    *,
+    status: int = 200,
+    body: Any = None,
+    side_effect: Any = None,
+) -> respx.Route:
+    """Мок ``POST /key/delete`` LiteLLM — отзыв ключа по значению (R-L11.4) или алиасу (R-L12.3)."""
+    route = router.post("/key/delete")
+    if side_effect is not None:
+        return route.mock(side_effect=side_effect)
+    if isinstance(body, str | bytes):
+        return route.respond(status, content=body, headers={"Content-Type": "text/plain"})
+    return route.respond(status, json=body if body is not None else {"deleted_keys": []})
+
+
+def key_delete_calls(router: respx.MockRouter) -> list[dict[str, Any]]:
+    """Тела запросов ``POST /key/delete`` в порядке обращений."""
+    bodies: list[dict[str, Any]] = []
+    for request, _response in router.calls:
+        if request.url.path == "/key/delete":
+            bodies.append(json.loads(request.content or b"{}"))
+    return bodies
+
+
+def litellm_paths(router: respx.MockRouter) -> list[str]:
+    """Пути обращений к LiteLLM в порядке вызовов — для проверки порядка шагов."""
+    return [request.url.path for request, _response in router.calls]
+
+
+def key_delete_credentials(router: respx.MockRouter) -> list[str | None]:
+    """Значения Authorization запросов ``POST /key/delete`` (R-L11.4, R-L12.3)."""
+    return [
+        request.headers.get("authorization")
+        for request, _response in router.calls
+        if request.url.path == "/key/delete"
+    ]
+
+
 def teams_body(*teams: tuple[str, str], with_details: bool = True) -> dict[str, Any]:
     body: dict[str, Any] = {
         "status": "ready",

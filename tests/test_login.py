@@ -23,8 +23,10 @@ from tests.support import (
     fetch_rows,
     insert_key,
     insert_user,
+    key_delete_calls,
     kv_session,
     make_jwt,
+    mock_key_delete,
     mock_key_generate,
     mock_poll,
     mock_start,
@@ -1003,8 +1005,55 @@ async def _complete_login(
     return jwt
 
 
+async def _alias_of(hub: Hub, user_id: str = "u1") -> str:
+    rows = await fetch_rows(
+        hub.app, "SELECT key_alias FROM api_keys WHERE user_id = :u", u=user_id
+    )
+    assert len(rows) == 1, rows
+    return str(rows[0]["key_alias"])
+
+
 @pytest.mark.ac("AC-45")
-async def test_repeated_login_adds_key_and_keeps_old_valid(hub: Hub) -> None:
+async def test_repeated_login_revokes_previous_key_by_default(hub: Hub) -> None:
+    """Умолчание (R-L12.1, решение 116): повторный вход отзывает прежний ключ и выдаёт новый.
+
+    Ветка настройки, включённой по умолчанию. Прежний контракт I-1 не исчез — он проверяется
+    соседним тестом с ``HUB_LOGIN_REVOKES_PREVIOUS_KEYS=false``.
+    """
+    mock_key_delete(hub.litellm)
+    await _complete_login(hub, "sk-a", ll_id="ll-1")
+    previous_alias = await _alias_of(hub)
+    hub.clock.advance(120)
+    await _complete_login(hub, "sk-b", ll_id="ll-2", email="new@corp.test")
+
+    # Новый ключ работает, прежний немедленно перестал открывать Hub (R-L12.5).
+    new_key = await hub.get("/api/me", headers=bearer("sk-b"))
+    assert new_key.status_code == 200, new_key.text
+    assert new_key.json()["user_id"] == "u1"
+    assert (await hub.get("/api/me", headers=bearer("sk-a"))).status_code == 401
+
+    keys = await fetch_rows(hub.app, "SELECT key_alias FROM api_keys WHERE user_id = 'u1'")
+    assert len(keys) == 1, "строка прежнего ключа осталась"
+    assert keys[0]["key_alias"] != previous_alias
+
+    # Отзыв идёт по алиасу: значений прежних ключей у Hub нет (R-L5, R-L12.3).
+    assert key_delete_calls(hub.litellm) == [{"key_aliases": [previous_alias]}]
+
+    users = await fetch_rows(hub.app, "SELECT user_id, email FROM users")
+    assert len(users) == 1
+    assert users[0]["email"] == "new@corp.test"
+
+
+@pytest.mark.ac("AC-45")
+async def test_repeated_login_keeps_old_key_valid_when_revocation_is_off(
+    make_hub: HubFactory,
+) -> None:
+    """``HUB_LOGIN_REVOKES_PREVIOUS_KEYS=false`` возвращает прежний контракт I-1 дословно (R-L5).
+
+    Утверждения этой ветки — те же, что были у AC-45 до ревизии 4.3: повторный вход добавляет
+    ключ, оба ключа действительны, строка пользователя одна.
+    """
+    hub = await make_hub(login_revokes_previous_keys=False)
     await _complete_login(hub, "sk-a", ll_id="ll-1")
     hub.clock.advance(120)
     await _complete_login(hub, "sk-b", ll_id="ll-2", email="new@corp.test")
@@ -1019,6 +1068,8 @@ async def test_repeated_login_adds_key_and_keeps_old_valid(hub: Hub) -> None:
     users = await fetch_rows(hub.app, "SELECT user_id, email FROM users")
     assert len(users) == 1
     assert users[0]["email"] == "new@corp.test"
+    # Ни одного запроса отзыва: прежний контракт запросов в LiteLLM не делал.
+    assert key_delete_calls(hub.litellm) == []
 
 
 # --- AC-46 -----------------------------------------------------------------
