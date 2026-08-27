@@ -219,7 +219,7 @@ write_noversion_binary() {
 # Переопределения через переменные окружения: PKG_OS, PKG_ARCH, PKG_VERSION, PKG_HUB,
 # PKG_DESKTOP (1 — добавить артефакт desktop), PKG_SHA_UPPER (1 — хеши заглавными),
 # PKG_PURGE (список путей purge_paths, по одному в строке).
-# Ревизия 1.10: PKG_HUB_OMIT=1 (не печатать hub_url — сборка без Hub, S-C10),
+# Ревизия 1.11: PKG_HUB_OMIT=1 (не печатать hub_url — сборка без Hub, S-C10),
 # PKG_CATALOG (значение catalog_url), PKG_SIGNED (значение поля signed; не задано — поля нет,
 # как в пакетах, собранных до появления поля, S-B17).
 # Путевые поля манифеста задаются ПАРАМЕТРАМИ ФАБРИКИ, а не sed-подстановкой по литералу

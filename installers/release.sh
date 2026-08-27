@@ -28,6 +28,9 @@ MSG_ERR_SELFCHECK='Самопроверка пакета не пройдена: 
 MSG_ERR_SELFCHECK_HASH='Самопроверка пакета не пройдена: sha256 файла %s в архиве не совпадает'
 MSG_ERR_SELFCHECK_JSON='Самопроверка пакета не пройдена: common/manifest.json в архиве не является валидным JSON'
 MSG_ERR_NO_GH='Для публикации нужен установленный клиент gh'
+# AC-271: «Desktop не собирали» и «собрали, но не для этой архитектуры» — разные вещи, и второе
+# обязано быть названо дефектом в отчёте сборки, а не только штатной строкой установщика.
+MSG_WARN_DESKTOP_ARCH='Предупреждение: dmg для %s не найден, хотя в каталоге есть dmg других архитектур (%s) — Desktop в пакет не вошёл'
 
 MSG_BUILD='Сборка %s'
 MSG_ARCHIVE='Архив: %s'
@@ -263,7 +266,7 @@ find_cli_binary() {
   die "$EX_ARGS" "$MSG_ERR_NO_CLI" "$os-$arch" "opencode-$os-$arch-$version.zip" "opencode-$os-$arch/bin/$bin_name"
 }
 
-# Desktop собирается форком для обеих архитектур macOS (S-B16, ревизия 1.10) и для windows-x64.
+# Desktop собирается форком для обеих архитектур macOS (S-B16, ревизия 1.11) и для windows-x64.
 #
 # Прежняя редакция искала dmg только для darwin-arm64: пакет darwin-x64 собирался БЕЗ Desktop и
 # молча — установщик печатал «Desktop: не входит в пакет», и это выглядело как штатная сборка.
@@ -290,7 +293,8 @@ find_desktop_artifact() {
     done
     # Ни в одном имени нет архитектуры и dmg ровно один — это ручная сборка, берём его.
     # Если архитектура в именах ЕСТЬ, но нужной среди них нет, Desktop в пакет не кладётся:
-    # положить arm64-бандл в x64-пакет хуже, чем не положить ничего.
+    # положить arm64-бандл в x64-пакет хуже, чем не положить ничего. Молча этого не делаем —
+    # см. list_other_arch_dmgs и строку отчёта в build_target (AC-271).
     if [ "$count" -eq 1 ] && [ "$typed" -eq 0 ]; then
       printf '%s' "$only"
       return 0
@@ -304,6 +308,36 @@ find_desktop_artifact() {
     done
   fi
   return 1
+}
+
+# Имена dmg с архитектурой в имени, лежащих в каталоге артефактов и НЕ подошедших запрошенной
+# цели (AC-271).
+#
+# Отдельная функция, а не побочный результат find_desktop_artifact: та вызывается через $( ),
+# то есть в подоболочке, и любое выставленное ею глобальное значение до вызывающего не доходит.
+#
+# Различить два случая обязательно. «Desktop не собирали» — штатная сборка пакета без Desktop.
+# «Собрали, но не для этой архитектуры» — дефект: у пользователя он проявится штатной строкой
+# установщика «Desktop: не входит в пакет», по которой ничего не понять.
+list_other_arch_dmgs() {
+  local arch=$1 candidate name out=""
+  for candidate in "$artifacts_dir"/*.dmg; do
+    [ -f "$candidate" ] || continue
+    name=$(basename "$candidate")
+    case $name in
+      *arm64*|*x64*) : ;;
+      *) continue ;;
+    esac
+    case $name in
+      *"$arch".dmg|*"$arch"-*.dmg) continue ;;
+    esac
+    if [ -n "$out" ]; then
+      out="$out, $name"
+    else
+      out="$name"
+    fi
+  done
+  printf '%s' "$out"
 }
 
 # --------------------------------------------------------------------------- README пакета (N5-D3)
@@ -521,6 +555,7 @@ build_target() {
   local os arch bin_name pkg_name stage cli_src archive run_cmd
   local ca_sha cli_sha cli_size
   local desktop_src="" desktop_rel="" desktop_sha="" desktop_size="0" desktop_type="" desktop_app=""
+  local others=""
 
   case $target in
     darwin-arm64|darwin-x64|linux-x64|windows-x64) : ;;
@@ -575,6 +610,15 @@ build_target() {
     esac
   else
     desktop_src=""
+    # Desktop для этой архитектуры собирали, но нужного бандла среди артефактов нет — называем
+    # это дефектом здесь, в отчёте СБОРКИ. Иначе единственным следом останется штатная строка
+    # установщика «Desktop: не входит в пакет» уже у пользователя (AC-271).
+    if [ "$os" = "darwin" ]; then
+      others=$(list_other_arch_dmgs "$arch")
+      if [ -n "$others" ]; then
+        say "$MSG_WARN_DESKTOP_ARCH" "$target" "$others"
+      fi
+    fi
   fi
 
   ca_sha=$(sha256_of "$stage/certs/tander-ca-bundle.pem")

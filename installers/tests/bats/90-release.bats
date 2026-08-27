@@ -28,7 +28,7 @@ setup() {
   release_run --artifacts "$ART" --version "$VER" --hub-url https://hub.test --out "$OUT"
   assert_status 2
   assert_output_contains "--ca"
-  # Ревизия 1.10 (S-C10): --hub-url перестал быть обязательным сам по себе, но пакет без единой
+  # Ревизия 1.11 (S-C10): --hub-url перестал быть обязательным сам по себе, но пакет без единой
   # точки входа собирать незачем — отказ остаётся, меняется его формулировка.
   release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" --out "$OUT"
   assert_status 2
@@ -128,7 +128,7 @@ setup() {
   [ ! -e "$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/desktop" ]
 }
 
-@test "S-B16: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop, а не с чужим бандлом" {
+@test "AC-271: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop, а не с чужим бандлом" {
   # Положить arm64-бандл в x64-пакет хуже, чем не положить ничего: установка «успешна», а
   # приложение не запускается.
   make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64
@@ -142,6 +142,63 @@ setup() {
   [ -d "$SANDBOX/unpack/opencode-magnit-darwin-arm64-$VER/desktop" ]
   [ ! -e "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/desktop" ]
   refute_file_contains "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/common/manifest.json" '"kind": "desktop"'
+}
+
+@test "AC-271: отсутствие нужной архитектуры названо в отчёте СБОРКИ как дефект" {
+  # Иначе единственным следом остаётся штатная строка установщика «Desktop: не входит в пакет» —
+  # уже у пользователя и неотличимая от пакета, для которого Desktop и не собирали.
+  make_artifacts "$ART" "$VER" darwin-x64
+  printf 'FIXTURE dmg arm64\n' >"$ART/opencode-magnit-desktop-mac-arm64.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-x64
+  assert_status 0
+  assert_output_contains "Предупреждение: dmg для darwin-x64 не найден"
+  # Строка обязана называть, ЧТО в каталоге есть: без этого непонятно, чинить сборку или каталог.
+  assert_output_contains "opencode-magnit-desktop-mac-arm64.dmg"
+  assert_output_contains "Desktop в пакет не вошёл"
+}
+
+@test "AC-271: строка дефекта перечисляет все чужие архитектуры, а не первую" {
+  make_artifacts "$ART" "$VER" darwin-arm64
+  printf 'FIXTURE dmg x64\n' >"$ART/opencode-magnit-desktop-mac-x64.dmg"
+  printf 'FIXTURE dmg universal\n' >"$ART/opencode-magnit-desktop-mac-x64-legacy.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-arm64
+  assert_status 0
+  assert_output_contains "opencode-magnit-desktop-mac-x64.dmg"
+  assert_output_contains "opencode-magnit-desktop-mac-x64-legacy.dmg"
+}
+
+@test "AC-271: Desktop не собирали вовсе — предупреждения нет, это штатная сборка" {
+  # Отрицательный контроль: пакет без Desktop — нормальный случай, и дефектом он не называется.
+  make_artifacts "$ART" "$VER" darwin-x64
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-x64
+  assert_status 0
+  refute_output_contains "Предупреждение: dmg для"
+  refute_output_contains "Desktop в пакет не вошёл"
+}
+
+@test "AC-271: нужная архитектура найдена — предупреждения нет" {
+  make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64
+  printf 'FIXTURE dmg arm64\n' >"$ART/opencode-magnit-desktop-mac-arm64.dmg"
+  printf 'FIXTURE dmg x64\n' >"$ART/opencode-magnit-desktop-mac-x64.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-arm64,darwin-x64
+  assert_status 0
+  refute_output_contains "Предупреждение: dmg для"
+}
+
+@test "AC-271: единственный dmg без архитектуры в имени — не дефект, предупреждения нет" {
+  make_artifacts "$ART" "$VER" darwin-x64
+  printf 'FIXTURE dmg\n' >"$ART/OpenCode.dmg"
+  release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
+    --hub-url https://hub.test --out "$OUT" --targets darwin-x64
+  assert_status 0
+  refute_output_contains "Предупреждение: dmg для"
+  mkdir -p "$SANDBOX/unpack"
+  tar -xzf "$OUT/opencode-magnit-darwin-x64-$VER.tar.gz" -C "$SANDBOX/unpack"
+  [ -f "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/desktop/OpenCode.dmg" ]
 }
 
 @test "S-B16: единственный dmg без архитектуры в имени — ручная сборка, идёт в оба пакета" {
