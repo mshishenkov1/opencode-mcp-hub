@@ -371,7 +371,9 @@ class LoginService:
         # R-L12.4: сначала выпустить и сохранить новый ключ, потом отзывать прежние — обратный
         # порядок при сбое оставил бы пользователя без рабочего ключа. Исход отзыва на вход не влияет.
         if key_kind == KEY_KIND_PERSISTENT:
-            await self._revoke_previous_keys(user_id=user_id, jwt=jwt, keep_sha256=sha256_hex(key))
+            await self._revoke_previous_keys(
+                user_id=user_id, jwt=jwt, keep_sha256=sha256_hex(key), keep_alias=key_alias
+            )
         await self._drop(login_id)
         logger.info(
             "login_completed",
@@ -388,7 +390,9 @@ class LoginService:
             body["expires_in"] = expires_in
         return PollResult(200, body)
 
-    async def _revoke_previous_keys(self, *, user_id: str, jwt: str, keep_sha256: str) -> None:
+    async def _revoke_previous_keys(
+        self, *, user_id: str, jwt: str, keep_sha256: str, keep_alias: str
+    ) -> None:
         """R-L12: отозвать прежние постоянные ключи пользователя после выдачи нового.
 
         Отзываются только собственные ключи Hub'а (решение 114): ``key_kind = "persistent"`` и
@@ -404,6 +408,17 @@ class LoginService:
         лимита Hub забывает. Поэтому по каждому такому алиасу пишется ``key_revoked`` с
         ``outcome: "skipped"``: это единственный след, по которому администратор LiteLLM уберёт
         наследство вручную.
+
+        ``keep_alias`` — алиас **только что выданного** ключа. Алиас детерминирован с точностью до
+        минуты (``spec.md:387``), поэтому второй вход в пределах одной минуты даёт прежней строке
+        ``api_keys`` тот же алиас. Отзыв идёт по ``key_aliases``, и LiteLLM удалил бы по такому
+        алиасу **оба** ключа, включая свежий: пользователь ушёл бы с ключом, который Hub считает
+        живым, а LiteLLM уже отозвал, — ровно тот исход, который запрещает R-L12.4. Исключение по
+        ``key_sha256`` (строка) от этого не спасает: отзыв адресуется алиасом (строкой запроса),
+        а не значением. Поэтому ``keep_alias`` в запрос отзыва не попадает никогда; прежний ключ
+        под ним остаётся жить в LiteLLM — тот же класс исхода, что у алиасов за пределами лимита
+        (R-L12.3, решение 118), и след тот же: ``key_revoked`` с ``outcome: "skipped"``. Диспут
+        ``disputes/spec-dispute-R-L12-alias-collision.json``.
         """
         if not self.revoke_previous_keys:
             return
@@ -434,29 +449,37 @@ class LoginService:
             return
 
         ordered = list(dict.fromkeys(alias for _, _, alias in rows))
-        aliases = ordered[:REVOKE_ALIAS_LIMIT]
-        skipped = ordered[REVOKE_ALIAS_LIMIT:]
+        # R-L12.2 «кроме только что созданной»: исключение обязано быть по алиасу, а не только по
+        # ``key_sha256``, — иначе алиас свежего ключа ушёл бы в ``key_aliases`` и отозвал его самого.
+        collided = [alias for alias in ordered if alias == keep_alias]
+        candidates = [alias for alias in ordered if alias != keep_alias]
+        aliases = candidates[:REVOKE_ALIAS_LIMIT]
+        # Порядок ``skipped``: сначала алиасы за пределами лимита (R-L12.3), затем алиас-двойник
+        # свежего ключа — след нужен по обоим, причина у них разная, а вид записи один.
+        skipped = candidates[REVOKE_ALIAS_LIMIT:] + collided
         credential = self.admin_key or jwt
         status: int | None = None
-        revoke_error: str | None
-        try:
-            resp = await self.litellm.key_delete(credential, key_aliases=aliases)
-        except LiteLLMUnavailable:
-            revoke_error = REVOKE_UPSTREAM_UNAVAILABLE
-        else:
-            status = resp.status_code
-            revoke_error = revoke_error_for(resp.status_code, resp.body)
-        revoked = revoke_error is None
-        log = logger.info if revoked else logger.warning
-        log(
-            "previous_keys_revoke",
-            extra={
-                "user_id": user_id,
-                "key_aliases": aliases,
-                "status": status,
-                "revoke_error": revoke_error,
-            },
-        )
+        revoke_error: str | None = None
+        if aliases:
+            # R-L12.3: «не более одного» запроса — и ни одного, если отзывать по алиасу нечего.
+            try:
+                resp = await self.litellm.key_delete(credential, key_aliases=aliases)
+            except LiteLLMUnavailable:
+                revoke_error = REVOKE_UPSTREAM_UNAVAILABLE
+            else:
+                status = resp.status_code
+                revoke_error = revoke_error_for(resp.status_code, resp.body)
+            revoked = revoke_error is None
+            log = logger.info if revoked else logger.warning
+            log(
+                "previous_keys_revoke",
+                extra={
+                    "user_id": user_id,
+                    "key_aliases": aliases,
+                    "status": status,
+                    "revoke_error": revoke_error,
+                },
+            )
         if skipped:
             # R-L12.4: одна запись на вход и только число — перечень алиасов остаётся в аудите.
             logger.warning(
