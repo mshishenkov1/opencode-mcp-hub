@@ -1,0 +1,389 @@
+{
+  "iteration": "I-12",
+  "cycle": 1,
+  "kind": "full_review",
+  "scope": "Автонакат релиза (S-B16) и неподписанная раздача macOS (S-B17) ревизии 1.11. Реализация написана dev-агентом ДО фиксации спеки; спека 1.11 (092d69f051 + 968e753bdf, критерии AC-254…AC-272) писалась параллельно. Арбитраж расхождений «код против спеки» выполнен настоящим отчётом.",
+
+  "subject": {
+    "spec": {
+      "repo": "~/Documents/opencode",
+      "file": "corp/docs/spec.md, corp/docs/acceptance-criteria.yaml",
+      "commits": ["092d69f051", "968e753bdf"],
+      "rules": ["S-B16", "S-B17", "S-B3 (доп.)", "S-B8 (доп.)", "S-B14 (доп.)", "S-Q10 (доп.)", "S-Q11 (доп.)"],
+      "criteria": "AC-254…AC-272"
+    },
+    "fork": {
+      "repo": "~/Documents/opencode",
+      "branch": "corp/i4-sso-connectors",
+      "commits": ["83b7aa7691", "c9e2ca5fd6", "db7772ddfc"],
+      "head_of_impl_at_review": "db7772ddfc"
+    },
+    "hub": {
+      "repo": "~/Documents/opencode-mcp-hub",
+      "branch": "pipeline/i1-hub-login-catalog-20260818",
+      "commit": "64b5bef",
+      "head_at_review": "bc93332"
+    }
+  },
+
+  "worktree_state": {
+    "hub": "чист на протяжении всего ревью: git status --porcelain пуст до и после инъекций.",
+    "fork": "ГРЯЗЕН и МЕНЯЛСЯ ПРЯМО ВО ВРЕМЯ РЕВЬЮ. В начале обхода были изменены packages/app/**, packages/opencode/src/corp/connectors.ts, packages/tui/**; через ~20 минут состав изменений стал другим и в него вошёл corp/build.ts (+15 строк: CORP_CATALOG_URL, S-C10). Это работа параллельно идущего dev-агента над следующей итерацией, не моя: все мутанты собирались в КОПИЯХ деревьев в scratchpad, репозитории под мутацию не правились ни разу.",
+    "mutation_isolation": "Копии: scratchpad/fork (git archive db7772ddfc) и scratchpad/hub (git archive HEAD -- installers). После каждой инъекции файл восстанавливался из git; итоговые sha256 копий совпадают с базовыми: install-posix.sh ad974306b247ae384c71fcaa7231f7332199f357c640b33466f79fda3e411f37, release.sh 0a13828f0723761b86a7f9e6037080785756f54d0ba77462be29fb940ee55ce5, corp/build.ts 702480d9f3a7af72779d278c808aafeba0d3a51c91c20ab35a738cd911c6c1cc, corp-ci.yml beb45e56cd22e771672905b1e2a0cd0b5cd26f6af606e8367ec8e4d06d37a041, verify-desktop-bundle.ts bff9b4123027f1e275b00a32e56e07dd4ff706fbb4bb2a17dcd9ae5be12e0038."
+  },
+
+  "hashes": {
+    "note": "git blob-хеши файлов на ревьюируемых коммитах.",
+    "fork_at_db7772ddfc": {
+      ".github/workflows/corp-release.yml": "c0511a44a054d3137c6350e74a92118050546f29",
+      ".github/workflows/corp-ci.yml": "03b7d4faee665dc92b44e886263320f8329fc0cf",
+      "corp/build.ts": "58f596bce43e539b7bfbc924665e129d0725c807",
+      "corp/build.test.ts": "9a2ed4a1f8e1512c7454af19933b2c44a1760997",
+      "corp/verify-desktop-bundle.ts": "e6607ff4502fc41ecf2c411ccb8309c66cbcb354",
+      "corp/verify-desktop-bundle.test.ts": "716c9d324b1eb9bebb270ac5d89db9967da1fec9"
+    },
+    "hub_at_64b5bef": {
+      "installers/common/install-posix.sh": "d6e6bb538f0e8c1464400db5a165b36c6748e19f",
+      "installers/release.sh": "90608379e99cd757cccf15f53d3a647b6f609f6f",
+      "installers/common/manifest.schema.json": "9b4d6f51eba02668965d8aa310b0c3df05f7924f",
+      "installers/tests/bats/38-quarantine.bats": "8d598bdc6599285d96886341fbb73271300c002b",
+      "installers/tests/bats/90-release.bats": "b12b5a2af43c6c52a0b66af98e9f3cf82ca512aa",
+      "installers/windows/install.ps1": "1df5d5b09616fab6225db64d740098be1406d368",
+      "installers/docs/install-user.md": "ee7237b45d380333b87ee07151bf1906d08343ed"
+    }
+  },
+
+  "verdict": "request_changes",
+
+  "compliance_S_B16": [
+    {
+      "clause": "п.1 автотег — сброс N при смене версии upstream",
+      "status": "реализовано, НЕ проверено тестом",
+      "evidence": "corp-release.yml, шаг «Вычислить номер корп-сборки»: git tag --list \"v$upstream-magnit.*\" | sed -n \"s|^v$upstream-magnit\\.\\([0-9][0-9]*\\)$|\\1|p\" | sort -n | tail -1; пусто → build=1. Логика верна и по разбору: sed якорит начало и конец, поэтому теги вида v1.17.9-magnit.1-rc в счёт не идут; sort -n даёт правильный максимум для magnit.10 против magnit.9. Поведенческого теста нет — см. находку 2."
+    },
+    {
+      "clause": "п.1 автотег — N = max + 1 для той же версии",
+      "status": "реализовано, НЕ проверено тестом",
+      "evidence": "тот же шаг, ветка build=$((last + 1))."
+    },
+    {
+      "clause": "п.1 идемпотентность (коммит уже помечен → успех, ничего не делая)",
+      "status": "реализовано, НЕ проверено поведенчески",
+      "evidence": "две защиты: (а) git tag --points-at HEAD --list 'v*-magnit.*' в начале шага → skip=true, exit 0; (б) повторная проверка git rev-parse -q --verify refs/tags/$tag после вычисления, с откатом git checkout -- corp/version. Шаг «Коммит, тег и push» висит на if skip == 'false'. Цикла запусков нет: тег ставится на НОВЫЙ коммит «corp: версия сборки N», а условие запуска — startsWith(head_commit.message, 'corp: слить upstream '), под которое этот коммит не подходит (проверено тестом build.test.ts:102 логическим утверждением, а не поиском строки). Тест build.test.ts:93 ищет в YAML подстроку «--points-at HEAD» — присутствие маркера, а не работоспособность."
+    },
+    {
+      "clause": "п.1 последовательность (одна очередь на репозиторий)",
+      "status": "реализовано, тестом не покрыто",
+      "evidence": "concurrency: group: corp-release, cancel-in-progress: false — одна очередь на весь репозиторий, а не на ref. Соответствует «два одновременных запуска вычислили бы один и тот же N»."
+    },
+    {
+      "clause": "п.1 порядок «ветка → тег»",
+      "status": "реализовано, тестом не покрыто",
+      "evidence": "corp-release.yml: git push origin \"HEAD:${GITHUB_REF_NAME}\" и только затем git push origin \"$tag\". Комментарий называет причину (тег обязан указывать на коммит, который есть в ветке). Порядок в тестах не зафиксирован — перестановка двух строк не уронит ни один тест."
+    },
+    {
+      "clause": "п.1 единственный источник версии (--print-version)",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "corp/build.ts:99-111 — версия считается до разбора канала, адресов и режима публикации; печать и exit(0). corp-release.yml пишет N в corp/version и берёт tag=v$(bun run corp/build.ts --print-version). Тесты build.test.ts:70-91: ровно одна строка вывода, ни «канал сборки», ни «ванильная сборка», ни «сборка CLI»; --print-version не отвергается вместе с неизвестным каналом (тег считается в чистом клоне без переменных). Мутант «переставить print-version после проверки канала» уронил бы третий тест."
+    },
+    {
+      "clause": "п.2 фид в артефактах задания CI",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "corp-ci.yml:215 — packages/desktop/dist/*.yml в path задания upload-artifact, if-no-files-found: error. Тест build.test.ts:449."
+    },
+    {
+      "clause": "п.2 фид в наборе файлов раздачи (*.yml наряду с dmg/zip/exe/blockmap)",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "corp/build.ts:267 (ветка --from-dist) и corp/build.ts:327 (collectDesktopArtifacts) — регулярное выражение /\\.(dmg|zip|exe|msi|blockmap|yml)$/. Тест build.test.ts:412 («--from-dist ничего не собирает») требует magnit-mac.yml в выводе; тест раскладки build.test.ts:341 требует PUT на /opencode/desktop/magnit-mac.yml."
+    },
+    {
+      "clause": "п.2 исключение builder-debug.yml",
+      "status": "ЧАСТИЧНО — см. находки 3 и 4",
+      "evidence": "Исключение есть в обоих местах corp/build.ts (строки 269 и 331). Инъекция 4a (снять исключение в ветке --from-dist) роняет тест — живо. Инъекция 4b (снять исключение в collectDesktopArtifacts) НЕ роняет ни одного теста — мутант выжил. Плюс glob артефактов задания CI (packages/desktop/dist/*.yml) исключения не содержит: AC-258 требует «не входит ни туда, ни туда»."
+    },
+    {
+      "clause": "п.2 отсутствие фида при заданном адресе валит задание",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "corp-ci.yml:195-204 — шаг «Идентичность и обновления Desktop» вызывает verify-desktop-bundle.ts с --update-url, когда CORP_DESKTOP_UPDATE_URL непуст; checkUpdateFeed() при отсутствии magnit-mac.yml даёт расхождение → код 1. Тест verify-desktop-bundle.test.ts:213."
+    },
+    {
+      "clause": "п.3 порядок публикации «все артефакты → все фиды»",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "Код: corp/build.ts:481-515 — desktop делится на desktopFeeds (*.yml) и desktopPayload; шаг 1 — cli + desktopPayload, шаг 2 — desktopFeeds и затем <CLI>/latest. Тест build.test.ts:351 проверяет ПОСЛЕДОВАТЕЛЬНОСТЬ обращений к настоящему локальному приёмнику (Bun.serve, порт 0): индекс каждого фида обязан быть больше индекса последнего артефакта. Мок — только на границе сети, сама логика порядка не замокана. Инъекция 1 (перенести блок фидов перед блоком артефактов) роняет ровно этот тест с сообщением «фид /opencode/desktop/magnit-mac.yml выложен раньше артефактов»."
+    },
+    {
+      "clause": "п.4 раскладка внутреннего сервера",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "base() берёт pathname из адреса ЧТЕНИЯ и приклеивает к CORP_ARTIFACTS_ENDPOINT — второй раскладки не заводится. Desktop плоско рядом с фидом; CLI — <base>/<версия>/opencode-<os>-<arch>.zip (имя без версии, версия каталогом — как строит artifactUrl() в corp/upgrade.ts); <CLI>/latest — JSON. Тест build.test.ts:319 проверяет все четыре пути и тело latest независимым JSON.parse, а не сравнением с формулой реализации. Черновик GitHub Release — отдельное задание release с собственным needs, от publish не зависит (AC-264)."
+    },
+    {
+      "clause": "п.5 гейт по секрету, скип с внятным сообщением, отличимость от «публиковать нечего»",
+      "status": "СООТВЕТСТВУЕТ по существу, расхождение формулировки — см. находку 5",
+      "evidence": "corp-ci.yml:230-240 — гейт ШАГОМ, а не условием задания (секреты недоступны в if: уровня job); ready=false + ::notice:: и все последующие шаги под if: ready == 'true' → прогон зелёный, артефакты остаются в прогоне и в черновике. «Публиковать нечего» — другая строка, из build.ts («артефактов нет»). Тест build.test.ts:453."
+    },
+    {
+      "clause": "п.6 проверка фида: файл существует, path и files[].url указывают на существующие файлы рядом, sha512 base64 совпадает, перечисляются ВСЕ расхождения",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "corp/verify-desktop-bundle.ts:196-228 — checkUpdateFeed собирает problems в список и возвращает его целиком (continue вместо return в каждой ветке); sha512() = createHash('sha512').digest('base64') — ровно та форма, в которой пишет electron-builder. parseFeedEntries разбирает и верхнеуровневый path, и элементы files[].url с относящимся к каждому sha512. Правило применяется только при options.updateUrl !== undefined; без --update-url прежнее поведение (app-update.yml в бандле быть не должно) сохранено дословно — verify-desktop-bundle.ts:253. Тесты: четыре состояния каталога (207, 213, 223, 232) + «фид обеих архитектур проверяется целиком, а не по первой записи» (241) + «пустой фид — расхождение, а не молчаливый успех» (251) + «без --update-url фид не требуется» (218)."
+    },
+    {
+      "clause": "п.7 матрица: macOS обе архитектуры ОДНИМ вызовом; два фида невозможны",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "corp-ci.yml:143 — на теге матрица из ОДНОГО элемента {name: mac, runner: macos-latest, args: --desktop --skip-cli --arm64 --x64}. corp/build.ts:392-396 собирает список arches и делает ОДИН вызов package:mac. Тест build.test.ts:443 требует «--arm64 --x64» в тег-части матрицы И ровно одного вхождения \"runner\":\"macos-latest\" — то есть прямо запрещает разбиение на два задания. Инъекция 3 (разбить mac на два задания mac-arm64/mac-x64) роняет этот тест: сценарий «два фида затирают друг друга» закрыт наблюдаемо. Проверка бандла Desktop в CI обходит ВСЕ packages/desktop/dist/mac*/*.app циклом с count и test count -ge 1."
+    },
+    {
+      "clause": "п.7 Windows-цель Desktop исключена, конфигурация NSIS сохранена",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "В матрице тега нет ни win-x64, ни --win. Блоки win/nsis в packages/desktop/electron-builder.config.ts не тронуты относительно v1.17.9: единственная +строка диффа, относящаяся к именам артефактов, — artifactName внутри ветки канала magnit, добавленной прежними ревизиями, а не в блоке win. corp/patches.md новых строк таблицы правок upstream-файлов не получил. Тест build.test.ts:434 проверяет и отсутствие win в матрице, и наличие target: [\"nsis\"] и nsis: { в конфигурации. Инъекция 2 (вернуть win-x64 в матрицу тега) роняет ровно этот тест. Ручной --desktop --win продолжает работать (corp/build.ts:339-344, AC-103)."
+    },
+    {
+      "clause": "п.7 CLI собирается для прежнего набора целей, включая win32-x64",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "Матрица build-cli не менялась: darwin-arm64, linux-x64, win32-x64; smoke по-прежнему только для целей ОС раннера."
+    },
+    {
+      "clause": "дыра CORP_BUILD (vars.CORP_BUILD переписал бы версию на теге)",
+      "status": "ЗАКРЫТА КОРРЕКТНО",
+      "evidence": "corp-ci.yml:99 и 161 — CORP_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') && '' || vars.CORP_BUILD }} в ОБОИХ заданиях сборки. corpBuildNumber() (corp/build.ts:61-70): process.env.CORP_BUILD?.trim() — пустая строка ложна, поэтому источником становится файл corp/version помеченного коммита, то есть ровно то значение, из которого corp-release.yml собрал имя тега. Задание publish запускает build.ts БЕЗ CORP_BUILD вовсе и на checkout тега — расхождения там возникнуть неоткуда. Тест build.test.ts:463 требует РОВНО ДВА вхождения точного выражения гейта: добавление третьего задания сборки без гейта его не поймает, но снятие гейта с любого из двух существующих — поймает."
+    }
+  ],
+
+  "compliance_S_B17": [
+    {
+      "clause": "п.1 булево поле signed в манифесте, false по умолчанию, true по --signed, манифест валиден по схеме",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "release.sh: is_signed=0 по умолчанию, флаг --signed; в манифест пишется литерал true/false БЕЗ кавычек (signed_json), поле пишется ВСЕГДА. Схема: \"signed\": {\"type\": \"boolean\"}, в required не внесено. Тесты 90-release.bats («без --signed → \"signed\": false», «--signed → \"signed\": true») и 38-quarantine.bats (310: манифест без поля остаётся корректным, --check печатает «Манифест: корректен»; 319: signed=true разбор не ломает)."
+    },
+    {
+      "clause": "п.2 снятие карантина СТРОГО после ditto",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "install-posix.sh:1609 — remove_quarantine \"$app_dest\" вызывается ВНУТРИ ветки успеха if run_priv ditto …; then, после say MSG_DESKTOP_INSTALLED. В ветке ошибки ditto вызова нет. Тест 38-quarantine.bats:182 сравнивает НОМЕРА СТРОК первого «ditto » и первого «xattr » в журнале подменённых границ среды и требует ditto_line < xattr_line — независимое наблюдаемое утверждение, не повтор формулы реализации."
+    },
+    {
+      "clause": "п.2 условность по signed и по платформе macOS",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "desktop_needs_quarantine_removal(): [ \"$MF_signed\" != \"true\" ] && [ \"$platform\" = \"macos\" ]. manifest_load трактует как true ТОЛЬКО литеральное true (после to_lower), любое иное значение и отсутствие ключа — false; умолчание MF_signed=\"false\". Тесты: signed=true → xattr не вызывается вовсе (196); пустое значение → снимается (206); PLATFORM=linux при signed=false → xattr не вызывается и слова «карантин» в выводе нет (215). Инъекция 5 (убрать из условия проверку MF_signed) роняет ДВА теста: «signed=true → карантин не снимается» и «--dry-run при signed=true шага карантина не печатает»."
+    },
+    {
+      "clause": "п.3 best-effort: неудача → предупреждение с готовой командой, код не меняется, приложение установлено",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "remove_quarantine возвращает 0 на всех путях; при неудаче say MSG_DESKTOP_QUARANTINE_FAILED с путём дважды — в тексте предупреждения и в готовой команде xattr -dr com.apple.quarantine <путь>. Тесты 243 (OM_XATTR_EXIT=1 → код 0, «не удалось снять карантин», «Desktop: установлен») и 256 (xattr отсутствует в PATH вовсе, PATH сужен через min_path_dir — та же ветка, код 0)."
+    },
+    {
+      "clause": "п.4 строка отчёта ТОЛЬКО при фактическом снятии",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "desktop_unsigned=1 присваивается исключительно в ветке успеха run_priv xattr; print_report печатает MSG_SUM_UNSIGNED под if [ \"$desktop_unsigned\" -eq 1 ]. Отсутствие строки проверено для четырёх случаев: signed=true, Linux, --no-desktop, пакет без Desktop, и отдельно — при НЕУДАЧЕ снятия (тест 243, refute «Сборка не подписана»). Инъекция 7 (выставлять desktop_unsigned=1 и в ветке неудачи) роняет тест 243 — утверждение живое. --dry-run печатает шаг ровно тогда, когда он будет выполнен (do_plan_install, условие то же desktop_needs_quarantine_removal; тесты 284 и 291)."
+    },
+    {
+      "clause": "п.5 anyOf в схеме манифеста (хотя бы один адрес), --hub-url необязателен, --catalog-url добавлен, отказ до начала сборки",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "manifest.schema.json: hub_url убран из required, добавлен anyOf: [{required:[hub_url]},{required:[catalog_url]}], оба поля type string minLength 1. release.sh: проверка «оба пусты → usage + die EX_ARGS(2) MSG_ERR_NEED_ENDPOINT» стоит ДО проверок существования каталога артефактов и CA, то есть до начала сборки пакета; в манифест пишется только заданный адрес (endpoint_block), пустых полей не появляется. install-posix.sh manifest_load: mf_val вместо mf_require, отказ manifest_field_error при обоих пустых. install.ps1 Read-Manifest: hub_url убран из обязательного списка, добавлена та же проверка «оба пусты». Тесты: AC-111 (код 2 и упоминание обоих флагов), «--catalog-url без --hub-url» (в манифесте нет литерала \"hub_url\"), «оба адреса вместе»."
+    },
+    {
+      "clause": "п.6 чужая архитектура не кладётся в пакет",
+      "status": "СООТВЕТСТВУЕТ по поведению; отчёт сборки — НЕ соответствует, см. находку 1",
+      "evidence": "find_desktop_artifact: сопоставление *\"$arch\".dmg | *\"$arch\"-*.dmg; флаг typed выставляется по *arm64*|*x64* в имени; фолбэк на единственный dmg только при count==1 && typed==0. Ложных срабатываний нет: «arm64» не содержит подстроки «x64», а *x64.dmg не совпадает с «…arm64.dmg». Тесты 90-release.bats: dmg каждой архитектуры идёт в свой пакет и НЕ идёт в чужой (четыре утверждения, два из них отрицательные); только arm64 → x64-пакет без каталога desktop и без \"kind\": \"desktop\" в манифесте; единственный нетипизированный dmg идёт в оба пакета. Инъекция 6 (фолбэк на любой dmg при count>=1) роняет ДВА теста: новый S-B16 и старый AC-116."
+    },
+    {
+      "clause": "п.7 документация пользователя",
+      "status": "СООТВЕТСТВУЕТ (AC-272, type manual)",
+      "evidence": "installers/docs/install-user.md: абзац «macOS, Gatekeeper» — почему macOS сообщает о «повреждении», что делает установщик, точная ручная команда xattr -dr com.apple.quarantine \"/Applications/OpenCode Magnit.app\", запасной путь через «Конфиденциальность и безопасность» с оговоркой про macOS 15+, и отдельно — что CLI-бинарник карантина не получает."
+    },
+    {
+      "clause": "п.8 возврат подписи выключает шаг сам",
+      "status": "СООТВЕТСТВУЕТ",
+      "evidence": "Единственная точка переключения — release.sh --signed → \"signed\": true; ни одной строки правила при этом не удаляется."
+    },
+    {
+      "clause": "install.ps1 не сломан (BOM, PS 5.1)",
+      "status": "СООТВЕТСТВУЕТ статически; PSScriptAnalyzer не прогонялся",
+      "evidence": "Правка минимальна и совместима с 5.1: New-Object System.Collections.ArrayList, [void]$lines.Add(...), оператор -f, [string]::IsNullOrEmpty, .ToArray(). Конструкций 6+ (??, ?:, Get-Error, ForEach-Object -Parallel) не добавлено. Проверено прогоном набора bats: AC-132 («install.ps1 требует PowerShell 5.1 и не содержит конструкций 6+») и AC-133 («сохранён в UTF-8 с BOM») зелёные на HEAD. pwsh на машине отсутствует (command -v pwsh пусто) — ни Pester, ни PSScriptAnalyzer прогнать нечем."
+    }
+  ],
+
+  "findings": [
+    {
+      "severity": "major",
+      "where": "installers/release.sh:273-297 (find_desktop_artifact) и build_target, ветка else desktop_src=\"\"",
+      "what": "AC-271 требует: «при отсутствии нужной архитектуры среди типизированных имён Desktop в пакет не кладётся И ЭТО НАЗВАНО В ОТЧЁТЕ СБОРКИ КАК ДЕФЕКТ, а не как штатная строка». Реализация молчит: когда для darwin-<arch> нужного dmg нет, а типизированные dmg других архитектур в каталоге артефактов ЕСТЬ, release.sh не печатает ни одной строки о Desktop — ни предупреждения, ни причины. Единственный наблюдаемый след появляется потом, у пользователя: установщик печатает «Desktop: не входит в пакет» — ровно ту «штатную строку», которую критерий запрещает как единственный сигнал. Тест «S-B16: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop» проверяет отсутствие бандла, но не проверяет ни одной строки отчёта, поэтому дефект не ловится. Арбитраж расхождения прозы и критерия: абзац S-B17 п.6 («строка «Desktop: не входит в пакет» допустима только тогда, когда Desktop действительно не собирали») задаёт нижнюю границу, AC-271 — конкретное требование; критерий более специфичен и не противоречит абзацу, поэтому исполняется критерий. Нужна отдельная строка вида «Предупреждение: dmg для <target> не найден, хотя в каталоге есть dmg других архитектур (<список>) — Desktop в пакет не вошёл» и утверждение на неё в 90-release.bats.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": ".github/workflows/corp-release.yml, шаг «Вычислить номер корп-сборки» / corp/build.test.ts",
+      "what": "S-Q11 ревизии 1.11 прямо требует: «вычисление N — ПО СЛУЧАЮ НА КАЖДОЕ ПРАВИЛО (смена версии upstream → 1; та же версия → максимум + 1; коммит уже помечен → успех без нового тега; обычный корп-коммит → тега нет), на подменённом списке тегов и без сетевых обращений». Таких тестов нет ни одного. Всё, что есть в build.test.ts про автотег, — четыре утверждения о НАЛИЧИИ ПОДСТРОК в YAML («corp/build.ts --print-version», «corp/version», «--points-at HEAD», условие startsWith) и одно логическое утверждение про несовпадение сообщения автотег-коммита с условием запуска. Ни одно из них не способно упасть при осмысленной поломке самой логики: можно заменить sort -n на sort, потерять якорь $ в sed, поменять местами ветки сброса и инкремента, переставить push тега перед push ветки — набор останется зелёным. Это самый новый и самый дорогой в отказе код итерации: неверный N означает либо тег на уже выпущенном составе, либо перезапись раздачи. Рекомендация: вынести вычисление в отдельный скрипт (например corp/next-tag.sh, вызываемый из workflow) и покрыть четырьмя случаями во временном git-репозитории с подставленным списком тегов; плюс утверждение на порядок «push ветки → push тега».",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "corp/build.ts:331 (collectDesktopArtifacts) / corp/build.test.ts",
+      "what": "Исключение builder-debug.yml продублировано в двух местах, и проверено только одно. Инъекция «удалить строку if (entry === \"builder-debug.yml\") continue» в collectDesktopArtifacts не роняет НИ ОДНОГО теста (прогон build.test.ts + verify-desktop-bundle.test.ts после мутации: 57 pass, 1 skip, 0 fail) — мутант выжил. Спека (раздел S-Q10, «Фид раздачи и матрица целей») требует, чтобы «отбор файлов раздачи включает *.yml и исключает builder-debug.yml» был проверен, а проверена только ветка --from-dist. Ветка collectDesktopArtifacts — это путь ЛОКАЛЬНОЙ сборки и любого прогона с --desktop --publish без --from-dist. Дешёвое лечение: свести оба места к одной функции отбора и покрыть её напрямую, либо добавить утверждение на исходник.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": ".github/workflows/corp-ci.yml:210-216 (path задания upload-artifact)",
+      "what": "AC-258 требует, чтобы builder-debug.yml не входил НИ в артефакты задания, НИ в набор файлов публикации. В наборе публикации он отсечён (corp/build.ts), в артефактах задания — нет: glob packages/desktop/dist/*.yml исключения не содержит. Смягчающее обстоятельство, проверенное по исходникам зависимости: app-builder-lib 26.15.2 пишет builder-debug.yml только при включённом debug-логировании (packager.js:328 — if (this.debugLogger.isEnabled), а isEnabled = log.isDebugEnabled), поэтому в обычном прогоне файла нет и дефект не проявляется. Но при прогоне с DEBUG он попадёт и в артефакты, и — через задание release, которое цепляет к черновику всё, что find нашёл, — в GitHub Release, где окажется вторым yml рядом с фидом. Лечение — одна строка исключения !packages/desktop/dist/builder-debug.yml в path (actions/upload-artifact v4 её поддерживает).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": ".github/workflows/corp-ci.yml:237",
+      "what": "Спека S-B16 п.5 и AC-261 цитируют сообщение скипа как «внутренний сервер не настроен — публикация пропущена, артефакты остаются в прогоне и в черновике релиза». В коде напечатано «Секрет CORP_ARTIFACTS_ENDPOINT не задан — публикация на внутренний сервер пропущена. Артефакты остаются в прогоне и в черновике релиза». По существу требование выполнено (причина названа, отличима от «артефактов нет», прогон зелёный), но дословного совпадения с критерием нет, а тест build.test.ts:460 закрепляет именно вариант кода («публикация на внутренний сервер пропущена»). Нужно свести одно к другому: либо привести текст к формулировке критерия, либо явно зафиксировать в спеке, что цитата иллюстративна.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "installers/common/install-posix.sh:247,792; installers/release.sh:266; installers/common/manifest.schema.json:22,50,60; installers/tests/bats/helpers.bash:222; installers/tests/bats/90-release.bats:31; corp/build.test.ts:423; corp/README.md:146; corp/patches.md:61; .github/workflows/corp-ci.yml:11",
+      "what": "Комментарии и описания схемы ссылаются на «ревизию 1.10», хотя правила S-B16, S-B17 и S-C10 введены ревизией 1.11 (spec.md, коммит 092d69f051). Одиннадцать мест, перечислены выше; corp/patches.md:24 (клавиша f вкладок фильтра) — законная ссылка на 1.10, её трогать не нужно. Отдельно: описание поля signed в схеме говорит «пакеты, собранные до ревизии 1.10, тоже неподписаны» — после правки номера утверждение станет верным. Замечание оформлено как правка dev-зоны; сам не правлю (зона review — reports/ и disputes/).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "where": ".github/workflows/corp-ci.yml, задание checks",
+      "what": "Тесты corp/*.test.ts НЕ ЗАПУСКАЮТСЯ корп-CI ни одним заданием. Задание checks гоняет typecheck и bun run --cwd packages/{opencode,tui,app} test; скрипт test пакета opencode — bun test --timeout 30000 с cwd packages/opencode, то есть каталог corp/ он не обходит; корневой bun test отключён намеренно (F32, «do not run tests from root»). В результате ВЕСЬ доказательный аппарат S-B16 — 30 новых тестов в corp/build.test.ts и corp/verify-desktop-bundle.test.ts, включая проверку порядка публикации, гейта по секрету и матрицы — исполняется только вручную. Дефект достался итерации по наследству (corp/patches.test.ts и corp/upstream-sync.test.ts в том же положении с I-4), поэтому must_fix не ставлю, но именно I-12 делает его дорогим: правило про порядок выкладки перестанет проверяться в тот момент, когда его сломают. Лечение — один шаг в задании checks: bun test corp/ с рабочим каталогом corp (прогон на этой машине: 73 pass, 0 fail, 651 expect).",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "спека: S-B7 / S-B16 п.7 против S-B17 п.6",
+      "what": "Замечание спек-агенту, не dev. S-B17 п.6 обосновывает поиск Desktop для darwin-x64 тем, что «пакет darwin-x64 больше не собирается без Desktop», но матрица build-cli (S-B7, не изменённая ревизией 1.11) собирает CLI только для darwin-arm64, linux-x64 и win32-x64. Значит из артефактов прогона CI пакет darwin-x64 всё равно не собрать: find_cli_binary не найдёт opencode-darwin-x64. Цепочка «тег → артефакты → пакет установщика» для Intel-парка остаётся разорванной на другом звене. Требуется решение: либо вернуть darwin-x64 в матрицу CLI, либо явно записать в спеке, что darwin-x64-пакет собирается только из ручной сборки.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "where": "процесс: ~/Documents/opencode, рабочее дерево",
+      "what": "Во время ревью рабочее дерево форка менялось параллельно идущим dev-агентом, и в состав изменений вошёл corp/build.ts (+15 строк: CORP_CATALOG_URL, S-C10 — работа следующей итерации). Правки не относятся к S-B16 и логику отбора артефактов, порядка публикации и печати версии не затрагивают, но прогоны на рабочем дереве в такой обстановке невоспроизводимы. Все выводы настоящего отчёта получены на дереве, зафиксированном git archive db7772ddfc; typecheck (см. runs) — единственная проверка, которую пришлось выполнить на живом дереве, и её падения относятся исключительно к незакоммиченным файлам. Рекомендация оркестратору: не пускать dev-агента в те же файлы, пока идёт ревью итерации.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+
+  "injections": [
+    {
+      "n": 1,
+      "target": "corp/build.ts, publishInternal",
+      "mutation": "блок «шаг 2 — фиды» перенесён ПЕРЕД блоком «шаг 1 — артефакты» (порядок выкладки обращён)",
+      "result": "УБИТ",
+      "detail": "1 fail: «S-B16: фиды выкладываются ПОСЛЕ артефактов — клиент не увидит версию, которой ещё нет», сообщение «фид /opencode/desktop/magnit-mac.yml выложен раньше артефактов». Было 29 pass — стало 28 pass / 1 fail."
+    },
+    {
+      "n": 2,
+      "target": ".github/workflows/corp-ci.yml, матрица build-desktop на теге",
+      "mutation": "в тег-матрицу добавлен элемент {\"name\":\"win-x64\",\"runner\":\"windows-latest\",\"args\":\"--desktop --skip-cli --win\"}",
+      "result": "УБИТ",
+      "detail": "1 fail: «S-B16: в матрице тегов нет win-x64 — Windows возвращается флагом, а не восстановлением кода»."
+    },
+    {
+      "n": 3,
+      "target": ".github/workflows/corp-ci.yml, матрица build-desktop на теге",
+      "mutation": "единственное задание mac (--arm64 --x64) разбито на два — mac-arm64 (--arm64) и mac-x64 (--x64); это ровно тот сценарий, в котором два вызова electron-builder пишут два magnit-mac.yml и на сервере остаётся последний",
+      "result": "УБИТ",
+      "detail": "1 fail: «S-B16: по тегу macOS собирается обеими архитектурами одним заданием» (счётчик \"runner\":\"macos-latest\" в тег-части матрицы стал 2 при ожидании 1). Сценарий «два фида затирают друг друга» закрыт наблюдаемо."
+    },
+    {
+      "n": "4a",
+      "target": "corp/build.ts:269, ветка --from-dist",
+      "mutation": "удалена строка if (name === \"builder-debug.yml\") continue",
+      "result": "УБИТ",
+      "detail": "1 fail: «S-B16: фиды выкладываются ПОСЛЕ артефактов…» — утверждение expect(paths.join(\"\\n\")).not.toContain(\"builder-debug.yml\")."
+    },
+    {
+      "n": "4b",
+      "target": "corp/build.ts:331, collectDesktopArtifacts",
+      "mutation": "удалена строка if (entry === \"builder-debug.yml\") continue",
+      "result": "ВЫЖИЛ",
+      "detail": "build.test.ts + verify-desktop-bundle.test.ts после мутации: 57 pass, 1 skip, 0 fail. Второе место исключения не покрыто ни одним тестом — находка 3."
+    },
+    {
+      "n": 5,
+      "target": "installers/common/install-posix.sh, desktop_needs_quarantine_removal",
+      "mutation": "снята условность по подписи: условие сведено к [ \"$platform\" = \"macos\" ]",
+      "result": "УБИТ",
+      "detail": "2 fail из 15 в 38-quarantine.bats: «S-B17: signed=true → карантин не снимается, xattr не вызывается» и «S-B17: --dry-run при signed=true шага карантина не печатает — план совпадает с установкой»."
+    },
+    {
+      "n": 6,
+      "target": "installers/release.sh, find_desktop_artifact",
+      "mutation": "фолбэк ослаблен до if [ \"$count\" -ge 1 ] — берётся любой найденный dmg, то есть в пакет кладётся бандл ЧУЖОЙ архитектуры",
+      "result": "УБИТ",
+      "detail": "2 fail в 90-release.bats: «S-B16: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop, а не с чужим бандлом» (новый) и «AC-116: dmg попадает только в пакет darwin-arm64» (прежний). 35 ok из 37."
+    },
+    {
+      "n": 7,
+      "target": "installers/common/install-posix.sh, remove_quarantine",
+      "mutation": "desktop_unsigned=1 выставляется и в ветке НЕУДАЧИ снятия — отчёт врал бы о снятом карантине",
+      "result": "УБИТ",
+      "detail": "1 fail: «S-B17: неудача xattr — предупреждение с ручной командой, установка успешна (код 0)» (утверждение refute «Сборка не подписана»). Строка отчёта живо привязана к ФАКТУ снятия, а не к признаку подписи."
+    }
+  ],
+
+  "runs": [
+    {
+      "what": "bats installers/tests/bats (хаб, HEAD bc93332)",
+      "result": "зелёный",
+      "detail": "292 ok, 0 not ok, код выхода 0. Ровно 1 из 292 — skip: AC-147, исполнение сгенерированного профиля настоящим fish (fish на машине отсутствует). Ожидание задания «292» подтверждено."
+    },
+    {
+      "what": "shellcheck -s bash (release.sh, install-posix.sh, macos/install.sh, linux/install.sh, trace-ac.sh)",
+      "result": "зелёный",
+      "detail": "пустой вывод, код 0. Внутри набора bats та же проверка идёт тестом AC-130 по всем installers/**/*.sh — тоже зелёная."
+    },
+    {
+      "what": "bash installers/tests/trace-ac.sh",
+      "result": "зелёный",
+      "detail": "код выхода 0. «Всего критериев AC-*: 155; с тестами: 138. Все критерии типа unit/integration покрыты.» Починка настоящая: раньше внутренний grep возвращал 1 на наборе без маркеров AC-* и под set -e -o pipefail ронял весь скрипт — теперь оба конвейера обёрнуты в { … || true; }. Новый набор 38-quarantine.bats как раз таков: он размечен маркерами правил (S-B17), а не номерами AC."
+    },
+    {
+      "what": "bun test в corp/ (форк, рабочее дерево)",
+      "result": "зелёный",
+      "detail": "73 pass, 0 fail, 651 expect() calls, 4 файла. Корневой bun test отключён намеренно (F32), запуск выполняется с рабочим каталогом corp."
+    },
+    {
+      "what": "bun test build.test.ts verify-desktop-bundle.test.ts (форк, дерево зафиксировано git archive db7772ddfc)",
+      "result": "зелёный",
+      "detail": "57 pass, 1 skip, 0 fail, 160 expect() calls. Skip — «AC-139, AC-149, S-B16: локальная сборка Desktop проходит проверку» (packages/desktop/dist на машине нет). Это базовая линия всех инъекций."
+    },
+    {
+      "what": "typecheck (bun run --cwd packages/{core,opencode,tui,app,sdk/js} typecheck)",
+      "result": "КРАСНЫЙ, но не по вине I-12",
+      "detail": "core, app, sdk/js чисты. opencode: 1 ошибка в src/server/routes/instance/httpapi/handlers/corp.ts:740 (в возвращаемом объекте отсутствует hub_configured) плюс 2 ошибки, наведённые из ../tui. tui: 1 ошибка в src/component/corp/dialog-connectors.tsx:312 (Property 'onBack' is missing in DialogPermissionsProps). ВСЕ падения происходят из НЕЗАКОММИЧЕННЫХ файлов параллельно идущей работы над S-C10/S-V-разрешениями (dialog-connectors.tsx изменён, dialog-permissions.tsx и catalog.ts не добавлены в индекс) — ни один из трёх коммитов I-12 этих файлов не касается. Проверить typecheck на чистом db7772ddfc нельзя, не тронув рабочее дерево dev-агента, чего я делать не стал."
+    },
+    {
+      "what": "python3 -c yaml.safe_load для трёх workflow",
+      "result": "зелёный",
+      "detail": "corp-ci.yml, corp-release.yml, upstream-sync.yml — все три разбираются без ошибок."
+    },
+    {
+      "what": "PSScriptAnalyzer / Pester",
+      "result": "НЕ ВЫПОЛНЕНО",
+      "detail": "command -v pwsh — пусто. install.ps1 проверен статически (совместимость с 5.1) и косвенно — тестами набора bats AC-132 (нет конструкций PowerShell 6+) и AC-133 (UTF-8 с BOM), оба зелёные."
+    }
+  ],
+
+  "not_verified_on_this_machine": [
+    "Pester-набор installers/tests/pester/*.Tests.ps1 и PSScriptAnalyzer для install.ps1 — pwsh отсутствует.",
+    "Исполнение сгенерированного fish-профиля настоящим fish — fish отсутствует (единственный skip в наборе bats).",
+    "Настоящая сборка Desktop и настоящий фид magnit-mac.yml от electron-builder: проверка verify-desktop-bundle гонялась на выдуманных каталогах, реальный packages/desktop/dist отсутствует (skip в verify-desktop-bundle.test.ts).",
+    "Настоящее снятие карантина на macOS: xattr, ditto и hdiutil подменены журналирующими заглушками (границы среды), сам install-posix.sh не подменялся.",
+    "Прогон workflow в GitHub Actions: автотег, гейт по секрету и матрица проверялись разбором YAML и утверждениями тестов, а не запуском."
+  ],
+
+  "dispute_resolutions": [],
+
+  "notes": [
+    "Тавтологичности и подгонки под тест в новом коде не обнаружено. Ожидания берутся из независимых источников: последовательность обращений к настоящему локальному HTTP-приёмнику (порядок публикации), номера строк в журнале подменённых границ среды (карантин после ditto), содержимое распакованного архива на диске (архитектуры Desktop), независимый JSON.parse тела запроса (формат latest). Моки стоят только на границах — сеть, hdiutil/ditto/xattr, каталог назначения Desktop; сама проверяемая логика нигде не замокана. Единственный подменённый внутри установщика элемент — desktop_dest_dir, и подмена обоснована: настоящая функция писала бы в реальный /Applications машины, где идут тесты.",
+    "Слабое место набора — утверждения по YAML в corp/build.test.ts: они ищут подстроки. Для решений, закодированных в конфигурации (нет win в матрице, одно mac-задание, гейт по секрету, гейт CORP_BUILD), это работает, и три инъекции в YAML их уронили. Для ИСПОЛНЯЕМОЙ логики того же файла (вычисление N в shell-шаге) такие утверждения бесполезны — отсюда находка 2.",
+    "Три из четырёх поводов для правки (находки 3, 4, 5) — по одной строке каждый. Обязательных находок две: молчаливый пропуск Desktop без строки отчёта (AC-271) и полное отсутствие тестов вычисления N, прямо предписанных S-Q11 ревизии 1.11.",
+    "Дыра CORP_BUILD, найденная самим dev-агентом, закрыта корректно и в обоих заданиях сборки; тест закрепляет ровно два вхождения точного выражения гейта.",
+    "Зона записи соблюдена: изменён только reports/review-i12-1.json. Ни один файл продукта ни в одном из двух репозиториев не правился; все мутанты собирались в копиях деревьев в scratchpad и восстанавливались из git, совпадение sha256 после восстановления зафиксировано."
+  ]
+}
