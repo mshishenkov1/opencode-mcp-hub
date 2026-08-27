@@ -203,3 +203,67 @@ release-dry-run:
     - tar -xzf "$work/dist/opencode-magnit-linux-x64-1.17.9-magnit.1.tar.gz" -C "$work"
     - HOME="$work/home" bash "$work/opencode-magnit-linux-x64-1.17.9-magnit.1/install.sh" --dry-run
     - cd "$work/dist" && sha256sum -c SHA256SUMS
+
+# --- Статический каталог коннекторов (S-C10 спецификации форка OpenCode) ---
+#
+# Каталог перестал быть свойством Hub: клиент читает его файлом с внутреннего хоста, без ключа и
+# без сессии. Файл раздаётся без авторизации, поэтому задание не столько «собирает», сколько
+# доказывает, что собранное можно выкладывать: тесты сборщика, линт, сборка, проверка sha256.
+# Утечку секрета сборщик считает отказом сборки, а не предупреждением.
+
+.static-catalog-changed:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: &static-catalog-paths
+        - catalog.yaml
+        - catalog/**/*
+        - scripts/build-static-catalog.py
+        - scripts/test_build_static_catalog.py
+        - src/hub/catalog.py
+        - .gitlab-ci.yml
+    - if: $CI_COMMIT_BRANCH
+      changes: *static-catalog-paths
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+static-catalog:
+  stage: installers
+  needs: []
+  extends: .static-catalog-changed
+  image: "${REGISTRY_PREFIX}python:3.12-slim"
+  interruptible: true
+  before_script:
+    - python -m venv .venv
+    - .venv/bin/pip install --quiet -e ".[dev]"
+  script:
+    - set -eu
+    # Тесты сборщика лежат рядом со скриптом, а не в tests/ (это зона TEST-агента), поэтому
+    # зовутся явно: под общий прогон `pytest` они не попадают.
+    - .venv/bin/python -m pytest -q scripts/test_build_static_catalog.py
+    - .venv/bin/ruff check scripts/build-static-catalog.py scripts/test_build_static_catalog.py
+    # HUB_PUBLIC_URL задаётся переменной проекта. Без него сборка всё равно выполняется — она
+    # проверяет схему каталога и отсутствие секретов, — но адрес facade-карточек подставной,
+    # и это сказано вслух, чтобы такой артефакт не уехал на раздачу.
+    - |
+      url="${HUB_PUBLIC_URL:-}"
+      if [ -z "$url" ]; then
+        echo "HUB_PUBLIC_URL не задан: проверочная сборка на подставном адресе, выкладывать её нельзя"
+        url="https://hub.invalid"
+      fi
+      .venv/bin/python scripts/build-static-catalog.py --public-url "$url" --out dist/catalog.json
+    # Файл сумм обязан проверяться штатной утилитой без правки: иначе он бесполезен на раздаче.
+    - cd dist && sha256sum -c catalog.json.sha256 && cd ..
+    # Пустой каталог при заданных переменных окружения — не «каталог без серверов», а сборка, в
+    # которой все карточки отвалились как ненастроенные. Внешне она неотличима от исправной.
+    - |
+      count=$(.venv/bin/python -c "import json;print(len(json.load(open('dist/catalog.json'))['servers']))")
+      echo "серверов в каталоге: $count"
+      if [ -n "${HUB_PUBLIC_URL:-}" ] && [ "$count" -eq 0 ]; then
+        echo "каталог собран пустым: не заданы переменные окружения серверов — выкладывать нечего" >&2
+        exit 1
+      fi
+  artifacts:
+    when: always
+    paths:
+      - dist/catalog.json
+      - dist/catalog.json.sha256
+    expire_in: 30 days
