@@ -487,24 +487,33 @@ class LoginService:
                 extra={"user_id": user_id, "skipped": len(skipped)},
             )
 
+        outcome = REVOKE_OUTCOME_OK if revoke_error is None else REVOKE_OUTCOME_FAILED
+        trail = [(a, outcome) for a in aliases] + [
+            # R-L12.4 (решение 118): по одной записи на каждый алиас за пределами лимита —
+            # запрос по нему не отправлялся, и это единственный след для ручной уборки. Алиас,
+            # совпавший с алиасом свежего ключа, попадает сюда по той же причине: запрос по нему
+            # не отправлялся, ключ остался жить в LiteLLM (см. docstring).
+            (a, REVOKE_OUTCOME_SKIPPED)
+            for a in skipped
+        ]
+        ts = self.clock.now()
+        # R-L12.6: удаление строк и след в аудите — одна транзакция. После удаления алиасы взять
+        # больше неоткуда (значений ключей Hub не хранит, R-L5), поэтому сбой между отдельными
+        # коммитами уничтожил бы единственный источник знания об алиасах: либо строки остаются,
+        # либо след записан. Сброс кэша — после коммита: он не откатывается.
         async with self.db.session() as session, session.begin():
+            for alias, alias_outcome in trail:
+                session.add(
+                    AuditLog(
+                        ts=to_naive_utc(ts),
+                        user_id=user_id,
+                        action="key_revoked",
+                        details={"key_alias": alias, "reason": "relogin", "outcome": alias_outcome},
+                    )
+                )
             await session.execute(sa_delete(ApiKey).where(ApiKey.id.in_([row[0] for row in rows])))
         for _, key_sha256, _alias in rows:
             await invalidate_key_cache(self.kv, key_sha256)
-
-        outcome = REVOKE_OUTCOME_OK if revoked else REVOKE_OUTCOME_FAILED
-        for alias, alias_outcome in [(a, outcome) for a in aliases] + [
-            # R-L12.4 (решение 118): по одной записи на каждый алиас за пределами лимита —
-            # запрос по нему не отправлялся, и это единственный след для ручной уборки.
-            (a, REVOKE_OUTCOME_SKIPPED)
-            for a in skipped
-        ]:
-            await self.db.audit(
-                "key_revoked",
-                user_id=user_id,
-                details={"key_alias": alias, "reason": "relogin", "outcome": alias_outcome},
-                ts=self.clock.now(),
-            )
 
     async def _persist(
         self,
