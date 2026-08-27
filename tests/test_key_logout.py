@@ -424,8 +424,13 @@ async def test_relogin_revokes_the_previous_key_by_default(hub: Hub) -> None:
     assert len(remaining) == 1 and remaining[0]["key_alias"] != previous_alias
 
 
-@pytest.mark.ac("AC-248")
-async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias(hub: Hub) -> None:
+# --- AC-251: коллизия алиасов при повторном входе в пределах одной минуты --
+
+
+@pytest.mark.ac("AC-251")
+async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias(
+    hub: Hub, caplog: pytest.LogCaptureFixture
+) -> None:
     """Два входа в пределах одной минуты: алиас коллизирует — и именно поэтому не отзывается.
 
     Сторожевой сценарий на баг из ``reports/review-rev43-1.json`` (финдинг 1/2, инъекция 9),
@@ -434,26 +439,34 @@ async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias
     только по ``key_sha256`` — иначе LiteLLM отозвал бы по этому алиасу и прежний ключ, и новый.
     Все прежние сценарии повторного входа делают ``hub.clock.advance(120)``, поэтому коллизия по
     построению недостижима и настоящий баг проходил мимо тестов незамеченным.
+
+    Прогон (а) из AC-251: совпавший алиас — единственный кандидат на отзыв.
     """
+    capture_all_levels(caplog)
     route = mock_key_delete(hub.litellm)
-    await _login(hub, "sk-1", ll_id="ll-1")
-    previous_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
-    await _warm_key_cache(hub, "sk-1")
 
-    hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с первым
-    await _login(hub, "sk-2", ll_id="ll-2")
-    new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
-    # Сторож самой проверки: без реальной коллизии алиасов испытание ничего не проверяет.
-    assert new_alias == previous_alias, "тест не достиг коллизии алиасов (проверьте формат/advance)"
+    with capture_json_logs() as json_logs:
+        await _login(hub, "sk-1", ll_id="ll-1")
+        previous_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
+        await _warm_key_cache(hub, "sk-1")
 
-    # Алиас нового ключа в key_aliases не попадает никогда; отзывать после исключения нечего —
-    # запрос в LiteLLM не отправляется вовсе (не «пустой список алиасов», а НОЛЬ запросов).
-    assert route.call_count == 0, "ушёл запрос отзыва, хотя единственный кандидат — сам новый ключ"
-    assert key_delete_calls(hub.litellm) == []
+        hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с первым
+        await _login(hub, "sk-2", ll_id="ll-2")
+        new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
+        # Сторож самой проверки: без реальной коллизии алиасов испытание ничего не проверяет.
+        assert new_alias == previous_alias, "тест не достиг коллизии алиасов (проверьте формат/advance)"
 
-    # Новый ключ работает, прежний — нет и немедленно; кэш прежнего ключа сброшен.
-    assert (await hub.get("/api/me", headers=bearer("sk-2"))).status_code == 200
-    assert (await hub.get("/api/me", headers=bearer("sk-1"))).status_code == 401
+        # Алиас нового ключа в key_aliases не попадает никогда; отзывать после исключения нечего —
+        # запрос в LiteLLM не отправляется вовсе (не «пустой список алиасов», а НОЛЬ запросов).
+        assert route.call_count == 0, "ушёл запрос отзыва, хотя единственный кандидат — сам новый ключ"
+        assert key_delete_calls(hub.litellm) == []
+
+        # Новый ключ работает, прежний — нет, сразу и без единого сдвига часов (R-L12.5).
+        fresh = await hub.get("/api/me", headers=bearer("sk-2"))
+        stale = await hub.get("/api/me", headers=bearer("sk-1"))
+
+    assert fresh.status_code == 200
+    assert stale.status_code == 401
     assert await hub.app.state.kv.get(f"keyauth:{sha256_hex('sk-1')}") is None
 
     # Строка прежнего ключа удалена; в api_keys u1 осталась только новая.
@@ -466,35 +479,63 @@ async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias
     assert [r["details"] for r in revoked_rows] == [
         {"key_alias": previous_alias, "reason": "relogin", "outcome": "skipped"}
     ]
+    # outcome — только из закрытого набора ok|failed|skipped, новых значений не появилось.
+    assert {r["details"]["outcome"] for r in revoked_rows} <= {"ok", "failed", "skipped"}
+
+    # Ни значений ключей, ни их хешей нет ни в аудите, ни в журнале (R-K3).
+    dumped_audit = json.dumps(await audit_rows(hub.app), default=str, ensure_ascii=False)
+    digest_1, digest_2 = sha256_hex("sk-1"), sha256_hex("sk-2")
+    for secret in ("sk-1", "sk-2", digest_1, digest_2):
+        assert secret not in dumped_audit, f"{secret} в audit_log"
+    everything = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+    assert everything, "журнал пуст — проверка вырождена"
+    for secret in ("sk-1", "sk-2"):
+        assert secret not in everything, secret
+    assert digest_1 not in hub_log(caplog, json_logs), "хеш прежнего ключа попал в журнал Hub"
+    assert digest_2 not in hub_log(caplog, json_logs), "хеш нового ключа попал в журнал Hub"
 
 
-@pytest.mark.ac("AC-248")
-async def test_relogin_within_the_same_minute_mixed_with_a_distinct_previous_key(hub: Hub) -> None:
+@pytest.mark.ac("AC-251")
+async def test_relogin_within_the_same_minute_mixed_with_a_distinct_previous_key(
+    hub: Hub, caplog: pytest.LogCaptureFixture
+) -> None:
     """Смешанный случай: коллизия по алиасу вместе с прежним ключом другого алиаса.
 
-    Ровно один запрос отзыва, и в нём только чужой (не коллизирующий) алиас; в аудите — ``ok`` для
-    него и ``skipped`` для алиаса-двойника нового ключа; оба прежних ключа перестают открывать Hub.
+    Прогон (б) из AC-251: ровно один запрос отзыва, и в нём только чужой (не коллизирующий) алиас;
+    в аудите — ``ok`` для него и ``skipped`` для алиаса-двойника нового ключа; оба прежних ключа
+    перестают открывать Hub.
     """
+    capture_all_levels(caplog)
     route = mock_key_delete(hub.litellm)
-    await _login(hub, "sk-1", ll_id="ll-1")
-    previous_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
-    # Прежний ключ другой установки/времени добавлен НАПРЯМУЮ (не через вход), иначе он был бы
-    # отозван уже первым входом — коллизия нужна только для алиаса sk-1, не для sk-legacy.
-    await insert_key(hub.app, "sk-legacy", "u1", key_alias="opencode-u1-20260101-0000")
-    assert len(await _api_keys(hub, "u1")) == 2
 
-    hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с алиасом sk-1
-    await _login(hub, "sk-2", ll_id="ll-2")
-    new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
-    assert new_alias == previous_alias, "тест не достиг коллизии алиасов (проверьте формат/advance)"
+    with capture_json_logs() as json_logs:
+        await _login(hub, "sk-1", ll_id="ll-1")
+        previous_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
+        # Прежний ключ другой установки/времени добавлен НАПРЯМУЮ (не через вход), иначе он был бы
+        # отозван уже первым входом — коллизия нужна только для алиаса sk-1, не для sk-legacy.
+        await insert_key(hub.app, "sk-legacy", "u1", key_alias="opencode-u1-20260101-0000")
+        assert len(await _api_keys(hub, "u1")) == 2
 
-    # Один запрос — и только со значением чужого (не коллизирующего) алиаса.
-    assert route.call_count == 1
-    assert key_delete_calls(hub.litellm) == [{"key_aliases": ["opencode-u1-20260101-0000"]}]
+        hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с алиасом sk-1
+        await _login(hub, "sk-2", ll_id="ll-2")
+        new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
+        assert new_alias == previous_alias, "тест не достиг коллизии алиасов (проверьте формат/advance)"
 
-    assert (await hub.get("/api/me", headers=bearer("sk-2"))).status_code == 200
-    assert (await hub.get("/api/me", headers=bearer("sk-1"))).status_code == 401
-    assert (await hub.get("/api/me", headers=bearer("sk-legacy"))).status_code == 401
+        # Один запрос — и только со значением чужого (не коллизирующего) алиаса; совпавший алиас
+        # в теле запроса отзыва не встречается ни разу.
+        assert route.call_count == 1
+        calls = key_delete_calls(hub.litellm)
+        assert calls == [{"key_aliases": ["opencode-u1-20260101-0000"]}]
+        assert previous_alias not in calls[0]["key_aliases"]
+
+        # Оба прежних ключа отвечают 401 сразу и без единого сдвига часов, новый — 200 (R-L12.5).
+        fresh = await hub.get("/api/me", headers=bearer("sk-2"))
+        stale_collided = await hub.get("/api/me", headers=bearer("sk-1"))
+        stale_legacy = await hub.get("/api/me", headers=bearer("sk-legacy"))
+
+    assert fresh.status_code == 200
+    assert stale_collided.status_code == 401
+    assert stale_legacy.status_code == 401
 
     remaining = await _api_keys(hub, "u1")
     assert len(remaining) == 1 and remaining[0]["key_alias"] == new_alias
@@ -506,6 +547,22 @@ async def test_relogin_within_the_same_minute_mixed_with_a_distinct_previous_key
         previous_alias: "skipped",
     }
     assert len(revoked_rows) == 2, "лишние или недостающие записи в аудите"
+    # outcome — только из закрытого набора ok|failed|skipped, новых значений не появилось.
+    assert {r["details"]["outcome"] for r in revoked_rows} <= {"ok", "failed", "skipped"}
+
+    # Ни значений ключей, ни их хешей нет ни в аудите, ни в журнале (R-K3).
+    dumped_audit = json.dumps(await audit_rows(hub.app), default=str, ensure_ascii=False)
+    digest_1, digest_2, digest_legacy = (
+        sha256_hex("sk-1"), sha256_hex("sk-2"), sha256_hex("sk-legacy"),
+    )
+    for secret in ("sk-1", "sk-2", "sk-legacy", digest_1, digest_2, digest_legacy):
+        assert secret not in dumped_audit, f"{secret} в audit_log"
+    everything = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
+    assert everything, "журнал пуст — проверка вырождена"
+    for secret in ("sk-1", "sk-2", "sk-legacy"):
+        assert secret not in everything, secret
+    for digest in (digest_1, digest_2, digest_legacy):
+        assert digest not in hub_log(caplog, json_logs), f"хеш ключа попал в журнал Hub: {digest}"
 
 
 @pytest.mark.ac("AC-248")
