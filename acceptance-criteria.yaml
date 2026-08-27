@@ -226,10 +226,10 @@ criteria:
     when: "читаются таблицы users, api_keys, audit_log"
     then: "users содержит одну строку u1 с email; api_keys содержит строку с key_sha256 == sha256('sk-test-3') hex в нижнем регистре, key_kind 'persistent', key_alias по маске, client 'c1', created_at; ни в одной таблице нет подстроки 'sk-test-3'; audit_log содержит action 'login_completed' с details.key_kind == 'persistent'"
   - id: AC-45
-    text: "Повторный вход того же пользователя добавляет ключ, старые остаются валидными"
-    given: "пользователь u1 дважды прошёл вход (ключи 'sk-a' и 'sk-b')"
-    when: "GET /api/me с Bearer sk-a и с Bearer sk-b"
-    then: "оба → 200 user_id 'u1'; в api_keys две строки для u1; в users одна строка"
+    text: "Повторный вход отзывает прежний постоянный ключ и выдаёт новый; при выключенной настройке сохраняется прежний контракт (R-L5, R-L12, ревизия 4.3)"
+    given: "мок LiteLLM выдаёт ключи 'sk-a', затем 'sk-b'; мок POST /key/delete отвечает 200; два прогона — при умолчании HUB_LOGIN_REVOKES_PREVIOUS_KEYS (true) и при значении false"
+    when: "в каждом прогоне пользователь u1 дважды проходит вход, затем выполняются GET /api/me с Bearer sk-a и с Bearer sk-b"
+    then: "в прогоне по умолчанию: sk-b → 200 user_id 'u1', sk-a → 401, в api_keys одна строка для u1 (на sk-b), в LiteLLM ушёл один POST /key/delete с алиасом ключа 'sk-a' в key_aliases; в прогоне с false: оба → 200 user_id 'u1', в api_keys две строки для u1, запросов на /key/delete не было; в users в обоих прогонах одна строка"
   - id: AC-46
     text: "Ошибки LiteLLM при SSO-poll обрабатываются по типу"
     given: "живая сессия; мок poll → 500 (вариант: сетевая ошибка); другая живая сессия; мок poll → 404"
@@ -1281,8 +1281,8 @@ criteria:
   - id: AC-248
     text: "Повторный вход отзывает прежние постоянные ключи, только если это включено настройкой (R-L12)"
     given: "мок LiteLLM выдаёт ключи 'sk-1', затем 'sk-2'; мок POST /key/delete отвечает 200, а в отдельном прогоне 500"
-    when: "пользователь u1 входит дважды подряд при HUB_LOGIN_REVOKES_PREVIOUS_KEYS=false; затем то же при значении true; затем то же при значении true и отказе отзыва; затем — вход после DELETE /api/me/key"
-    then: "при false обе попытки дают 200, в api_keys две строки, оба ключа отвечают 200 на GET /api/me и запросов на /key/delete не было (AC-45 дословно); при true второй вход отвечает 200 ready с ключом 'sk-2', в LiteLLM ушёл ровно один POST /key/delete с телом {key_aliases: [<алиас sk-1>]} и заголовком Authorization с тем же SSO-JWT, которым выполнялся /key/generate, отправленный ПОСЛЕ запроса выпуска; строки прежнего ключа в api_keys нет и 'sk-1' отвечает 401, а 'sk-2' — 200; ключи с key_kind 'jwt' в теле отзыва не упоминаются; при отказе отзыва (500) вход всё равно успешен и поля ответа ready не изменились, а в audit_log есть key_revoked с reason 'relogin' и outcome 'failed'; после выхода следующий вход не отправляет запрос отзыва вовсе"
+    when: "пользователь u1 входит дважды подряд при HUB_LOGIN_REVOKES_PREVIOUS_KEYS=false; затем то же при умолчании (true); затем то же при умолчании и отказе отзыва; затем — вход после DELETE /api/me/key"
+    then: "при false обе попытки дают 200, в api_keys две строки, оба ключа отвечают 200 на GET /api/me и запросов на /key/delete не было (та же ветка контракта, что в AC-45); при умолчании второй вход отвечает 200 ready с ключом 'sk-2', в LiteLLM ушёл ровно один POST /key/delete с телом {key_aliases: [<алиас sk-1>]} и заголовком Authorization с тем же SSO-JWT, которым выполнялся /key/generate, отправленный ПОСЛЕ запроса выпуска; строки прежнего ключа в api_keys нет и 'sk-1' отвечает 401, а 'sk-2' — 200; ключи с key_kind 'jwt' в теле отзыва не упоминаются; при отказе отзыва (500) вход всё равно успешен и поля ответа ready не изменились, а в audit_log есть key_revoked с reason 'relogin' и outcome 'failed'; после выхода следующий вход не отправляет запрос отзыва вовсе"
   - id: AC-249
     text: "Значения ключей, их хеши и служебный ключ LiteLLM не попадают в ответы, журнал и аудит (R-L11.9, R-K3)"
     given: "включён перехват логов всех уровней; HUB_LITELLM_ADMIN_KEY='sk-admin-SECRET'; пользователь вошёл с ключом 'sk-out-SECRET'; мок POST /key/delete отвечает 200 с телом {'message': 'sk-out-SECRET deleted', 'extra': 'BODY-MARKER-L'}"
