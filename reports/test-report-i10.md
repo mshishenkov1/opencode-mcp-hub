@@ -20,8 +20,8 @@
 | AC-217, AC-218, AC-219 | `packages/app/src/corp/connectors-view.test.ts`, `packages/tui/src/corp/connectors-view.test.ts` |
 | AC-220, AC-221, AC-222 | `packages/opencode/src/corp/connectors.test.ts` (исполняется тело мемо витрины), `packages/tui/src/corp/connectors-view.test.ts` |
 | AC-223, AC-224 | `packages/app/src/corp/connectors-view.test.ts`, `packages/tui/src/corp/connectors-view.test.ts` |
-| AC-225, AC-226 | `packages/app/src/corp/connectors-view.test.ts` (каскад CSS в happy-dom) |
-| AC-227, AC-228, AC-229, AC-230 | `packages/app/src/corp/connectors-view.test.ts`, `packages/tui/src/corp/connectors-view.test.ts` |
+| AC-225, AC-226 | `packages/app/src/corp/connectors-view.test.ts` (каскад CSS в happy-dom) + `packages/app/test-layout/connectors-layout.layout.test.ts` (**измеренная геометрия в браузере**) |
+| AC-227, AC-228, AC-229, AC-230 | `packages/app/src/corp/connectors-view.test.ts`, `packages/tui/src/corp/connectors-view.test.ts`; AC-230 сверх того — измерением (`test-layout`) |
 | AC-231, AC-234 | `packages/app/src/corp/connectors-view.test.ts`, `packages/app/src/corp/dictionary.test.ts` |
 | AC-232, AC-235, AC-236 | `packages/app/src/corp/tokens.test.ts` (S-Q12) |
 | AC-233 | `packages/app/src/corp/dictionary.test.ts` (+ кросс-проверка словаря TUI) |
@@ -134,8 +134,10 @@ AC-235 при этом не сужена — переменная осталас
 
 | Пакет | Команда | Результат |
 |---|---|---|
-| `packages/opencode` (`src/corp` целиком) | `bun test src/corp` | **457 pass, 0 fail**, 2269 утверждений, 17 файлов |
-| `packages/app` | `bun test --preload ./happydom.ts ./src` | **541 pass, 0 fail**, 2478 утверждений, 77 файлов |
+| `packages/opencode` (`src/corp` целиком) | `bun test src/corp` | **457 pass, 0 fail**, 2271 утверждение, 17 файлов |
+| `packages/opencode` (наборы `corp/`) | `bun test ../../corp/` | **92 pass, 0 fail**, 5 файлов — реестр правок upstream снова совпадает с деревом |
+| `packages/app` (unit) | `bun test --preload ./happydom.ts ./src` | **541 pass, 0 fail**, 2478 утверждений, 77 файлов |
+| `packages/app` (раскладка, Playwright) | `bun x playwright test --config test-layout/playwright.config.ts` | **21 passed**, Chromium (канал `chrome`) |
 | `packages/tui` | `bun test --timeout 30000` | **265 pass, 1 skip, 8 fail**, 1481 утверждение, 50 файлов |
 
 Типизация: `bun run typecheck` в `packages/opencode`, `packages/app` и `packages/tui` — код 0 во всех
@@ -223,8 +225,102 @@ S-Q12 и вводился.
 и AC-277 (значение приходит из темы и различается между темами; вне корп-окна не разрешается; на
 `:root` алиас не объявлен; область AC-235 не сужена).
 
+**`BUG-I10-002` — витрина показывала пустую таблицу: `TabsV2` забирал всю высоту окна**
+(severity `critical`, **`fixed`**, найден заказчиком на живой сборке, исправлен `b2574261da`).
+Дефект прошёл **мимо всего моего покрытия**, и это его главный урок. Разбор — в разделе 8.
+
 Флаки не обнаружены: все прогоны повторялись и давали тот же результат, кроме восьми базовых падений
 TUI, которые стабильны и не мои.
+
+## 5а. Геометрия витрины: чего не умело покрытие и чем это закрыто
+
+`BUG-I10-002` — рантайм-развал раскладки при 541 зелёном тесте. `TabsV2` объявляет корню
+`height: 100%` (в настройках он сам себе окно), а корп-CSS давал ему `flex: none`, то есть запрет
+сжиматься. В ветке прежнего `Dialog`, где высота панели определена и процент разрешается, вкладки
+занимали **всю** панель: строка поиска и шапка выдавливались за нижний край окна, области прокрутки
+доставалось 0 пикселей, карточки были в DOM, но невидимы. В ветке `settings-v2` высота на этом шаге
+неопределённая, `height: 100%` вырождался в `auto`, и раскладка случайно оставалась целой — поэтому
+дефект и не попадался на глаза.
+
+**Почему его не поймал ни один мой тест.** Покрытие витрины состояло из двух приёмов, и ни один из
+них по построению не может увидеть элемент, занявший всё окно:
+
+- **проверки текста исходника** (`connectors-view.test.ts`, `connector-page.test.ts`,
+  `dictionary.test.ts`) — они видят правильный JSX и правильные имена слотов; CSS-файл при этом тоже
+  был «правильным»: `flex: none` — осмысленное объявление, и никакая строковая проверка не отличит
+  его от `flex: 0 1 auto`;
+- **проверки CSS-каскада в happy-dom** (`tokens.test.ts`, блок AC-184 в `connectors-view.test.ts`) —
+  happy-dom **не считает раскладку**: он резолвит каскад и переменные, но не выполняет flexbox.
+  Проверка AC-184 сравнивала *объявленную* высоту контейнера и вычисленные `height/min-height/overflow`
+  панели — и оставалась зелёной при полностью развалившемся окне внутри этой панели.
+
+**Чем закрыто.** `packages/app/test-layout/connectors-layout.layout.test.ts` — тест, который
+**считает геометрию**. Витрина собирается вайтом теми же плагинами, что и приложение (алиас `@`,
+tailwind, `vite-plugin-solid`), поднимается в настоящем Chromium и измеряется через
+`getBoundingClientRect`. Всё, что определяет раскладку, — настоящее: `Dialog`/`DialogV2` в той же
+обёртке Kobalte, какой их монтирует `packages/ui/src/context/dialog.tsx`, настоящие `TabsV2` и
+`List`, настоящие стили приложения (`@/index.css`) и корп-`dialog-shell.css`. Своего CSS фикстура не
+добавляет ни строки; ни dev-сервера, ни сервера opencode тесту не нужно — собранные скрипт и стили
+вставляются в страницу.
+
+Утверждения — ровно по `requested_test` баг-репорта:
+
+| № | Что измеряется |
+|---|---|
+| 1 | каждая строка каталога ненулевой высоты; первая строка целиком внутри панели; хотя бы одна строка помещается в область прокрутки |
+| 2 | порядок блоков сверху вниз строго «вкладки < поиск < шапка < область прокрутки» |
+| 3 | высота вкладок ≤ 48px и меньше половины высоты панели — **это и ловит `height: 100%`** |
+| 4 | область прокрутки ненулевой высоты (в пустом состоянии место намеренно отдано `corp-connectors-empty`, и ненулевую высоту обязано иметь оно) |
+| 5 | левые края трёх ячеек шапки и трёх ячеек первой строки совпадают попиксельно (S-D6) |
+| 6 | ни один элемент оболочки не выходит за границы панели |
+| 7 | S-D10: панель растянута на всю высоту контейнера; измеренная высота одинакова при 0/1/50 карточках, на всех шести пустых состояниях и с баннером; высоты двух веток различны |
+| 8 | фикстура остаётся слепком витрины: те же `data-slot`, тот же класс контейнера, те же `TabsV2 variant="pill"` и `List`, три колонки в единственной сетке корп-CSS |
+
+Матрица — 21 сценарий: обе ветки флага × 0/1/50 карточек, шесть пустых состояний × обе ветки, баннер
+с предупреждением и проверка соответствия фикстуры разметке витрины. Заодно **AC-184 и AC-230
+закрыты наблюдаемо** — по измеренной высоте панели, а не по объявленной высоте контейнера.
+
+**Фальсифицируемость доказана делом.** Фикс `b2574261da` откачен локально (правилу вкладок возвращены
+`flex: none` и снят `height: auto`):
+
+| Состояние `dialog-shell.css` | Результат набора |
+|---|---|
+| с фиксом | **21 passed** |
+| фикс откачен | **15 failed, 6 passed** |
+
+Первое падение называет причину дословно: «вкладки выше разумного предела в 48px, получено 510.2» —
+то самое, что видел пользователь. После проверки файл восстановлен побайтово (`git status` по нему
+пуст), и набор снова даёт 21 passed.
+
+**Как гоняется.** Локально и в CI — одной и той же командой:
+
+```
+bun --cwd packages/app x playwright test --config test-layout/playwright.config.ts
+```
+
+Скрипта в `packages/app/package.json` намеренно **нет**: `package.json` — upstream-файл, и строка в
+нём требует записи в реестре правок `corp/patches.md` (S-B6, S-C8). Первый заход это правило нарушил
+(скрипт `test:layout` плюс строка в `.gitignore`), `corp/patches.test.ts` справедливо упал по AC-13,
+и след убран коммитом `5664005cde`: запуск — командой, результаты Playwright — в
+`fixture/dist/test-results`, который уже игнорируется корневым `.gitignore`. Нулевой след в реестре
+— часть цены этого теста, и она уплачена.
+
+Браузер: по умолчанию chromium из `playwright install`; если его нет, а в системе есть Google Chrome,
+конфигурация переключается на канал `chrome` — скачивать ничего не нужно (локальные прогоны шли
+именно так, Google Chrome 147). В `corp-ci.yml` (ubuntu-latest, браузеров Playwright там нет) нужен
+отдельный шаг установки:
+
+```yaml
+      - name: Браузер для тестов раскладки
+        run: bun x playwright install --with-deps chromium
+
+      - name: Тесты раскладки корп-окон (packages/app)
+        run: bun --cwd packages/app x playwright test --config test-layout/playwright.config.ts
+```
+
+Правку `.github/workflows/corp-ci.yml` вносит тот, кому это разрешено ролью: **test-agent `.github/`
+не правит**. До тех пор набор гоняется локально, и его прогон фиксируется здесь. Готовый фрагмент и
+подробности — `packages/app/test-layout/README.md`.
 
 ## 6. Новые и изменённые файлы тестов
 
@@ -238,6 +334,16 @@ TUI, которые стабильны и не мои.
 `packages/tui/src/corp/connectors-view.test.ts`,
 `packages/tui/src/corp/permissions-view.test.ts`,
 `packages/tui/src/corp/no-hub-texts.test.ts` (AC-273, AC-275, AC-278).
+
+Новый набор измерения раскладки (BUG-I10-002):
+`packages/app/test-layout/connectors-layout.layout.test.ts`,
+`packages/app/test-layout/fixture/shell.tsx`,
+`packages/app/test-layout/fixture/vite.config.ts`,
+`packages/app/test-layout/playwright.config.ts`,
+`packages/app/test-layout/tsconfig.json`,
+`packages/app/test-layout/README.md`.
+Ни один upstream-файл при этом не изменён: запуск — командой, а не скриптом в `package.json`,
+результаты Playwright — в уже игнорируемом `fixture/dist`.
 
 Изменённые (ревизия):
 `packages/opencode/src/corp/connectors.test.ts`,
@@ -255,6 +361,8 @@ TUI, которые стабильны и не мои.
 | `f43990bd53` | ревизия тестов экрана прав под двухвариантную причину микроревизии 1.11.1 |
 | `48b816e930` | тесты микроревизии 1.11.1 — двухвариантная причина и граница восьмого алиаса (AC-274, AC-276, AC-277) |
 | `fcc65ee36c` | матрица отрисованных текстов сборки без Hub и тексты прежних ревизий (AC-273, AC-275, AC-278) |
+| `275c86026f` | тест раскладки витрины меряет геометрию в браузере (AC-184, AC-225, AC-226, AC-230; BUG-I10-002) |
+| `5664005cde` | тест раскладки не оставляет следа в upstream — запуск командой, результаты в `dist` (AC-13) |
 
 Переформулировка AC-212 лежит в `corp/docs/acceptance-criteria.yaml`; в дереве она оказалась внутри
 коммита `6e049bf08a` соседнего агента, который коммитил тот же файл целиком.
