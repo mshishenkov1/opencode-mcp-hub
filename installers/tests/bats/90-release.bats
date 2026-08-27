@@ -128,7 +128,7 @@ setup() {
   [ ! -e "$SANDBOX/unpack/opencode-magnit-linux-x64-$VER/desktop" ]
 }
 
-@test "AC-271: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop, а не с чужим бандлом" {
+@test "S-B17: есть только arm64-dmg → x64-пакет собирается БЕЗ Desktop, а не с чужим бандлом" {
   # Положить arm64-бандл в x64-пакет хуже, чем не положить ничего: установка «успешна», а
   # приложение не запускается.
   make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64
@@ -144,7 +144,7 @@ setup() {
   refute_file_contains "$SANDBOX/unpack/opencode-magnit-darwin-x64-$VER/common/manifest.json" '"kind": "desktop"'
 }
 
-@test "AC-271: отсутствие нужной архитектуры названо в отчёте СБОРКИ как дефект" {
+@test "S-B17: отсутствие нужной архитектуры названо в отчёте СБОРКИ как дефект" {
   # Иначе единственным следом остаётся штатная строка установщика «Desktop: не входит в пакет» —
   # уже у пользователя и неотличимая от пакета, для которого Desktop и не собирали.
   make_artifacts "$ART" "$VER" darwin-x64
@@ -158,7 +158,7 @@ setup() {
   assert_output_contains "Desktop в пакет не вошёл"
 }
 
-@test "AC-271: строка дефекта перечисляет все чужие архитектуры, а не первую" {
+@test "S-B17: строка дефекта перечисляет все чужие архитектуры, а не первую" {
   make_artifacts "$ART" "$VER" darwin-arm64
   printf 'FIXTURE dmg x64\n' >"$ART/opencode-magnit-desktop-mac-x64.dmg"
   printf 'FIXTURE dmg universal\n' >"$ART/opencode-magnit-desktop-mac-x64-legacy.dmg"
@@ -169,7 +169,7 @@ setup() {
   assert_output_contains "opencode-magnit-desktop-mac-x64-legacy.dmg"
 }
 
-@test "AC-271: Desktop не собирали вовсе — предупреждения нет, это штатная сборка" {
+@test "S-B17: Desktop не собирали вовсе — предупреждения нет, это штатная сборка" {
   # Отрицательный контроль: пакет без Desktop — нормальный случай, и дефектом он не называется.
   make_artifacts "$ART" "$VER" darwin-x64
   release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
@@ -179,7 +179,7 @@ setup() {
   refute_output_contains "Desktop в пакет не вошёл"
 }
 
-@test "AC-271: нужная архитектура найдена — предупреждения нет" {
+@test "S-B17: нужная архитектура найдена — предупреждения нет" {
   make_artifacts "$ART" "$VER" darwin-arm64 darwin-x64
   printf 'FIXTURE dmg arm64\n' >"$ART/opencode-magnit-desktop-mac-arm64.dmg"
   printf 'FIXTURE dmg x64\n' >"$ART/opencode-magnit-desktop-mac-x64.dmg"
@@ -189,7 +189,7 @@ setup() {
   refute_output_contains "Предупреждение: dmg для"
 }
 
-@test "AC-271: единственный dmg без архитектуры в имени — не дефект, предупреждения нет" {
+@test "S-B17: единственный dmg без архитектуры в имени — не дефект, предупреждения нет" {
   make_artifacts "$ART" "$VER" darwin-x64
   printf 'FIXTURE dmg\n' >"$ART/OpenCode.dmg"
   release_run --artifacts "$ART" --version "$VER" --ca "$ART/tander-ca-bundle.pem" \
