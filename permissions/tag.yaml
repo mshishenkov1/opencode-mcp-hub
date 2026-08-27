@@ -1,0 +1,90 @@
+# Словарь разрешений коннектора ТЭГ (S-V20 спецификации форка OpenCode).
+#
+# Источник — reports/permission-groups-tag-draft.md (итерация I-9, согласован заказчиком
+# 2026-08-26): содержимое перенесено дословно. Файл подключается к карточке alias `tag`
+# полем `permission_groups` при сборке статического каталога
+# (scripts/build-static-catalog.py) и разбирается клиентом функцией parsePermissionGroups.
+#
+# Имя файла = alias коннектора. Состав инструментов — 77 курируемых инструментов
+# ~/Documents/magnit-tag-mcp/docs/TOOLS.md; `rest` страхует те, что появятся позже.
+version: 1
+groups:
+  - id: profile_and_server
+    title: "Смотреть ваш профиль и состояние ТЭГ"
+    description: "Кто вы в ТЭГ, ваши личные настройки, сведения об организации и доступность сервера. Ничего не меняет и не показывает чужую переписку."
+    default: allow
+    tools: [whoami, get_my_profile, get_my_preferences, get_org_profile, server_health, server_info]
+  - id: channels_browse
+    title: "Видеть список каналов и команд"
+    description: "Перечень ваших каналов и команд, открытые каналы организации и карточка канала: тип, тема, описание, число участников. Сообщений не читает."
+    default: allow
+    tools: [list_my_channels, list_all_my_channels, browse_public_channels, resolve_channel, get_channel, get_channel_stats, list_my_teams, get_team]
+  - id: read_posts
+    title: "Читать сообщения, треды и опросы"
+    description: "Чтение переписки в каналах и тредах, которые вам доступны: история канала, отдельные сообщения, ветки, закреплённое, сохранённое, непрочитанное и результаты опросов."
+    default: allow
+    tools: [get_channel_posts, get_post, get_post_by_permalink, get_posts_around, get_thread, list_my_threads, get_thread_participation, get_pinned_posts, get_saved_posts, get_permalink, get_my_unreads, get_post_read_receipts, get_poll]
+  - id: search
+    title: "Искать по сообщениям, файлам, каналам и людям"
+    description: "Поиск по тому, что вам доступно: сообщения, вложения, каналы, команды, люди и эмодзи."
+    default: allow
+    tools: [search_posts, search_files, search_channels, search_teams, search_users, search_emoji]
+  - id: people
+    title: "Смотреть, кто есть в ТЭГ и кто в каналах"
+    description: "Карточки коллег, состав каналов и команд, кто сейчас на связи. Личных чатов не открывает."
+    default: allow
+    tools: [get_user, list_users, list_channel_members, list_team_members, get_user_statuses, list_bots]
+  - id: attachments_read
+    title: "Открывать вложения, эмодзи и реакции"
+    description: "Сведения о вложении и скачивание файла из доступного вам сообщения, а также списки реакций, эмодзи и слэш-команд."
+    default: allow
+    tools: [get_file_info, download_file, list_custom_emoji, list_reactions, list_slash_commands]
+  - id: files_upload
+    title: "Загружать файлы в ТЭГ и делать на них ссылки"
+    description: "Отправка файла в ТЭГ и получение публичной ссылки на вложение. Публичная ссылка открывает файл и тем, у кого нет доступа к каналу."
+    default: ask
+    tools: [upload_file, get_file_public_link]
+  - id: post_write
+    title: "Писать сообщения в каналы и треды от вашего имени"
+    description: "Новые сообщения, ответы в тредах, правка и пересылка уже отправленного. Всё написанное видно коллегам как отправленное вами."
+    default: ask
+    tools: [create_post, reply_in_thread, update_post, forward_posts]
+  - id: direct_messages
+    title: "Писать в личные и групповые чаты от вашего имени"
+    description: "Личная переписка отделена от каналов: сообщение в личном чате читается как ваше персональное обращение."
+    default: ask
+    tools: [send_direct_message]
+  - id: reactions_and_pins
+    title: "Ставить реакции и закреплять сообщения"
+    description: "Реакции на сообщения коллег и закрепление сообщений в канале. Реакция приходит автору уведомлением, закрепление меняет канал для всех."
+    default: ask
+    tools: [add_reaction, remove_reaction, pin_post, unpin_post]
+  - id: polls_vote
+    title: "Голосовать в опросах от вашего имени"
+    description: "Отдать голос в опросе и отозвать его. Голос виден как ваш."
+    default: ask
+    tools: [vote_in_poll, revoke_poll_vote]
+  - id: channels_manage
+    title: "Вступать в каналы, создавать их и менять описание"
+    description: "Создание канала, вход и выход, добавление участников, правка темы и назначения канала. Меняет то, что видят все участники."
+    default: ask
+    tools: [create_channel, join_channel, leave_channel, add_channel_member, set_channel_header, set_channel_purpose]
+  - id: personal_status
+    title: "Менять ваш статус и личные настройки"
+    description: "Статус присутствия, произвольный статус с эмодзи и личные настройки клиента. Коллеги видят ваш статус."
+    default: ask
+    tools: [set_my_status, set_my_custom_status, set_my_preference]
+  - id: marks_and_commands
+    title: "Отмечать прочитанное и сохранять сообщения"
+    description: "Отметки о прочтении и сохранение сообщений в личный список."
+    default: ask
+    tools: [mark_channel_read, mark_post_read, save_post]
+  - id: destructive_and_integrations
+    title: "Удалять и архивировать, вебхуки и слэш-команды"
+    description: "Необратимое и внешнее: удаление сообщений, исключение участников, архивация каналов, закрытие опросов, вебхуки и запуск слэш-команд, включая команды сторонних интеграций. Отменить эти действия из ТЭГ нельзя."
+    default: deny
+    tools: [delete_post, remove_channel_member, archive_channel, close_poll, create_incoming_webhook, list_incoming_webhooks, list_outgoing_webhooks, execute_slash_command]
+rest:
+  title: "Остальные возможности ТЭГ"
+  description: "Инструменты коннектора, не попавшие ни в одну группу, — например появившиеся у сервера после публикации этого словаря."
+  default: ask

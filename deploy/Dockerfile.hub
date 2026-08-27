@@ -5,6 +5,8 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --upgrade pip && pip install ".[postgres]"
 COPY catalog.yaml ./catalog.yaml
+# Словари групп разрешений (R-C7.5): подхватываются load_catalog из каталога рядом
+COPY permissions ./permissions
 RUN useradd -r -u 10001 hub && chown -R hub /app
 USER hub
 EXPOSE 8000
