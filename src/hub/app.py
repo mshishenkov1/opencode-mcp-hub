@@ -214,6 +214,9 @@ def create_app(
         litellm=litellm,
         session_ttl=settings.login_session_ttl,
         key_alias_prefix=settings.key_alias_prefix,
+        # R-L12: повторный вход отзывает прежние постоянные ключи (умолчание — включено).
+        revoke_previous_keys=settings.login_revokes_previous_keys,
+        admin_key=settings.litellm_admin_key_value,
     )
 
     async def _active_sessions() -> float:

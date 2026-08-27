@@ -32,6 +32,15 @@ class AuthUser:
         }
 
 
+async def invalidate_key_cache(kv: Any, key_sha256: str) -> None:
+    """Немедленно убрать положительный результат аутентификации ключа (R-L11.5, R-L12.5).
+
+    Без сброса вышедший (или отозванный при повторном входе) ключ открывал бы ``/api/*`` ещё до
+    истечения ``AUTH_CACHE_TTL``; это часть правила, а не оптимизация.
+    """
+    await kv.delete(AUTH_CACHE_PREFIX + key_sha256)
+
+
 def extract_bearer(request: Request) -> str | None:
     """``Authorization: Bearer <key>``, иначе ``x-litellm-api-key`` (если оба — Authorization)."""
     auth = request.headers.get("authorization")
@@ -124,4 +133,5 @@ __all__ = [
     "authenticate",
     "authenticate_key_or_session",
     "extract_bearer",
+    "invalidate_key_cache",
 ]

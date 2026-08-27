@@ -13,6 +13,13 @@ from typing import Any
 
 import httpx
 
+# R-L11.4: коды причин неудавшегося отзыва ключа (закрытый набор, он же уходит наружу).
+REVOKE_NOT_PERMITTED = "not_permitted"
+REVOKE_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+REVOKE_INVALID_RESPONSE = "invalid_response"
+# R-L12.3: за один вход отзывается не более 20 алиасов одним запросом.
+REVOKE_ALIAS_LIMIT = 20
+
 
 class LiteLLMUnavailable(Exception):
     """Сеть/тайм-аут/5xx/невалидный ответ там, где он обязателен."""
@@ -106,6 +113,50 @@ class LiteLLMClient:
             raise LiteLLMUnavailable(f"LiteLLM /key/generate ответил {resp.status_code}")
         return LiteLLMResponse(resp.status_code, _parse_json(resp))
 
+    async def key_delete(
+        self,
+        credential: str,
+        *,
+        keys: list[str] | None = None,
+        key_aliases: list[str] | None = None,
+    ) -> LiteLLMResponse:
+        """``POST /key/delete`` — отзыв ключей по значению (R-L11.4) или по алиасу (R-L12.3).
+
+        В отличие от прочих вызовов, 5xx **не** превращается в исключение: исход отзыва
+        классифицирует вызывающий по закрытой таблице (``revoke_error_for``). Сеть и таймаут
+        отличить от ответа нельзя, поэтому они по-прежнему поднимают ``LiteLLMUnavailable``.
+        """
+        payload: dict[str, Any] = {}
+        if keys is not None:
+            payload["keys"] = list(keys)
+        if key_aliases is not None:
+            payload["key_aliases"] = list(key_aliases)
+        resp = await self._request(
+            "POST",
+            "/key/delete",
+            headers={"Authorization": f"Bearer {credential}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        return LiteLLMResponse(resp.status_code, _parse_json(resp))
+
+
+def revoke_error_for(status: int | None, body: Any) -> str | None:
+    """Закрытая таблица исходов отзыва ключа (R-L11.4); ``None`` — ключ отозван.
+
+    ``status is None`` — сеть или таймаут. 404 считается успехом: отзывать нечего.
+    """
+    if status is None:
+        return REVOKE_UPSTREAM_UNAVAILABLE
+    if status == 404:
+        return None
+    if 200 <= status < 300:
+        return None if body is not None else REVOKE_INVALID_RESPONSE
+    if status in (401, 403):
+        return REVOKE_NOT_PERMITTED
+    if status == 429 or status >= 500:
+        return REVOKE_UPSTREAM_UNAVAILABLE
+    return REVOKE_INVALID_RESPONSE
+
 
 def decode_jwt_claims(token: str) -> dict[str, Any]:
     """Прочитать claims JWT без проверки подписи. Ошибка → ``{}``."""
@@ -122,4 +173,14 @@ def decode_jwt_claims(token: str) -> dict[str, Any]:
         return {}
 
 
-__all__ = ["LiteLLMClient", "LiteLLMResponse", "LiteLLMUnavailable", "decode_jwt_claims"]
+__all__ = [
+    "REVOKE_ALIAS_LIMIT",
+    "REVOKE_INVALID_RESPONSE",
+    "REVOKE_NOT_PERMITTED",
+    "REVOKE_UPSTREAM_UNAVAILABLE",
+    "LiteLLMClient",
+    "LiteLLMResponse",
+    "LiteLLMUnavailable",
+    "decode_jwt_claims",
+    "revoke_error_for",
+]

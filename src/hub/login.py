@@ -11,11 +11,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select
+
 from hub.clock import Clock
 from hub.db import ApiKey, AuditLog, Database, User, to_naive_utc
 from hub.errors import HubError
 from hub.kv import KeyValueStore
-from hub.litellm import LiteLLMClient, LiteLLMResponse, LiteLLMUnavailable, decode_jwt_claims
+from hub.litellm import (
+    REVOKE_ALIAS_LIMIT,
+    REVOKE_UPSTREAM_UNAVAILABLE,
+    LiteLLMClient,
+    LiteLLMResponse,
+    LiteLLMUnavailable,
+    decode_jwt_claims,
+    revoke_error_for,
+)
 
 logger = logging.getLogger("hub.login")
 
@@ -24,6 +35,10 @@ POLL_THROTTLE_SECONDS = 2.0
 STATE_PENDING = "pending"
 STATE_TEAM_SELECTION = "team_selection"
 STATE_KEY_PENDING = "key_pending"
+
+# R-L4, R-L12.2: вид ключа. Постоянный выпущен самим Hub'ом — только такой он и отзывает.
+KEY_KIND_PERSISTENT = "persistent"
+KEY_KIND_JWT = "jwt"
 
 MSG_LOGIN_EXPIRED = "Сессия входа не найдена или истекла"
 MSG_LITELLM_UNAVAILABLE = "LiteLLM недоступен, повторите попытку позже"
@@ -90,6 +105,8 @@ class LoginService:
         litellm: LiteLLMClient,
         session_ttl: int,
         key_alias_prefix: str,
+        revoke_previous_keys: bool = False,
+        admin_key: str | None = None,
     ) -> None:
         self.kv = kv
         self.db = db
@@ -97,6 +114,10 @@ class LoginService:
         self.litellm = litellm
         self.session_ttl = session_ttl
         self.key_alias_prefix = key_alias_prefix
+        # R-L12.1: повторный вход отзывает прежние постоянные ключи (умолчание задаётся настройкой).
+        self.revoke_previous_keys = revoke_previous_keys
+        # R-L12.3: служебный ключ LiteLLM, если он задан; иначе отзыв идёт тем же SSO-JWT.
+        self.admin_key = admin_key
 
     # ------------------------------------------------------------------ helpers
 
@@ -313,10 +334,10 @@ class LoginService:
             if not isinstance(key, str) or not key:
                 logger.warning("litellm_key_generate_no_key", extra={"login_id": login_id})
                 raise _unavailable()
-            key_kind = "persistent"
+            key_kind = KEY_KIND_PERSISTENT
         elif 400 <= resp.status_code < 500:
             key = jwt
-            key_kind = "jwt"
+            key_kind = KEY_KIND_JWT
             claims = decode_jwt_claims(jwt)
             exp = claims.get("exp")
             if isinstance(exp, int | float) and not isinstance(exp, bool):
@@ -341,6 +362,10 @@ class LoginService:
             team_id=team_id,
             expires_at=expires_at,
         )
+        # R-L12.4: сначала выпустить и сохранить новый ключ, потом отзывать прежние — обратный
+        # порядок при сбое оставил бы пользователя без рабочего ключа. Исход отзыва на вход не влияет.
+        if key_kind == KEY_KIND_PERSISTENT:
+            await self._revoke_previous_keys(user_id=user_id, jwt=jwt, keep_sha256=sha256_hex(key))
         await self._drop(login_id)
         logger.info(
             "login_completed",
@@ -353,9 +378,82 @@ class LoginService:
             "user": {"user_id": user_id, "email": session.get("email")},
             "team_id": team_id,
         }
-        if key_kind == "jwt":
+        if key_kind == KEY_KIND_JWT:
             body["expires_in"] = expires_in
         return PollResult(200, body)
+
+    async def _revoke_previous_keys(self, *, user_id: str, jwt: str, keep_sha256: str) -> None:
+        """R-L12: отозвать прежние постоянные ключи пользователя после выдачи нового.
+
+        Отзываются только собственные ключи Hub'а (решение 114): ``key_kind = "persistent"`` и
+        алиас с ``HUB_KEY_ALIAS_PREFIX``; ключи ``jwt`` Hub не выпускал и не отзывает никогда.
+        Значений прежних ключей у Hub нет (R-L5), поэтому отзыв идёт по алиасам — один запрос и не
+        более ``REVOKE_ALIAS_LIMIT`` алиасов в нём. Строки удаляются при любом исходе вместе со
+        сбросом ``keyauth:<sha256>`` (R-L12.5): прежний ключ обязан немедленно перестать открывать
+        Hub. Неудача удалённого отзыва вход не ломает (R-L12.4) — остаётся след в аудите (R-L12.6).
+        """
+        if not self.revoke_previous_keys:
+            return
+        # Локальный импорт: ``hub.auth`` импортирует ``sha256_hex`` отсюда, цикл на уровне модуля.
+        from hub.auth import invalidate_key_cache
+
+        await self.db.init()
+        async with self.db.session() as session:
+            rows = [
+                (row.id, row.key_sha256, row.key_alias)
+                for row in (
+                    await session.execute(
+                        select(ApiKey)
+                        .where(
+                            ApiKey.user_id == user_id,
+                            ApiKey.key_kind == KEY_KIND_PERSISTENT,
+                            ApiKey.key_sha256 != keep_sha256,
+                            ApiKey.key_alias.startswith(self.key_alias_prefix),
+                        )
+                        .order_by(ApiKey.id.desc())
+                    )
+                ).scalars()
+            ]
+        if not rows:
+            # R-L12.7: после выхода отзывать нечего — запрос в LiteLLM не отправляется вовсе.
+            return
+
+        aliases = list(dict.fromkeys(alias for _, _, alias in rows))[:REVOKE_ALIAS_LIMIT]
+        credential = self.admin_key or jwt
+        status: int | None = None
+        revoke_error: str | None
+        try:
+            resp = await self.litellm.key_delete(credential, key_aliases=aliases)
+        except LiteLLMUnavailable:
+            revoke_error = REVOKE_UPSTREAM_UNAVAILABLE
+        else:
+            status = resp.status_code
+            revoke_error = revoke_error_for(resp.status_code, resp.body)
+        revoked = revoke_error is None
+        log = logger.info if revoked else logger.warning
+        log(
+            "previous_keys_revoke",
+            extra={
+                "user_id": user_id,
+                "key_aliases": aliases,
+                "status": status,
+                "revoke_error": revoke_error,
+            },
+        )
+
+        async with self.db.session() as session, session.begin():
+            await session.execute(sa_delete(ApiKey).where(ApiKey.id.in_([row[0] for row in rows])))
+        for _, key_sha256, _alias in rows:
+            await invalidate_key_cache(self.kv, key_sha256)
+
+        outcome = "ok" if revoked else "failed"
+        for alias in aliases:
+            await self.db.audit(
+                "key_revoked",
+                user_id=user_id,
+                details={"key_alias": alias, "reason": "relogin", "outcome": outcome},
+                ts=self.clock.now(),
+            )
 
     async def _persist(
         self,
@@ -433,4 +531,11 @@ class LoginService:
         return {"status": "pending"}
 
 
-__all__ = ["SESSION_PREFIX", "LoginService", "PollResult", "sha256_hex"]
+__all__ = [
+    "KEY_KIND_JWT",
+    "KEY_KIND_PERSISTENT",
+    "SESSION_PREFIX",
+    "LoginService",
+    "PollResult",
+    "sha256_hex",
+]

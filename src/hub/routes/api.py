@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
-from hub.auth import AuthUser, authenticate, authenticate_key_or_session
+from hub.auth import (
+    AuthUser,
+    authenticate,
+    authenticate_key_or_session,
+    extract_bearer,
+    invalidate_key_cache,
+)
 from hub.broker import (
     REASON_SCOPE_UPGRADE,
     STATUS_CONNECTED,
@@ -21,8 +29,16 @@ from hub.broker import (
     UserTokenRejected,
 )
 from hub.catalog import AuthUserToken, ServerEntry
-from hub.db import Connection, UpstreamToken, to_iso
-from hub.errors import HubError
+from hub.db import ApiKey, Connection, UpstreamToken, to_iso
+from hub.errors import HubError, unauthorized
+from hub.litellm import (
+    REVOKE_INVALID_RESPONSE,
+    REVOKE_NOT_PERMITTED,
+    REVOKE_UPSTREAM_UNAVAILABLE,
+    LiteLLMUnavailable,
+    revoke_error_for,
+)
+from hub.login import sha256_hex
 from hub.permissions import (
     PRESETS,
     denied_groups,
@@ -33,6 +49,7 @@ from hub.permissions import (
 from hub.proxy import TOOLS_CACHE_PREFIX, is_header_safe
 
 router = APIRouter(tags=["api"])
+logger = logging.getLogger("hub.api")
 
 _FALSE_VALUES = {"false", "0", "no"}
 
@@ -64,6 +81,124 @@ def _connection_view(conn: Connection | None) -> dict[str, Any]:
 @router.get("/api/me")
 async def api_me(user: Annotated[AuthUser, Depends(authenticate)]) -> JSONResponse:
     return JSONResponse(user.to_me())
+
+
+# R-L11.6: человеку прямо говорится, чем кончился отзыв — молчать о неудаче запрещено (решение 112).
+LOGOUT_MESSAGES: dict[str | None, str] = {
+    None: "Ключ отозван в LiteLLM и удалён в Hub. Для нового ключа выполните вход: opencode corp login",
+    REVOKE_NOT_PERMITTED: (
+        "Ключ удалён в Hub; отозвать его в LiteLLM не удалось: LiteLLM не разрешил удаление ключа. "
+        "Ключ больше не открывает Hub, но остаётся действительным в LiteLLM — "
+        "обратитесь к администратору LiteLLM"
+    ),
+    REVOKE_UPSTREAM_UNAVAILABLE: (
+        "Ключ удалён в Hub; отозвать его в LiteLLM не удалось: LiteLLM недоступен. "
+        "Ключ больше не открывает Hub, но остаётся действительным в LiteLLM"
+    ),
+    REVOKE_INVALID_RESPONSE: (
+        "Ключ удалён в Hub; отозвать его в LiteLLM не удалось: LiteLLM ответил неожиданно. "
+        "Ключ больше не открывает Hub, но остаётся действительным в LiteLLM"
+    ),
+}
+
+
+async def _key_alias_of(request: Request, key_sha256: str) -> str | None:
+    """Алиас ключа по его хешу: нужен журналу и аудиту (R-L11.9); секретом не является."""
+    db = request.app.state.db
+    await db.init()
+    async with db.session() as session:
+        row = (
+            await session.execute(
+                select(ApiKey).where(ApiKey.key_sha256 == key_sha256).limit(1)
+            )
+        ).scalar_one_or_none()
+        return row.key_alias if row is not None else None
+
+
+async def _forget_key(request: Request, key_sha256: str) -> None:
+    """R-L11.5: удалить строку ``api_keys`` и **немедленно** сбросить ``keyauth:<sha256>``.
+
+    Повторное удаление уже удалённой строки ошибкой не является. Отказ этой уборки — единственный
+    неуспешный исход выхода (R-L11.6): исключение уходит наверх, и «ок» не отвечается.
+    """
+    state = request.app.state
+    db = state.db
+    await db.init()
+    async with db.session() as session, session.begin():
+        await session.execute(sa_delete(ApiKey).where(ApiKey.key_sha256 == key_sha256))
+    await invalidate_key_cache(state.kv, key_sha256)
+
+
+@router.delete("/api/me/key")
+async def api_logout_key(
+    request: Request,
+    user: Annotated[AuthUser, Depends(authenticate)],
+) -> JSONResponse:
+    """Выход из приложения: отзыв предъявленного ключа и уборка состояния Hub (R-L11).
+
+    Аутентификация — только ключом (решение 111): значение ключа Hub не хранит, поэтому назвать
+    отзываемый ключ он способен ровно в том запросе, где ключ предъявлен; веб-сессия сюда не
+    допускается. Порядок обязателен: отзыв → локальная уборка → аудит → ответ; после ответа
+    повторить отзыв будет нечем. Ни значение ключа, ни его sha256 наружу и в журнал не идут (R-L11.9).
+    """
+    state = request.app.state
+    token = extract_bearer(request)
+    if token is None:  # pragma: no cover - authenticate уже потребовал ключ
+        raise unauthorized()
+    digest = sha256_hex(token)
+    key_alias = await _key_alias_of(request, digest)
+
+    # R-L11.4: лесенка учётных данных — служебный ключ, иначе самоотзыв значением самого ключа.
+    credential = state.settings.litellm_admin_key_value or token
+    status: int | None = None
+    revoke_error: str | None
+    try:
+        response = await state.litellm.key_delete(credential, keys=[token])
+    except LiteLLMUnavailable:
+        revoke_error = REVOKE_UPSTREAM_UNAVAILABLE
+    else:
+        status = response.status_code
+        revoke_error = revoke_error_for(response.status_code, response.body)
+    revoked = revoke_error is None
+    log = logger.info if revoked else logger.warning
+    log(
+        "key_revoke",
+        extra={
+            "user_id": user.user_id,
+            "key_alias": key_alias,
+            "status": status,
+            "reason": "logout",
+        },
+    )
+
+    await _forget_key(request, digest)
+
+    now = state.clock.now()
+    await state.db.audit(
+        "logout",
+        user_id=user.user_id,
+        details={
+            "key_kind": user.key_kind,
+            "key_alias": key_alias,
+            "revoked": revoked,
+            "revoke_error": revoke_error,
+        },
+        ts=now,
+    )
+    await state.db.audit(
+        "key_revoked",
+        user_id=user.user_id,
+        details={"key_alias": key_alias, "reason": "logout", "outcome": "ok" if revoked else "failed"},
+        ts=now,
+    )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "revoked": revoked,
+            "revoke_error": revoke_error,
+            "message": LOGOUT_MESSAGES[revoke_error],
+        }
+    )
 
 
 @router.get("/api/catalog")

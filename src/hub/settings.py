@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     litellm_context_limit: int = Field(default=250000, gt=0)
     litellm_output_limit: int = Field(default=8192, gt=0)
     litellm_timeout: float = Field(default=10.0, gt=0)
+    # R-L11.4, R-L12.3 (решение 115): необязательный служебный ключ LiteLLM с правом управления
+    # ключами. Пуст — отзыв идёт правами самого пользователя (самоотзыв и SSO-JWT).
+    litellm_admin_key: SecretStr | None = None
 
     # --- каталог, хранилища ---
     catalog_path: str = "./catalog.yaml"
@@ -120,6 +123,9 @@ class Settings(BaseSettings):
     # --- вход ---
     login_session_ttl: int = Field(default=600, gt=0)
     key_alias_prefix: str = "opencode"
+    # R-L12.1 (решение 116): повторный вход отзывает прежние постоянные ключи. ``false`` возвращает
+    # прежний контракт I-1 (повторный вход добавляет ключ, прежние остаются валидными).
+    login_revokes_previous_keys: bool = True
     log_level: str = "INFO"
 
     # --- I-3: веб-интерфейс и экран прав (R-T1) ---
@@ -207,7 +213,7 @@ class Settings(BaseSettings):
         _validate_fernet_key(value.get_secret_value())
         return value
 
-    @field_validator("admin_token", mode="after")
+    @field_validator("admin_token", "litellm_admin_key", mode="after")
     @classmethod
     def _empty_admin_token(cls, value: SecretStr | None) -> SecretStr | None:
         if value is not None and not value.get_secret_value():
@@ -306,6 +312,11 @@ class Settings(BaseSettings):
     @property
     def admin_enabled(self) -> bool:
         return self.admin_token is not None
+
+    @property
+    def litellm_admin_key_value(self) -> str | None:
+        """Служебный ключ LiteLLM открытым текстом либо ``None`` (R-L11.4а, R-L12.3)."""
+        return self.litellm_admin_key.get_secret_value() if self.litellm_admin_key else None
 
     @property
     def log_level_int(self) -> int:
