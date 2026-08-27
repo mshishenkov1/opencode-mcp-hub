@@ -238,8 +238,11 @@ def test_all_revoke_error_codes_are_from_the_closed_set() -> None:
     В отличие от прежней версии (ревью, финдинг 3: тест не касался ``src/`` и не мог упасть ни при
     какой поломке), утверждения строятся о РЕАЛЬНОЙ функции ``hub.litellm.revoke_error_for`` и о
     константах, импортированных из неё же, а не о собственной таблице модуля теста. Ломается на:
-    смене значения константы, потере ветки (404, 401/403, 429/500, 2xx-не-объект, сеть/None),
-    неверном соответствии код → причина.
+    потере ветки (404, 401/403, 429/500, 2xx-не-объект, сеть/None), неверном соответствии
+    код → причина, И на смене значения константы — для этого сами константы сверены с буквальными
+    строками спеки (R-L11.4, §33.4) отдельным утверждением ниже, а не только друг с другом: подмена
+    ``revoke_error_for`` на согласованную-но-неверную пару (как в ревью, инъекция 9) обе стороны
+    остальных сравнений сдвинула бы одинаково и прошла бы мимо них незамеченной.
     """
     from hub.litellm import (
         REVOKE_INVALID_RESPONSE,
@@ -247,6 +250,13 @@ def test_all_revoke_error_codes_are_from_the_closed_set() -> None:
         REVOKE_UPSTREAM_UNAVAILABLE,
         revoke_error_for,
     )
+
+    # Константы обязаны совпадать с буквальными значениями спеки, а не только сами с собой —
+    # иначе переименование REVOKE_NOT_PERMITTED (скажем, в "forbidden") прошло бы мимо всех
+    # остальных утверждений этого теста, поскольку они берут ожидание из того же импорта.
+    assert REVOKE_NOT_PERMITTED == "not_permitted"
+    assert REVOKE_UPSTREAM_UNAVAILABLE == "upstream_unavailable"
+    assert REVOKE_INVALID_RESPONSE == "invalid_response"
 
     allowed = {None, REVOKE_NOT_PERMITTED, REVOKE_UPSTREAM_UNAVAILABLE, REVOKE_INVALID_RESPONSE}
     # (status, body, ожидаемая причина) — независимо вычислено по R-L11.4, а не списано из revoke_error_for.
@@ -446,12 +456,12 @@ async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias
     route = mock_key_delete(hub.litellm)
 
     with capture_json_logs() as json_logs:
-        await _login(hub, "sk-1", ll_id="ll-1")
+        await _login(hub, "sk-prev-SECRET", ll_id="ll-1")
         previous_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
-        await _warm_key_cache(hub, "sk-1")
+        await _warm_key_cache(hub, "sk-prev-SECRET")
 
         hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с первым
-        await _login(hub, "sk-2", ll_id="ll-2")
+        await _login(hub, "sk-fresh-SECRET", ll_id="ll-2")
         new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
         # Сторож самой проверки: без реальной коллизии алиасов испытание ничего не проверяет.
         assert new_alias == previous_alias, "тест не достиг коллизии алиасов (проверьте формат/advance)"
@@ -462,12 +472,12 @@ async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias
         assert key_delete_calls(hub.litellm) == []
 
         # Новый ключ работает, прежний — нет, сразу и без единого сдвига часов (R-L12.5).
-        fresh = await hub.get("/api/me", headers=bearer("sk-2"))
-        stale = await hub.get("/api/me", headers=bearer("sk-1"))
+        fresh = await hub.get("/api/me", headers=bearer("sk-fresh-SECRET"))
+        stale = await hub.get("/api/me", headers=bearer("sk-prev-SECRET"))
 
     assert fresh.status_code == 200
     assert stale.status_code == 401
-    assert await hub.app.state.kv.get(f"keyauth:{sha256_hex('sk-1')}") is None
+    assert await hub.app.state.kv.get(f"keyauth:{sha256_hex('sk-prev-SECRET')}") is None
 
     # Строка прежнего ключа удалена; в api_keys u1 осталась только новая.
     remaining = await _api_keys(hub, "u1")
@@ -484,12 +494,12 @@ async def test_relogin_within_the_same_minute_never_revokes_the_new_key_by_alias
 
     # Ни значений ключей, ни их хешей нет ни в аудите, ни в журнале (R-K3).
     dumped_audit = json.dumps(await audit_rows(hub.app), default=str, ensure_ascii=False)
-    digest_1, digest_2 = sha256_hex("sk-1"), sha256_hex("sk-2")
-    for secret in ("sk-1", "sk-2", digest_1, digest_2):
+    digest_1, digest_2 = sha256_hex("sk-prev-SECRET"), sha256_hex("sk-fresh-SECRET")
+    for secret in ("sk-prev-SECRET", "sk-fresh-SECRET", digest_1, digest_2):
         assert secret not in dumped_audit, f"{secret} в audit_log"
     everything = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
     assert everything, "журнал пуст — проверка вырождена"
-    for secret in ("sk-1", "sk-2"):
+    for secret in ("sk-prev-SECRET", "sk-fresh-SECRET"):
         assert secret not in everything, secret
     assert digest_1 not in hub_log(caplog, json_logs), "хеш прежнего ключа попал в журнал Hub"
     assert digest_2 not in hub_log(caplog, json_logs), "хеш нового ключа попал в журнал Hub"
@@ -509,15 +519,19 @@ async def test_relogin_within_the_same_minute_mixed_with_a_distinct_previous_key
     route = mock_key_delete(hub.litellm)
 
     with capture_json_logs() as json_logs:
-        await _login(hub, "sk-1", ll_id="ll-1")
+        await _login(hub, "sk-prev-SECRET", ll_id="ll-1")
         previous_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
         # Прежний ключ другой установки/времени добавлен НАПРЯМУЮ (не через вход), иначе он был бы
-        # отозван уже первым входом — коллизия нужна только для алиаса sk-1, не для sk-legacy.
+        # отозван уже первым входом — коллизия нужна только для алиаса sk-prev-SECRET, не для sk-legacy.
         await insert_key(hub.app, "sk-legacy", "u1", key_alias="opencode-u1-20260101-0000")
         assert len(await _api_keys(hub, "u1")) == 2
+        # Прогреваем keyauth ОБОИХ прежних ключей до второго входа — иначе прогон (б) не испытывал
+        # бы немедленность сброса (R-L12.5): 401 достигался бы тем, что кэш и не был заполнен.
+        await _warm_key_cache(hub, "sk-prev-SECRET")
+        await _warm_key_cache(hub, "sk-legacy")
 
-        hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с алиасом sk-1
-        await _login(hub, "sk-2", ll_id="ll-2")
+        hub.clock.advance(5)  # тот же час:минута — алиас второго входа совпадёт с алиасом sk-prev-SECRET
+        await _login(hub, "sk-fresh-SECRET", ll_id="ll-2")
         new_alias = (await _api_keys(hub, "u1"))[0]["key_alias"]
         assert new_alias == previous_alias, "тест не достиг коллизии алиасов (проверьте формат/advance)"
 
@@ -529,13 +543,17 @@ async def test_relogin_within_the_same_minute_mixed_with_a_distinct_previous_key
         assert previous_alias not in calls[0]["key_aliases"]
 
         # Оба прежних ключа отвечают 401 сразу и без единого сдвига часов, новый — 200 (R-L12.5).
-        fresh = await hub.get("/api/me", headers=bearer("sk-2"))
-        stale_collided = await hub.get("/api/me", headers=bearer("sk-1"))
+        fresh = await hub.get("/api/me", headers=bearer("sk-fresh-SECRET"))
+        stale_collided = await hub.get("/api/me", headers=bearer("sk-prev-SECRET"))
         stale_legacy = await hub.get("/api/me", headers=bearer("sk-legacy"))
 
     assert fresh.status_code == 200
     assert stale_collided.status_code == 401
     assert stale_legacy.status_code == 401
+    # Прямая проверка того, ради чего кэш прогревался: положительный результат обоих прежних
+    # ключей действительно ушёл из keyauth, а не просто никогда там не появлялся.
+    assert await hub.app.state.kv.get(f"keyauth:{sha256_hex('sk-prev-SECRET')}") is None
+    assert await hub.app.state.kv.get(f"keyauth:{sha256_hex('sk-legacy')}") is None
 
     remaining = await _api_keys(hub, "u1")
     assert len(remaining) == 1 and remaining[0]["key_alias"] == new_alias
@@ -553,13 +571,13 @@ async def test_relogin_within_the_same_minute_mixed_with_a_distinct_previous_key
     # Ни значений ключей, ни их хешей нет ни в аудите, ни в журнале (R-K3).
     dumped_audit = json.dumps(await audit_rows(hub.app), default=str, ensure_ascii=False)
     digest_1, digest_2, digest_legacy = (
-        sha256_hex("sk-1"), sha256_hex("sk-2"), sha256_hex("sk-legacy"),
+        sha256_hex("sk-prev-SECRET"), sha256_hex("sk-fresh-SECRET"), sha256_hex("sk-legacy"),
     )
-    for secret in ("sk-1", "sk-2", "sk-legacy", digest_1, digest_2, digest_legacy):
+    for secret in ("sk-prev-SECRET", "sk-fresh-SECRET", "sk-legacy", digest_1, digest_2, digest_legacy):
         assert secret not in dumped_audit, f"{secret} в audit_log"
     everything = "\n".join([record_text(r) for r in caplog.records] + json_logs.raw())
     assert everything, "журнал пуст — проверка вырождена"
-    for secret in ("sk-1", "sk-2", "sk-legacy"):
+    for secret in ("sk-prev-SECRET", "sk-fresh-SECRET", "sk-legacy"):
         assert secret not in everything, secret
     for digest in (digest_1, digest_2, digest_legacy):
         assert digest not in hub_log(caplog, json_logs), f"хеш ключа попал в журнал Hub: {digest}"
