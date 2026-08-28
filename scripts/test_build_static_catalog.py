@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -146,6 +147,226 @@ def test_проверка_ловит_ссылку_на_секрет_и_непо�
     assert len(problems) == 2
     assert any("env:VAR" in p for p in problems)
     assert any("${VAR}" in p for p in problems)
+
+
+# --- Граница публикации способов подключения (R-U8.1, ревизия 4.4) ----------
+#
+# `public_view` этой ветки способов подключения ещё не отдаёт, поэтому проверка идёт не сквозняком,
+# а на фикстурах: тело собрано ровно в той форме, в какой его отдаёт `ServerEntry.public_view` и
+# `public_auth_methods` ветки i3. Так аудит проверяется до слияния — а слияние без него вырезало бы
+# из статического каталога поля, без которых сборка без Hub не подключается вовсе.
+
+#: Значение переменной окружения, подставленной в заголовок: после `${VAR}` оно неотличимо от
+#: литерала, и поймать его можно только сравнением со значением переменной.
+GW_SECRET = "gw-live-Zx91"
+SECRET_VALUES = frozenset({GW_SECRET})
+
+VERIFY_BLOCK = {
+    "url": "https://tag.test/api/me",
+    "method": "GET",
+    "headers": {"Authorization": "Bearer {{access_token}}"},
+    "expect_status": 200,
+    "account_field": "login",
+    "require_account": True,
+}
+
+EXCHANGE_BLOCK = {
+    "url": "https://tag.test/api/tokens",
+    "method": "POST",
+    "headers": {"Authorization": "Bearer {{access_token}}"},
+    "body": {"name": "opencode"},
+    "expect_status": 201,
+    "token_field": "token",
+    "token_id_field": "id",
+    "description": "Постоянный токен OpenCode",
+    "revoke": {
+        "url": "https://tag.test/api/tokens/revoke",
+        "method": "POST",
+        "headers": {"Authorization": "Bearer {{access_token}}"},
+        "body": None,
+        "expect_status": 204,
+    },
+}
+
+OAUTH_METHOD = {
+    "id": "oauth",
+    "title": "OAuth",
+    "type": "oauth2",
+    "available": True,
+    "unavailable_reason": None,
+    "issues_permanent_token": False,
+}
+
+USER_TOKEN_METHOD = {
+    "id": "token",
+    "title": "Личный токен",
+    "type": "user_token",
+    "available": True,
+    "unavailable_reason": None,
+    "issues_permanent_token": True,
+    # `secret: true` — признак «маскировать ввод», а не секрет: поле публиковалось и до ревизии.
+    "field": {"label": "Токен", "hint": None, "docs_url": None, "secret": True,
+              "placeholder": None, "min_length": 8, "max_length": 512},
+    "verify": VERIFY_BLOCK,
+    "exchange": EXCHANGE_BLOCK,
+}
+
+DIRECT_CARD = {
+    "alias": "tag",
+    "title": "ТЭГ",
+    "status": "ga",
+    "mode": "facade",
+    "mcp_url": "https://hub.test/mcp/tag",
+    "permission_model": {"kind": "consent", "presets": {}},
+    "auth_kind": "user_token",
+    "auth_methods": [USER_TOKEN_METHOD, OAUTH_METHOD],
+    "upstream": {
+        "url": "https://mcp-tag.corp/mcp",
+        "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+        "static_headers": {"X-Client": "opencode"},
+    },
+}
+
+OAUTH_CARD = {
+    "alias": "gitlab",
+    "title": "GitLab",
+    "status": "ga",
+    "mode": "facade",
+    "mcp_url": "https://hub.test/mcp/gitlab",
+    "permission_model": {"kind": "header_groups", "groups": [], "always": []},
+    "auth_kind": "oauth2",
+    "auth_methods": [dict(OAUTH_METHOD)],
+}
+
+
+def body(*servers: dict) -> dict:
+    """Конверт `GET /api/catalog` с глубокой копией карточек: тест правит свою, а не общую."""
+    return {"version": 7, "servers": [copy.deepcopy(s) for s in servers]}
+
+
+def check(document: dict) -> list[str]:
+    return bsc.audit(document, secret_values=SECRET_VALUES)
+
+
+def test_публикуемые_поля_доступного_user_token_аудит_пропускает() -> None:
+    # R-U8.1 пп. 2, 4: verify, exchange (вместе с revoke) и блок upstream карточки — это ровно то,
+    # без чего приложение не подключится напрямую, и вырезать их сборщику больше нельзя.
+    assert check(body(DIRECT_CARD, OAUTH_CARD)) == []
+
+
+def test_подставленный_адрес_публикуется_а_неподставленный_ловится() -> None:
+    # R-U8.1 п. 6: четыре адреса — единственное исключение, они идут наружу после подстановки.
+    ok = body(DIRECT_CARD)
+    ok["servers"][0]["upstream"]["url"] = "https://tag.test/mcp"
+    assert check(ok) == []
+
+    broken = body(DIRECT_CARD)
+    broken["servers"][0]["auth_methods"][0]["verify"]["url"] = "${TAG_VERIFY_URL}"
+    assert any("${VAR}" in p for p in check(broken))
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        ("auth_methods", 0, "verify"),
+        ("auth_methods", 0, "exchange"),
+    ],
+)
+def test_блоки_способа_у_недоступного_user_token_запрещены(where: tuple) -> None:
+    # R-U8.1 п. 3 (R-U1, решение 73): значения недоступного способа наружу не отдаются.
+    document = body(DIRECT_CARD)
+    document["servers"][0]["auth_methods"][0]["available"] = False
+    problems = check(document)
+    assert any(where[-1] in p and "запрещённое поле" in p for p in problems)
+
+
+def test_блок_verify_у_способа_oauth2_запрещён_как_прежде() -> None:
+    # R-U8.1 п. 1: у oauth2 граница не изменилась ни на одно поле — рядом лежит client_secret.
+    document = body(DIRECT_CARD)
+    document["servers"][0]["auth_methods"][1]["verify"] = copy.deepcopy(VERIFY_BLOCK)
+    assert any("auth_methods[1].verify" in p for p in check(document))
+
+
+def test_upstream_у_карточки_без_доступного_user_token_запрещён() -> None:
+    # R-U8.1 п. 4: адрес цели отдаётся только карточке, объявившей доступный user_token.
+    document = body(OAUTH_CARD)
+    document["servers"][0]["upstream"] = {
+        "url": "https://internal.mcp/gitlab",
+        "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+    }
+    problems = check(document)
+    assert any("без доступного способа user_token" in p for p in problems)
+    assert any("credential_headers" in p and "запрещённое поле" in p for p in problems)
+
+
+# --- Аудит не ослаб --------------------------------------------------------
+
+
+def test_client_secret_внутри_открытого_блока_ловится() -> None:
+    document = body(DIRECT_CARD)
+    document["servers"][0]["auth_methods"][0]["exchange"]["client_secret"] = "s3cr3t"
+    assert any("client_secret" in p for p in check(document))
+
+
+def test_ссылка_env_var_в_credential_headers_ловится() -> None:
+    # AC-14: ни значение переменной, ни само имя с префиксом env: наружу не идут никогда.
+    document = body(DIRECT_CARD)
+    document["servers"][0]["upstream"]["credential_headers"]["X-Gw"] = "env:GW_SECRET"
+    assert any("env:VAR" in p for p in check(document))
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        ("upstream", "static_headers"),
+        ("upstream", "credential_headers"),
+        ("auth_methods", 0, "verify", "headers"),
+        ("auth_methods", 0, "exchange", "headers"),
+        ("auth_methods", 0, "exchange", "body"),
+        ("auth_methods", 0, "exchange", "revoke", "headers"),
+    ],
+)
+def test_значение_подставленной_переменной_в_заголовке_ловится(where: tuple) -> None:
+    # Главный случай: `${GW_SECRET}` разворачивается ДО валидации схемы, поэтому в готовом теле
+    # заголовок неотличим от литерала. Именно static_headers схема назначает местом для секретов.
+    document = body(DIRECT_CARD)
+    node = document["servers"][0]
+    for part in where:
+        node = node[part]
+    node["X-Gw"] = GW_SECRET
+    assert any("значение переменной окружения" in p for p in check(document))
+
+
+def test_expiry_и_exchange_list_наружу_не_идут() -> None:
+    # R-U8.1 п. 5: срок годности токена (R-U18) и список выпущенных (R-U15.3) исполняет Hub.
+    with_expiry = body(DIRECT_CARD)
+    with_expiry["servers"][0]["auth_methods"][0]["expiry"] = {"field": "expires_at"}
+    assert any("expiry" in p for p in check(with_expiry))
+
+    with_list = body(DIRECT_CARD)
+    with_list["servers"][0]["auth_methods"][0]["exchange"]["list"] = {"url": "https://tag.test/x"}
+    assert any("exchange.list" in p for p in check(with_list))
+
+
+def test_имя_заголовка_групп_разрешений_наружу_не_идёт() -> None:
+    # R-C6: permission_model.header остаётся закрытым; в словарях разрешений слово header законно.
+    document = body(OAUTH_CARD)
+    document["servers"][0]["permission_model"]["header"] = "Enabled-Groups"
+    assert any("permission_model.header" in p for p in check(document))
+
+
+def test_неизвестное_поле_открытого_блока_останавливает_сборку() -> None:
+    # Перечень разрешённого (решение 120): поле, добавленное в public_view завтра, не утечёт молча.
+    document = body(DIRECT_CARD)
+    document["servers"][0]["upstream"]["proxy_secret"] = "abc"
+    assert any("не входит в состав публикуемого блока" in p for p in check(document))
+
+
+def test_послабление_field_secret_только_для_признака() -> None:
+    # `secret: true` — булев признак маскировки ввода; строка с тем же именем остаётся запрещённой.
+    document = body(DIRECT_CARD)
+    document["servers"][0]["auth_methods"][0]["field"]["secret"] = "s3cr3t"
+    assert any("field.secret" in p for p in check(document))
 
 
 def test_ненастроенный_сервер_пропускается_с_причиной(tmp_path: Path) -> None:
