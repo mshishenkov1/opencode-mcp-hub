@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -22,6 +23,8 @@ from pydantic import (
 )
 
 from hub.errors import CatalogError
+
+logger = logging.getLogger("hub.catalog")
 
 # Spec 1.1, R-C1: alias — 1–32 символа, ^[a-z][a-z0-9-]{0,31}$ (односимвольные alias из AC-54/AC-55 валидны).
 ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -483,8 +486,80 @@ class _PathError(ValueError):
         self.text = text
 
 
+# R-U8.1 п. 6: четыре адреса — единственное исключение из правила дословности. Пути даны
+# относительно самого блока; ``exchange.list`` наружу не идёт никогда (R-U15.3), поэтому его
+# значения на публикацию блока ``exchange`` не влияют.
+_VERIFY_VERBATIM_SKIP = frozenset({("url",)})
+_EXCHANGE_VERBATIM_SKIP = frozenset({("url",), ("revoke", "url"), ("list",)})
+_UPSTREAM_VERBATIM_SKIP: frozenset[tuple[str, ...]] = frozenset()
+
+
+def _is_verbatim(value: Any) -> bool:
+    """R-U8.1 п. 6: строка записана в карточке **дословно** и её можно отдать наружу.
+
+    Непубликуемы ровно два вида значений: ссылка ``env:VAR`` (R-C2/AC-14 — ни имя переменной, ни
+    её значение наружу не идут никогда) и строка с подстановкой ``${VAR}`` (R-C2 разворачивает её
+    при загрузке, и по строке результата уже не сказать, был там адрес или секрет). Решение
+    принимается по **сырому** значению карточки — после ``$ref``, но до подстановки (R-C3):
+    после неё ``"${GW_SECRET}"`` неотличима от литерала ``"Bearer {{access_token}}"``.
+    Нестроковые листья (числа, флаги, ``null``) секрета не несут.
+    """
+    if not isinstance(value, str):
+        return True
+    if ENV_REF_RE.match(value):
+        return False
+    return "${" not in value
+
+
+def _all_verbatim(node: Any, rel: tuple[str, ...], skip: frozenset[tuple[str, ...]]) -> bool:
+    """Все строковые листья сырого блока публикуемы (R-U8.1 п. 6), кроме путей из ``skip``."""
+    if rel in skip:
+        return True
+    if isinstance(node, dict):
+        return all(_all_verbatim(v, (*rel, str(k)), skip) for k, v in node.items())
+    if isinstance(node, list):
+        return all(_all_verbatim(v, (*rel, str(i)), skip) for i, v in enumerate(node))
+    return _is_verbatim(node)
+
+
+@dataclass(frozen=True)
+class Publication:
+    """Какие блоки карточки прошли проверку дословности (R-U8.1 п. 6) и могут быть опубликованы.
+
+    Решение принимается один раз при загрузке каталога по сырой карточке и от пользователя не
+    зависит. Значения по умолчанию — «ничего не публикуется»: карточка, для которой проверка не
+    выполнялась, прямой режим не отдаёт (отказ в безопасную сторону).
+    """
+
+    upstream: bool = False
+    verify: frozenset[str] = frozenset()
+    exchange: frozenset[str] = frozenset()
+
+
+def _publication(raw: Any, model: ServerModel) -> Publication:
+    """Проверка дословности (R-U8.1 п. 6) по сырой карточке — после ``$ref``, до ``${VAR}``."""
+    raw_methods = raw.get("auth_methods") if isinstance(raw, dict) else None
+    raw_list: list[Any] = raw_methods if isinstance(raw_methods, list) else []
+    verify: set[str] = set()
+    exchange: set[str] = set()
+    for method, raw_method in zip(model.auth_methods or [], raw_list, strict=False):
+        if not isinstance(method, AuthUserToken) or not isinstance(raw_method, dict):
+            continue
+        method_id = method.id or ""
+        if _all_verbatim(raw_method.get("verify"), (), _VERIFY_VERBATIM_SKIP):
+            verify.add(method_id)
+        if _all_verbatim(raw_method.get("exchange"), (), _EXCHANGE_VERBATIM_SKIP):
+            exchange.add(method_id)
+    raw_server: Mapping[str, Any] = raw if isinstance(raw, dict) else {}
+    upstream = all(
+        _all_verbatim(raw_server.get(name), (), _UPSTREAM_VERBATIM_SKIP)
+        for name in ("credential_headers", "static_headers")
+    )
+    return Publication(upstream=upstream, verify=frozenset(verify), exchange=frozenset(exchange))
+
+
 def _public_headers(headers: Mapping[str, Any]) -> dict[str, str] | None:
-    """Заголовки наружу (§3.2 «Граница публикации», AC-14).
+    """Набор ``имя → строка`` наружу: заголовки и тела запросов (§3.2 «Граница публикации», AC-14).
 
     Публикуется только строковое значение — шаблон вида ``Bearer {{access_token}}``. Значение
     ``env:VAR`` наружу не идёт **ни ссылкой, ни развёрнутым значением** (AC-14): подставить его
@@ -492,6 +567,10 @@ def _public_headers(headers: Mapping[str, Any]) -> dict[str, str] | None:
     возвращается ``None``, и способ прямым режимом не подключается (§3.2). Половинчатая публикация
     (заголовок выброшен, остальные оставлены) запрещена намеренно: клиент получил бы запрос без
     обязательного заголовка и узнал бы об этом только по отказу целевой системы.
+
+    R-U8.1 п. 8: это единственный путь значений заголовков и тел в публичное представление.
+    Вторая половина границы — дословность (R-U8.1 п. 6): она проверяется по сырой карточке при
+    загрузке (``_publication``), потому что после подстановки ``${VAR}`` значение — обычная ``str``.
     """
     out: dict[str, str] = {}
     for name, value in headers.items():
@@ -520,13 +599,14 @@ def _public_verify(verify: TokenVerify) -> dict[str, Any] | None:
 def _public_revoke(revoke: TokenExchangeRevoke) -> dict[str, Any] | None:
     """Блок отзыва выпущенного токена наружу (§3.2). Клиент ищет его как ``exchange.revoke``."""
     headers = _public_headers(revoke.headers)
-    if headers is None:
+    body = None if revoke.body is None else _public_headers(revoke.body)
+    if headers is None or (revoke.body is not None and body is None):
         return None
     return {
         "url": revoke.url,
         "method": revoke.method,
         "headers": headers,
-        "body": dict(revoke.body) if revoke.body is not None else None,
+        "body": body,
         "expect_status": revoke.expect_status,
     }
 
@@ -536,16 +616,21 @@ def _public_exchange(exchange: TokenExchange) -> dict[str, Any] | None:
 
     Запрос списка выпущенных токенов (``exchange.list``, R-U15.3) не публикуется: уборку «сирот»
     делает Hub, в перечне §3.2 этого блока нет.
+
+    R-U8.1 п. 7: непубликуемое значение в ``headers``, ``body``, ``revoke.headers`` или
+    ``revoke.body`` снимает блок **целиком вместе с вложенным** ``revoke`` — публиковать обмен без
+    отзыва нельзя: приложение выпустило бы токен, который нечем отозвать.
     """
     headers = _public_headers(exchange.headers)
+    body = None if exchange.body is None else _public_headers(exchange.body)
     revoke = _public_revoke(exchange.revoke)
-    if headers is None or revoke is None:
+    if headers is None or revoke is None or (exchange.body is not None and body is None):
         return None
     return {
         "url": exchange.url,
         "method": exchange.method,
         "headers": headers,
-        "body": dict(exchange.body) if exchange.body is not None else None,
+        "body": body,
         "expect_status": exchange.expect_status,
         "token_field": exchange.token_field,
         "token_id_field": exchange.token_id_field,
@@ -575,6 +660,9 @@ class ServerEntry:
     index: int
     unconfigured: bool = False
     missing_vars: tuple[str, ...] = ()
+    # R-U8.1 п. 6: результат проверки дословности по сырой карточке — считается один раз при
+    # загрузке (``_publication``), от пользователя не зависит.
+    publication: Publication = Publication()
 
     @property
     def alias(self) -> str:
@@ -635,12 +723,13 @@ class ServerEntry:
         Для ``type: "oauth2"`` граница прежняя **дословно**: ни ``client_id``/``client_secret``, ни
         ``scopes``, ни URL авторизации и обмена — рядом с ними лежат секреты и ссылки ``env:VAR``.
 
-        Для ``type: "user_token"`` публикуются ``field``, ``verify`` и ``exchange`` (вместе с
-        вложенным ``revoke``): секретов в них нет по построению — это адреса, методы и шаблоны
-        заголовков вида ``{{access_token}}``, а единственное секретное значение схемы (сам токен
-        пользователя) в каталоге не лежит и лежать не может. Блок со ссылкой ``env:VAR`` в
-        заголовках не публикуется целиком (см. ``_public_headers``). ``expiry`` (R-U18) не
-        публикуется: срок годности присланного токена читает Hub, в перечне §3.2 блока нет.
+        Для ``type: "user_token"`` с ``available: true`` публикуются ``field``, ``verify`` и
+        ``exchange`` (вместе с вложенным ``revoke``). Границу держит не «секретов тут нет по
+        построению» — это неверно: ``env:VAR`` допустима в заголовках прямо по схеме, а ``${VAR}``
+        разворачивается до валидации, — а правило R-U8.1 п. 6–8: наружу идёт только значение,
+        записанное в карточке **дословно**, и любое другое снимает блок целиком (``_publication``
+        и ``_public_headers``). ``expiry`` (R-U18) не публикуется никогда: срок годности присланного
+        токена читает Hub, в перечне §3.2 блока нет.
         """
         result: list[dict[str, Any]] = []
         for method in self.auth_methods:
@@ -669,10 +758,13 @@ class ServerEntry:
                 # R-U1 (решение 73): у способа с available: false значения наружу не отдаются —
                 # внутри него допустимы незаданные ${VAR}, и подключиться им нельзя (409, R-U4).
                 if method.available:
-                    verify = _public_verify(method.verify)
-                    if verify is not None:
-                        view["verify"] = verify
-                    if method.exchange is not None:
+                    # R-U8.1 п. 6 и п. 7: блок публикуется, только если **все** его строковые
+                    # значения записаны в карточке дословно; иначе блока нет целиком.
+                    if method.id in self.publication.verify:
+                        verify = _public_verify(method.verify)
+                        if verify is not None:
+                            view["verify"] = verify
+                    if method.exchange is not None and method.id in self.publication.exchange:
                         exchange = _public_exchange(method.exchange)
                         if exchange is not None:
                             view["exchange"] = exchange
@@ -687,11 +779,16 @@ class ServerEntry:
         У карточки, где все способы — ``oauth2``, блока нет: граница для них прежняя дословно; у
         карточки, где единственный способ ``user_token`` объявлен недоступным, блока тоже нет —
         подключиться им нельзя (R-U1, R-U4), и отдавать наружу адрес незачем.
-        Ссылка ``env:VAR`` в любом из заголовков снимает публикацию блока целиком — подставить её
-        клиенту нечем, и прямым режимом такой коннектор не подключается (§3.2).
+        Непубликуемое значение (R-U8.1 п. 6) в ``credential_headers`` или ``static_headers`` —
+        ссылка ``env:VAR`` или подстановка ``${VAR}`` — снимает публикацию блока **целиком**:
+        подставить её клиенту нечем, и прямым режимом такой коннектор не подключается (§3.2).
+        Адрес ``upstream_url`` — одно из четырёх исключений п. 6: он публикуется подставленным
+        (без него прямого режима нет), а ссылка ``env:VAR`` в адресе запрещена схемой (AC-15).
         """
         m = self.model
         if not any(method.available for method in self.user_token_methods()) or not m.upstream_url:
+            return None
+        if not self.publication.upstream:
             return None
         credential = _public_headers(m.credential_headers or {})
         if not credential:
@@ -1074,6 +1171,59 @@ def _validate_server(raw: Any, index: int) -> ServerModel:
         raise CatalogError(_format_schema_error(server_path, exc)) from exc
 
 
+def _dropped_public_blocks(entry: ServerEntry) -> list[tuple[str, str | None]]:
+    """Блоки, снятые с публикации непубликуемым значением (R-U8.1 п. 7) — вход для следа п. 9.
+
+    Перечисляются только блоки, которые **иначе были бы опубликованы**: способ ``oauth2``, способ с
+    ``available: false``, ``expiry`` и ``exchange.list`` в этот перечень не попадают (они не
+    публикуются по пп. 1, 3 и 5, а не из-за значения), как и карточки ``unconfigured`` — их вовсе
+    нет в публичных списках.
+    """
+    if entry.unconfigured:
+        return []
+    dropped: list[tuple[str, str | None]] = []
+    for method in entry.auth_methods:
+        if not isinstance(method, AuthUserToken) or not method.available:
+            continue
+        if method.id not in entry.publication.verify:
+            dropped.append(("verify", method.id))
+        if method.exchange is not None and method.id not in entry.publication.exchange:
+            dropped.append(("exchange", method.id))
+    if (
+        not entry.publication.upstream
+        and entry.model.upstream_url
+        and any(method.available for method in entry.user_token_methods())
+    ):
+        dropped.append(("upstream", None))
+    return dropped
+
+
+def _log_dropped_public_blocks(entries: list[ServerEntry]) -> None:
+    """R-U8.1 п. 9: одна запись WARNING на снятый блок при **каждой** загрузке каталога.
+
+    В записи только ``alias``, ``id`` способа и имя блока: ни значений заголовков и тел, ни имён
+    переменных с префиксом ``env:`` (R-C2, R-U9). Потеря прямого режима не должна быть молчаливой.
+    """
+    for entry in entries:
+        for block, method_id in _dropped_public_blocks(entry):
+            if method_id is None:
+                logger.warning(
+                    "каталог: сервер '%s' — блок upstream не публикуется: среди значений "
+                    "credential_headers/static_headers есть непубликуемое (R-U8.1 п. 6, п. 7); "
+                    "прямой режим этой карточкой недоступен",
+                    entry.alias,
+                )
+            else:
+                logger.warning(
+                    "каталог: сервер '%s', способ '%s' — блок %s не публикуется: среди его "
+                    "значений есть непубликуемое (R-U8.1 п. 6, п. 7); прямой режим этим способом "
+                    "недоступен",
+                    entry.alias,
+                    method_id,
+                    block,
+                )
+
+
 def parse_catalog(document: Any, env: Mapping[str, str] | None = None, *, source: str | None = None) -> Catalog:
     """Разобрать уже загруженный YAML-документ по правилам R-C1..R-C3."""
     environ: Mapping[str, str] = os.environ if env is None else env
@@ -1126,8 +1276,11 @@ def parse_catalog(document: Any, env: Mapping[str, str] | None = None, *, source
                 index=i,
                 unconfigured=bool(missing),
                 missing_vars=tuple(dict.fromkeys(name for _, name in missing)),
+                # R-U8.1 п. 6: решение о дословности принимается по сырой карточке — до подстановки.
+                publication=_publication(raw, model),
             )
         )
+    _log_dropped_public_blocks(entries)
     return Catalog(version=version, servers=tuple(entries), defaults=defaults, source=source)
 
 
@@ -1224,6 +1377,7 @@ __all__ = [
     "PermissionConsent",
     "PermissionHeaderGroups",
     "PermissionToolFilter",
+    "Publication",
     "Secret",
     "ServerEntry",
     "ServerModel",
