@@ -16,9 +16,7 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from hub.catalog import _EXCHANGE_VERBATIM_SKIP as _B252_ACTUAL_EXCHANGE_SKIP
-from hub.catalog import _UPSTREAM_VERBATIM_SKIP as _B252_ACTUAL_UPSTREAM_SKIP
-from hub.catalog import _VERIFY_VERBATIM_SKIP as _B252_ACTUAL_VERIFY_SKIP
+import hub.catalog as _b252_catalog_module
 from hub.catalog import (
     TokenExchange,
     TokenExchangeRevoke,
@@ -991,12 +989,22 @@ def _b252_clean_card(alias: str) -> dict[str, Any]:
     публикуются, ``static_headers`` непусты и доходят до опубликованного ``upstream`` (единственное
     место в наборе, где это происходит). Отдельная функция — не только карточка исходного прогона
     (``alias='clean'``), но и опорная точка сторожа перечня (§34.5): он ходит по опубликованному
-    представлению ровно этой карточки, а не по списку, зашитому в код."""
+    представлению ровно этой карточки, а не по списку, зашитому в код.
+
+    ``icon`` (ревью reports/review-rev44-5.json, major, N24/N25): необязательное поле самой
+    карточки (``ServerModel.icon``), сегодня нигде не читаемое кодом публикации — заведомо
+    безопасное значение. Задано непустым здесь намеренно, чтобы условный ключ, который публикация
+    когда-нибудь могла бы отдать «только при заданном ``icon``» (в любом из трёх блоков — upstream,
+    verify, exchange), сработал уже на эталонном экземпляре и попал под сверку 2 ниже: путь обхода
+    строится по значениям ОДНОГО экземпляра, и условие, ложное на эталоне, для обхода не
+    существует. На неизменённом коде значение никуда не публикуется и состав ни одного блока не
+    меняет."""
     return user_token_facade(
         alias,
         methods=[_b252_method()],
         upstream_url="${B252_MCP_URL}",
         static_headers={"X-Static": "static-header-literal-value"},
+        icon="https://hub.test/icon-b252.svg",
     )
 
 
@@ -1481,6 +1489,48 @@ _B252_EXPECTED_EXCHANGE_SKIP: frozenset[tuple[str, ...]] = frozenset(
 _B252_EXPECTED_UPSTREAM_SKIP: frozenset[tuple[str, ...]] = frozenset()
 
 
+def _b252_capture_verbatim_skip(
+    alias: str,
+) -> tuple[frozenset[tuple[str, ...]], frozenset[tuple[str, ...]], frozenset[tuple[str, ...]]]:
+    """Перехватить множества пропуска, реально дошедшие до ``_all_verbatim`` аргументом при разборе
+    эталонной карточки (§34.5, сверка 1, задание ревью reports/review-rev44-5.json, major).
+
+    Сверять модульные константы (``_VERIFY_VERBATIM_SKIP`` и т.п.) недостаточно: они совпадают с
+    тем, что реально получает проверка дословности, только пока никто не передал ``skip`` иначе —
+    инъекция N27 того же ревью добавляет путь пропуска не в константу, а в МЕСТЕ ВЫЗОВА
+    (``_all_verbatim(raw_method.get("verify"), (), _VERIFY_VERBATIM_SKIP | {("headers",
+    "X-Request-Id")})``), и сверка констант её не видит, хотя утечка подтверждена оракулом. Сверять
+    нужно то, что доходит до функции аргументом, — единственный способ это увидеть — подменить саму
+    функцию на время одного разбора и записать значение параметра ``skip``.
+
+    Порядок вызовов ``_all_verbatim`` с ``rel == ()`` внутри ``_publication`` (src/hub/catalog.py):
+    ``verify`` способа, ``exchange`` способа, затем ``credential_headers`` и ``static_headers``
+    блока upstream — по одному верхнему вызову на карточку с одним способом ``user_token``, а
+    именно такова эталонная карточка ``_b252_clean_card``. Рекурсивные вызовы внутри
+    ``_all_verbatim`` всегда расширяют ``rel``, поэтому ``rel == ()`` однозначно отмечает верхний
+    вызов на блок, а не узел внутри него.
+    """
+    original = _b252_catalog_module._all_verbatim
+    calls: list[frozenset[tuple[str, ...]]] = []
+
+    def _spy(node: Any, rel: tuple[str, ...], skip: frozenset[tuple[str, ...]]) -> bool:
+        if rel == ():
+            calls.append(skip)
+        return original(node, rel, skip)
+
+    _b252_catalog_module._all_verbatim = _spy
+    try:
+        parsed = parse_catalog(catalog_doc([_b252_clean_card(alias)]), env=_B252_ENV)
+    finally:
+        _b252_catalog_module._all_verbatim = original
+    assert parsed.get(alias) is not None
+
+    assert len(calls) == 4, calls
+    verify_skip, exchange_skip, upstream_cred_skip, upstream_static_skip = calls
+    assert upstream_cred_skip == upstream_static_skip, (upstream_cred_skip, upstream_static_skip)
+    return verify_skip, exchange_skip, upstream_cred_skip
+
+
 # --- §34.5, сверка 2: состав публикуемых полей против состава обхода (то же ревью, major) -------
 
 
@@ -1501,31 +1551,50 @@ def _b252_unwrap_annotated(annotation: Any) -> Any:
 
 
 def _b252_type_carries_string(annotation: Any) -> bool:
-    """Тип способен нести строку: сам ``str``, либо объединение, где ``str`` — один из вариантов
-    (нужно для значений словарей вроде ``HeaderValue = str | EnvRef``)."""
-    annotation = _b252_unwrap_annotated(_b252_strip_optional(annotation))
-    if annotation is str:
-        return True
-    if typing.get_origin(annotation) in (types.UnionType, typing.Union):
-        return any(_b252_type_carries_string(a) for a in typing.get_args(annotation))
-    return False
+    """Тип способен нести строку наружу: сам ``str``, ``Any`` (способен нести что угодно, включая
+    строку), ``Literal[...]`` из строк, объединение (включая необязательность), где хотя бы один
+    вариант несёт строку, ``Annotated[X, ...]`` через ``X`` (нужно для значений словарей вроде
+    ``HeaderValue = Annotated[str | EnvRef, ...]``), контейнер (``list``/``tuple``/``set``/
+    ``frozenset``) с элементом, несущим строку, либо ``dict`` со значением, несущим строку.
 
-
-def _b252_field_carries_string(annotation: Any) -> bool:
-    """Поле модели способно нести строку наружу (§34.5, сверка 2): аннотация после снятия ``| None``
-    — это ``str``, ``Literal[...]`` из строк, ``dict`` со строковым значением, или вложенная модель
-    (её имя учитывается как поле — рекурсия по её собственным полям делается отдельным вызовом для
-    соответствующего вложенного блока, а не здесь)."""
-    annotation = _b252_strip_optional(annotation)
-    if annotation is str:
+    §34.5, minor (reports/review-rev44-5.json, N26): таксономия расширена — прежде контейнеры
+    (``list[str]``, ``tuple[str, ...]``), необъединённые с ``None`` объединения (``str | int``) и
+    ``Annotated`` на уровне САМОГО поля (не только внутри значения словаря) не считались несущими
+    строку нигде, кроме как в этой функции для значений словарей; поле с такой аннотацией сверка 2
+    пропускала молча (инъекция N26: ``verify.account_prefix: list[str] | None``, публикуемая
+    условно, — сверка 2 зелёная там, где со ``str`` та же инъекция красная)."""
+    annotation = _b252_unwrap_annotated(annotation)
+    if annotation is str or annotation is Any:
         return True
     origin = typing.get_origin(annotation)
     if origin is typing.Literal:
         return all(isinstance(v, str) for v in typing.get_args(annotation))
+    if origin in (types.UnionType, typing.Union):
+        return any(
+            _b252_type_carries_string(a)
+            for a in typing.get_args(annotation)
+            if a is not type(None)
+        )
+    if origin in (list, tuple, set, frozenset):
+        return any(
+            _b252_type_carries_string(a) for a in typing.get_args(annotation) if a is not Ellipsis
+        )
     if origin is dict:
         _, value_t = typing.get_args(annotation)
         return _b252_type_carries_string(value_t)
-    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+    return False
+
+
+def _b252_field_carries_string(annotation: Any) -> bool:
+    """Поле модели способно нести строку наружу (§34.5, сверка 2): аннотация — вложенная модель
+    Pydantic (её имя учитывается как поле — рекурсия по её собственным полям делается отдельным
+    вызовом для соответствующего вложенного блока, а не здесь), либо после снятия ``| None`` несёт
+    строку в смысле ``_b252_type_carries_string`` (``str``, ``Literal[...]`` из строк, объединение,
+    контейнер или ``dict`` со строковым элементом/значением, ``Annotated``, ``Any``)."""
+    stripped = _b252_unwrap_annotated(_b252_strip_optional(annotation))
+    if isinstance(stripped, type) and issubclass(stripped, BaseModel):
+        return True
+    return _b252_type_carries_string(annotation)
 
 
 def _b252_string_fields(model_cls: type[BaseModel]) -> set[str]:
@@ -1654,14 +1723,33 @@ async def test_publication_boundary_watches_every_published_value(
     Сверка 1 — множества пропуска против литерала, записанного в этой функции руками
     (``_B252_EXPECTED_*_SKIP``), а не выведенного из кода. Равенство, не включение: и новый путь
     пропуска, и исчезнувший обязаны стать видимой строкой в диффе. Ловит N23 — обход его не видит.
+    Ревью ``reports/review-rev44-5.json`` (N27, major) показало, что сравнивать нужно не модульную
+    константу (``_VERIFY_VERBATIM_SKIP`` и т.п.), а множество, реально дошедшее до
+    ``_all_verbatim`` аргументом: тот же путь пропуска, добавленный в МЕСТЕ ВЫЗОВА мимо константы,
+    константное сравнение не видит, хотя утечка та же. Сверка перехватывает фактический аргумент
+    подменой ``_all_verbatim`` на время разбора той же эталонной карточки
+    (``_b252_capture_verbatim_skip``) — красит и N23, и N27.
 
     Сверка 2 — состав полей моделей ``TokenVerify``/``TokenExchange``/``TokenExchangeRevoke``,
     способных нести строку (``str``, ``Literal[...]`` из строк, ``dict`` со строковым значением,
     вложенная модель), сверенный с составом первых сегментов путей обхода. Исключение — одно,
-    с причиной: ``exchange.list`` наружу не идёт никогда (п. 5). У ``upstream`` модели нет —
-    сверяется состав ОПУБЛИКОВАННЫХ ключей с тройкой п. 4; эта половина слабее двух других и ловит
-    только безусловно публикуемый новый ключ (незакрытый вход, названный в спеке честно). Ловит
-    N22b без правки множеств пропуска (поле модели есть — пути обхода нет).
+    с причиной: ``exchange.list`` наружу не идёт никогда (п. 5). У блока ``upstream`` своей модели
+    нет (это собранный словарь, а не поле карточки) — сверяется состав ОПУБЛИКОВАННЫХ ключей с
+    тройкой п. 4. Ловит N22b без правки множеств пропуска (поле модели есть — пути обхода нет).
+
+    Ревью ``reports/review-rev44-5.json`` (N24/N25, major) поправило объяснение незакрытого входа:
+    прежний текст связывал его с отсутствием модели у ``upstream`` и ранжировал эту половину как
+    более слабую. Обе части неверны. Причина в условности публикуемого ключа — она одинакова во
+    всех трёх блоках: N25 воспроизводит тот же ключ внутри ``verify``, у которого модель ЕСТЬ
+    (``TokenVerify``), и сверка его тоже не видит, потому что путь обхода строится по ОДНОМУ
+    экземпляру эталонной карточки, а этот экземпляр условие не выполняет. У самой карточки модель
+    есть (``ServerModel``), и достаточно, чтобы эталонная карточка (``_b252_clean_card``) задавала
+    непустыми свои же необязательные поля (см. ``icon`` в определении карточки выше) — тогда
+    условный ключ срабатывает на эталоне и попадает под уже написанные сверки: N24 красит состав
+    ключей ``upstream`` ниже, N25 красит ``verify_field_names == verify_path_names`` выше. Остаточно
+    открытым после этого остаётся лишь условный ключ, источник которого — НОВОЕ поле ``ServerModel``,
+    которого сама эталонная карточка не касается; он того же жанра, что и прочие незакрытые входы, и
+    не требует отдельного механизма.
 
     Обе сверки нужны вместе: N22b (поле в модели + путь в множестве пропуска) трогает и то, и
     другое, поэтому её одной недостаточно как доказательства — доказательство даёт разделённая
@@ -1707,14 +1795,19 @@ async def test_publication_boundary_watches_every_published_value(
     assert len(method_paths) == 3, method_paths
     assert len(others) == 14, others
 
-    # --- §34.5, сверка 1: множества пропуска против литерала (задание ревью rev44-4, major) -----
-    # Равенство с литералом, записанным руками (см. определение выше этой функции), а не с чем-то
-    # выведенным из кода. Опровергается инъекцией N23: путь ('headers', 'X-Request-Id'), добавленный
-    # в множество пропуска ``verify``, — обход выше молчит (эталонная карточка такой заголовок не
-    # задаёт), а эта сверка обязана покраснеть.
-    assert _B252_ACTUAL_VERIFY_SKIP == _B252_EXPECTED_VERIFY_SKIP, _B252_ACTUAL_VERIFY_SKIP
-    assert _B252_ACTUAL_EXCHANGE_SKIP == _B252_EXPECTED_EXCHANGE_SKIP, _B252_ACTUAL_EXCHANGE_SKIP
-    assert _B252_ACTUAL_UPSTREAM_SKIP == _B252_EXPECTED_UPSTREAM_SKIP, _B252_ACTUAL_UPSTREAM_SKIP
+    # --- §34.5, сверка 1: множества пропуска против литерала (задание ревью rev44-5, major) -----
+    # Равенство с литералом, записанным руками (см. определение выше этой функции), но НЕ с
+    # модульной константой (ревью reports/review-rev44-5.json, N27): та совпадает с тем, что
+    # реально получает проверка дословности, только пока skip не передан иначе в месте вызова.
+    # Сверяется значение, перехваченное аргументом _all_verbatim при разборе той же эталонной
+    # карточки (_b252_capture_verbatim_skip) — покраснеет и на N23 (путь в константе), и на N27
+    # (тот же путь, добавленный в месте вызова).
+    actual_verify_skip, actual_exchange_skip, actual_upstream_skip = _b252_capture_verbatim_skip(
+        "watchskip"
+    )
+    assert actual_verify_skip == _B252_EXPECTED_VERIFY_SKIP, actual_verify_skip
+    assert actual_exchange_skip == _B252_EXPECTED_EXCHANGE_SKIP, actual_exchange_skip
+    assert actual_upstream_skip == _B252_EXPECTED_UPSTREAM_SKIP, actual_upstream_skip
 
     # --- §34.5, сверка 2: состав публикуемых полей против состава обхода (то же ревью, major) ----
     # Свести пути обхода (полные, включая четыре адреса-исключения — поле, публикующее адрес,
@@ -1740,10 +1833,15 @@ async def test_publication_boundary_watches_every_published_value(
     assert exchange_field_names == exchange_path_names, (exchange_field_names, exchange_path_names)
     assert revoke_field_names == revoke_path_names, (revoke_field_names, revoke_path_names)
 
-    # У блока ``upstream`` модели нет — сверяется состав ОПУБЛИКОВАННЫХ ключей с литеральной тройкой
-    # R-U8.1 п. 4. Половина слабее двух предыдущих сверок, и §34.5 это не скрывает: она ловит новый
-    # ключ, публикуемый безусловно, но не ловит ключ, отдаваемый только при заданном значении —
-    # незакрытый вход, названный в спеке прямо (нет модели, по которой его увидеть до публикации).
+    # У блока ``upstream`` своей Pydantic-модели нет (это не поле карточки, а собранный словарь) —
+    # сверяется состав ОПУБЛИКОВАННЫХ ключей с литеральной тройкой R-U8.1 п. 4 (ревью
+    # reports/review-rev44-5.json, major: причина отсутствия модели была названа неверно — у самой
+    # КАРТОЧКИ модель есть, ``ServerModel``, и условный ключ, публикуемый только при заданном
+    # необязательном поле карточки, ловится не потому, что модели нет, а потому, что эталонная
+    # карточка (``_b252_clean_card``) задаёт эти необязательные поля непустыми — см. ``icon`` в
+    # определении карточки выше). Три половины сверки 2 равносильны против условного ключа: наличие
+    # модели блока само по себе от него не защищает (N25 — тот же условный ключ в ``verify``, у
+    # которого модель ЕСТЬ, — уходит мимо сверки ровно тем же способом, если эталон не задаёт поле).
     assert set(view["upstream"].keys()) == {
         "url",
         "credential_headers",
