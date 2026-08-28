@@ -166,6 +166,12 @@ TOKEN_FIELD_MARKER = "permanent_value_field"
 TOKEN_ID_FIELD_MARKER = "permanent_ident_field"
 HEADER_NAME_MARKER = "X-Issue-Header-Marker"
 HEADER_VALUE_MARKER = "issue-header-value-marker"
+# Значения list.id_field/list.description_field — намеренно не "id"/"description" (как в
+# exchange_block по умолчанию), иначе они неотличимы по тексту ответа от одноимённых значений
+# самого exchange, и проверка "list не публикуется" по значению вырождена (finding 5 отчёта
+# reports/review-rev44-1.json).
+LIST_ID_FIELD_MARKER = "issued_list_id_field_marker"
+LIST_DESCRIPTION_FIELD_MARKER = "issued_list_description_field_marker"
 
 
 def _marked_exchange() -> dict[str, Any]:
@@ -176,6 +182,13 @@ def _marked_exchange() -> dict[str, Any]:
         description=DESCRIPTION_MARKER,
         token_field=TOKEN_FIELD_MARKER,
         token_id_field=TOKEN_ID_FIELD_MARKER,
+        list={
+            "url": EXCHANGE_URL_MARKER,
+            "method": "GET",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "id_field": LIST_ID_FIELD_MARKER,
+            "description_field": LIST_DESCRIPTION_FIELD_MARKER,
+        },
     )
     block["headers"] = {
         "Authorization": "Bearer {{access_token}}",
@@ -231,8 +244,12 @@ async def test_only_the_flag_is_published_not_the_exchange_block(make_hub: HubFa
     assert exchange["headers"][HEADER_NAME_MARKER] == HEADER_VALUE_MARKER
     assert exchange["revoke"]["url"] == REVOKE_URL_MARKER
     # R-U15.3: запрос списка выпущенных токенов наружу не идёт никогда, даже когда exchange
-    # публикуется целиком.
+    # публикуется целиком. Проверка не только по ключу "list", но и по значениям, которые
+    # встречаются только внутри него (finding 5 отчёта): если бы список всё же попал в ответ
+    # под другим именем, эти маркеры его бы поймали, а проверка "list" not in exchange — нет.
     assert "list" not in exchange
+    assert LIST_ID_FIELD_MARKER not in catalog.text
+    assert LIST_DESCRIPTION_FIELD_MARKER not in catalog.text
     assert "exchange" not in methods["plain"]
 
     # expiry (R-U18) не публикуется никогда, ни при каких условиях.
@@ -241,7 +258,10 @@ async def test_only_the_flag_is_published_not_the_exchange_block(make_hub: HubFa
         text = response.text
         assert '"expiry"' not in text
         assert EXPIRY_URL_MARKER not in text
-    # exchange нужен только приложению для прямого режима, а не странице (R-U8.1 п. 11).
+    # exchange нужен только приложению для прямого режима, а не странице (R-U8.1 п. 11): ни
+    # значений, ни имени заголовка HEADER_NAME_MARKER на страницах быть не должно (finding 5
+    # отчёта — HEADER_NAME_MARKER выпал из этого перечня, хотя AC-227 требует «ни одного их
+    # значения (адресов, заголовков, description, token_field, token_id_field)»).
     for response in (page, connections):
         text = response.text
         assert '"exchange"' not in text
@@ -251,7 +271,10 @@ async def test_only_the_flag_is_published_not_the_exchange_block(make_hub: HubFa
             DESCRIPTION_MARKER,
             TOKEN_FIELD_MARKER,
             TOKEN_ID_FIELD_MARKER,
+            HEADER_NAME_MARKER,
             HEADER_VALUE_MARKER,
+            LIST_ID_FIELD_MARKER,
+            LIST_DESCRIPTION_FIELD_MARKER,
         ):
             assert marker not in text, f"{response.url}: {marker}"
 
