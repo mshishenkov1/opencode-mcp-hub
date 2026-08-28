@@ -859,6 +859,15 @@ def _all_keys(value: Any) -> set[str]:
 # --- AC-252 ------------------------------------------------------------------
 # Ревизия 4.4, R-U8.1 п. 3, 6-9: непубликуемое значение снимает весь блок, а не часть, и
 # оставляет ровно один след WARNING на блок при каждой загрузке каталога.
+#
+# Дополнено по reports/review-rev44-1.json (findings 1 и 2, must_fix — вердикт request_changes):
+# ни одна карточка не доводила непубликуемые/публикуемые static_headers до опубликованного
+# upstream (finding 1: инъекция I11 — снять 'static_headers' из проверки дословности в
+# _publication — была зелёной, хотя выпускала ${VAR} наружу), и ни одна карточка не несла двух
+# способов user_token, один из которых «грязный», другой чистый (finding 2: инъекция I12 —
+# raw_list[::-1] — тоже была зелёной, хотя путала соответствие сырых способов разобранным и
+# публиковала verify грязного способа с развёрнутым секретом). Карточки 'clean' и 'statichdr'
+# закрывают finding 1, карточка 'twoways' — finding 2.
 
 # Четыре адреса — исключение из дословности (R-U8.1 п. 6): подставляются из ${VAR}.
 _B252_VERIFY_URL = "https://tag-direct.test/api/v4/users/me"
@@ -867,6 +876,12 @@ _B252_REVOKE_URL = "https://tag-direct.test/api/v4/users/tokens/revoke"
 _B252_MCP_URL = "https://mcp-tag-direct.test/mcp"
 # Значение переменной, подставляемой в заголовок 'subst' — маркер утечки, а не адрес.
 _B252_GW_HEADER_VALUE = "secret-value"
+# Значение переменной, подставляемой в static_headers карточки 'statichdr' (finding 1): маркер
+# утечки, уникальная подстрока в пределах этого теста.
+_B252_STATIC_LEAK_VALUE = "static-header-leak-marker-4Q"
+# Значение переменной, подставляемой в verify.headers «грязного» способа карточки 'twoways'
+# (finding 2): маркер утечки, уникальная подстрока в пределах этого теста.
+_B252_METHOD_LEAK_VALUE = "method-independence-leak-marker-7Z"
 
 _B252_ENV = {
     "B252_VERIFY_URL": _B252_VERIFY_URL,
@@ -874,7 +889,22 @@ _B252_ENV = {
     "B252_REVOKE_URL": _B252_REVOKE_URL,
     "B252_MCP_URL": _B252_MCP_URL,
     "GW_HEADER": _B252_GW_HEADER_VALUE,
+    "B252_STATIC_LEAK": _B252_STATIC_LEAK_VALUE,
+    "B252_METHOD_LEAK": _B252_METHOD_LEAK_VALUE,
 }
+
+# Все маркеры-секреты этого теста — используются и для тела ответа, и для полного текста записи
+# журнала (getMessage() + extra=, см. record_text в tests/support.py и finding 4 отчёта).
+_B252_LEAK_MARKERS = (
+    "env:",
+    "TAG_TOKEN",
+    "GW_KEY",
+    _B252_GW_HEADER_VALUE,
+    _B252_STATIC_LEAK_VALUE,
+    "B252_STATIC_LEAK",
+    _B252_METHOD_LEAK_VALUE,
+    "B252_METHOD_LEAK",
+)
 
 
 def _b252_method() -> dict[str, Any]:
@@ -894,8 +924,22 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
 ) -> None:
     """Граница держится целиком: непубликуемое значение снимает весь блок (не часть), соседние
     блоки и способ остаются на месте, секрет не попадает в тело ответа, а каждая загрузка
-    каталога оставляет ровно три записи WARNING (R-U8.1 п. 3, 6-9)."""
-    clean = user_token_facade("clean", methods=[_b252_method()], upstream_url="${B252_MCP_URL}")
+    каталога оставляет ровно пять записей WARNING (R-U8.1 п. 3, 6-9).
+
+    'clean' и 'statichdr' закрывают finding 1 отчёта reports/review-rev44-1.json: 'clean' несёт
+    непустые дословные static_headers, доходящие до опубликованного upstream (единственное место
+    в наборе, где это происходит), а у 'statichdr' единственное непубликуемое значение лежит
+    именно в static_headers (credential_headers сами по себе дословны) — весь upstream обязан
+    быть снят. 'twoways' закрывает finding 2: два доступных способа user_token на одной
+    карточке, один «грязный» (${VAR} в verify.headers), другой чистый — снятие блока у грязного
+    не должно задевать чистый и не должно перепутать, какому способу какой блок принадлежит.
+    """
+    clean = user_token_facade(
+        "clean",
+        methods=[_b252_method()],
+        upstream_url="${B252_MCP_URL}",
+        static_headers={"X-Static": "static-header-literal-value"},
+    )
 
     envverify_method = _b252_method()
     envverify_method["verify"]["headers"] = {
@@ -921,15 +965,43 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
     }
     subst = user_token_facade("subst", methods=[subst_method], upstream_url="${B252_MCP_URL}")
 
+    # 'statichdr' (finding 1, blocker): credential_headers дословны, а static_headers несёт
+    # подстановку ${VAR} — единственное непубликуемое значение во всём блоке upstream карточки.
+    # Правило «только целиком» (R-U8.1 п. 7) обязано снять upstream без остатка, независимо от
+    # того, что credential_headers сами по себе публикуемы.
+    statichdr = user_token_facade(
+        "statichdr",
+        methods=[_b252_method()],
+        upstream_url="${B252_MCP_URL}",
+        credential_headers={"Authorization": "Bearer {{access_token}}"},
+        static_headers={"X-Static-Secret": "${B252_STATIC_LEAK}"},
+    )
+
     closed_method = _b252_method()
     closed_method["available"] = False
     closed_method["unavailable_reason"] = "Способ отключён администратором"
     closed = user_token_facade("closed", methods=[closed_method])
 
+    # 'twoways' (finding 2, major): два доступных способа user_token — 'dirty_token' со ссылкой
+    # ${VAR} в verify.headers и 'clean_token' целиком дословный. Соответствие сырых способов
+    # (raw_list) разобранным (model.auth_methods) не должно путаться местами: снятие блока у
+    # dirty_token не имеет права ни задеть clean_token, ни оставить блок dirty_token нетронутым.
+    dirty_method = _b252_method()
+    dirty_method["id"] = "dirty_token"
+    dirty_method["verify"]["headers"] = {
+        "Authorization": "Bearer {{access_token}}",
+        "X-Dirty": "${B252_METHOD_LEAK}",
+    }
+    clean_method = _b252_method()
+    clean_method["id"] = "clean_token"
+    twoways = user_token_facade(
+        "twoways", methods=[dirty_method, clean_method], upstream_url="${B252_MCP_URL}"
+    )
+
     caplog.clear()
     hub = await _hub(
         make_hub,
-        servers=[clean, envverify, envcred, subst, closed],
+        servers=[clean, envverify, envcred, subst, statichdr, closed, twoways],
         env=_B252_ENV,
         admin_token="adm",
     )
@@ -938,10 +1010,19 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
     def _assert_boundary(response: httpx.Response) -> None:
         assert response.status_code == 200, response.text
         servers = {s["alias"]: s for s in response.json()["servers"]}
-        assert set(servers) == {"clean", "envverify", "envcred", "subst", "closed"}
+        assert set(servers) == {
+            "clean",
+            "envverify",
+            "envcred",
+            "subst",
+            "statichdr",
+            "closed",
+            "twoways",
+        }
 
         # 'clean': verify, exchange (с revoke) и upstream опубликованы дословно, все четыре
-        # адреса подставлены.
+        # адреса подставлены, а непустые static_headers дошли до upstream дословно (finding 1,
+        # часть «а» — единственная карточка набора, где это происходит).
         method = servers["clean"]["auth_methods"][0]
         assert method["verify"] == {
             "url": _B252_VERIFY_URL,
@@ -957,6 +1038,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         assert servers["clean"]["upstream"] == {
             "url": _B252_MCP_URL,
             "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+            "static_headers": {"X-Static": "static-header-literal-value"},
         }
 
         # 'envverify': блока verify нет вовсе; exchange и upstream на месте, способ сохранил
@@ -986,6 +1068,15 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         assert servers["subst"]["upstream"]["url"] == _B252_MCP_URL
         assert method["issues_permanent_token"] is True
 
+        # 'statichdr' (finding 1, blocker): единственное непубликуемое значение — ${VAR} в
+        # static_headers; credential_headers сами по себе дословны и публикуемы, но правило
+        # «только целиком» (R-U8.1 п. 7) снимает upstream карточки без остатка. verify и
+        # exchange способа этим не задеты — снятие блока не «расползается» на соседние блоки.
+        assert "upstream" not in servers["statichdr"]
+        method = servers["statichdr"]["auth_methods"][0]
+        assert "verify" in method
+        assert "exchange" in method
+
         # 'closed': ни verify, ни exchange, ни upstream у карточки; id, title, available,
         # unavailable_reason, field и issues_permanent_token у способа прежние.
         method = servers["closed"]["auth_methods"][0]
@@ -999,9 +1090,32 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         assert method["field"]["label"]
         assert method["issues_permanent_token"] is True
 
+        # 'twoways' (finding 2, major): у 'dirty_token' блока verify нет, у 'clean_token' он
+        # опубликован дословно и совпадает с образцом byte-в-byte; снятие блока у одного способа
+        # не задевает ни другой способ карточки, ни блок upstream (R-U8.1 п. 7) — соответствие
+        # сырых способов разобранным не перепутано местами.
+        methods = {m["id"]: m for m in servers["twoways"]["auth_methods"]}
+        assert set(methods) == {"dirty_token", "clean_token"}
+        assert "verify" not in methods["dirty_token"]
+        assert methods["dirty_token"]["available"] is True
+        assert methods["dirty_token"]["exchange"]["url"] == _B252_EXCHANGE_URL
+        assert methods["clean_token"]["verify"] == {
+            "url": _B252_VERIFY_URL,
+            "method": "GET",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "expect_status": None,
+            "account_field": "username",
+            "require_account": False,
+        }
+        assert methods["clean_token"]["exchange"]["url"] == _B252_EXCHANGE_URL
+        assert servers["twoways"]["upstream"] == {
+            "url": _B252_MCP_URL,
+            "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+        }
+
         # Ни ссылки env:, ни имени переменной, ни развёрнутого секрета нет нигде в теле ответа.
         text = response.text
-        for leaked in ("env:", "TAG_TOKEN", "GW_KEY", _B252_GW_HEADER_VALUE):
+        for leaked in _B252_LEAK_MARKERS:
             assert leaked not in text, f"утечка '{leaked}' в /api/catalog"
 
     def _warnings() -> list[logging.LogRecord]:
@@ -1009,35 +1123,52 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
             r for r in caplog.records if r.name == "hub.catalog" and r.levelno == logging.WARNING
         ]
 
+    def _assert_warnings(warnings: list[logging.LogRecord]) -> None:
+        assert len(warnings) == 5, [w.getMessage() for w in warnings]
+        seen = set()
+        for record in warnings:
+            message = record.getMessage()
+            if "'envverify'" in message and "verify" in message:
+                seen.add(("envverify", "verify"))
+            elif "'envcred'" in message and "upstream" in message:
+                seen.add(("envcred", "upstream"))
+            elif "'subst'" in message and "exchange" in message:
+                seen.add(("subst", "exchange"))
+            elif "'statichdr'" in message and "upstream" in message:
+                seen.add(("statichdr", "upstream"))
+            elif "'twoways'" in message and "verify" in message:
+                seen.add(("twoways", "verify"))
+            else:
+                pytest.fail(f"неожиданная запись WARNING: {message}")
+            # finding 4 отчёта: след проверяется не только по getMessage(), но и по полному
+            # тексту записи с учётом extra= — JsonFormatter сериализует в лог-строку любые
+            # нестандартные атрибуты записи (src/hub/logging_.py), а getMessage() их не видит.
+            full_text = record_text(record)
+            for leaked in _B252_LEAK_MARKERS:
+                assert leaked not in full_text, f"утечка '{leaked}' в записи журнала: {full_text}"
+        assert seen == {
+            ("envverify", "verify"),
+            ("envcred", "upstream"),
+            ("subst", "exchange"),
+            ("statichdr", "upstream"),
+            ("twoways", "verify"),
+        }
+        assert not any("'clean'" in w.getMessage() for w in warnings)
+        assert not any("'closed'" in w.getMessage() for w in warnings)
+        assert not any("'twoways'" in w.getMessage() and "exchange" in w.getMessage() for w in warnings)
+        assert not any("clean_token" in w.getMessage() for w in warnings)
+
     # --- первая загрузка: старт приложения (уже произошёл в _hub выше) ---
-    warnings = _warnings()
-    assert len(warnings) == 3, [w.getMessage() for w in warnings]
-    seen = set()
-    for record in warnings:
-        message = record.getMessage()
-        if "'envverify'" in message and "verify" in message:
-            seen.add(("envverify", "verify"))
-        elif "'envcred'" in message and "upstream" in message:
-            seen.add(("envcred", "upstream"))
-        elif "'subst'" in message and "exchange" in message:
-            seen.add(("subst", "exchange"))
-        else:
-            pytest.fail(f"неожиданная запись WARNING: {message}")
-        for leaked in ("env:", "TAG_TOKEN", "GW_KEY", _B252_GW_HEADER_VALUE):
-            assert leaked not in message, f"утечка '{leaked}' в записи журнала: {message}"
-    assert seen == {("envverify", "verify"), ("envcred", "upstream"), ("subst", "exchange")}
-    assert not any("'clean'" in w.getMessage() for w in warnings)
-    assert not any("'closed'" in w.getMessage() for w in warnings)
+    _assert_warnings(_warnings())
 
     first = await hub.get("/api/catalog", headers=bearer("sk-ok"))
     _assert_boundary(first)
 
-    # --- вторая загрузка: POST /admin/catalog/reload — тот же файл, те же три следа ---
+    # --- вторая загрузка: POST /admin/catalog/reload — тот же файл, те же пять следов ---
     caplog.clear()
     reload = await hub.post("/admin/catalog/reload", headers={"X-Admin-Token": "adm"})
     assert reload.status_code == 200, reload.text
-    warnings_after_reload = _warnings()
-    assert len(warnings_after_reload) == 3, [w.getMessage() for w in warnings_after_reload]
+    _assert_warnings(_warnings())
 
     second = await hub.get("/api/catalog", headers=bearer("sk-ok"))
     _assert_boundary(second)
