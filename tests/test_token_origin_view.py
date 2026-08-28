@@ -9,7 +9,6 @@ HTML страниц.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -187,7 +186,10 @@ def _marked_exchange() -> dict[str, Any]:
 
 @pytest.mark.ac("AC-227")
 async def test_only_the_flag_is_published_not_the_exchange_block(make_hub: HubFactory) -> None:
-    """Наружу идёт признак ``issues_permanent_token``, но не блоки exchange и expiry (R-U16)."""
+    """Признак ``issues_permanent_token`` не зависит от публикации exchange: в /api/catalog у
+    доступного способа с обменом есть exchange (с вложенным revoke, без list), у способа без
+    него — нет; expiry не публикуется никогда; на страницах — ни exchange, ни expiry (R-U16,
+    R-U8.1)."""
     with_exchange = user_token_method("issuing")
     with_exchange["exchange"] = _marked_exchange()
     with_exchange["expiry"] = expiry_block(url=EXPIRY_URL_MARKER)
@@ -208,32 +210,51 @@ async def test_only_the_flag_is_published_not_the_exchange_block(make_hub: HubFa
     assert methods["issuing"]["issues_permanent_token"] is True
     assert methods["plain"]["issues_permanent_token"] is False
 
-    # У сервера без auth_methods новых ключей не появилось (AC-22 не изменился).
+    # У сервера без auth_methods новых ключей не появилось: ни auth_methods, ни
+    # issues_permanent_token, ни upstream (AC-22 не изменился).
     assert "auth_methods" not in servers["plain-server"]
     assert "issues_permanent_token" not in servers["plain-server"]
+    assert "upstream" not in servers["plain-server"]
 
     page = await hub.get("/ui/servers/tag")
     assert page.status_code == 200, page.text
     connections = await hub.get("/ui/connections")
     assert connections.status_code == 200, connections.text
 
-    assert not (_all_keys(catalog.json()) & {"exchange", "expiry"})
-    secrets = (
-        EXCHANGE_URL_MARKER,
-        REVOKE_URL_MARKER,
-        EXPIRY_URL_MARKER,
-        DESCRIPTION_MARKER,
-        TOKEN_FIELD_MARKER,
-        TOKEN_ID_FIELD_MARKER,
-        HEADER_NAME_MARKER,
-        HEADER_VALUE_MARKER,
-    )
+    # R-U8.1 п. 2: у доступного способа с объявленным обменом exchange публикуется в /api/catalog
+    # дословно, вместе с вложенным revoke; у способа без обмена ключа exchange нет.
+    exchange = methods["issuing"]["exchange"]
+    assert exchange["url"] == EXCHANGE_URL_MARKER
+    assert exchange["description"] == DESCRIPTION_MARKER
+    assert exchange["token_field"] == TOKEN_FIELD_MARKER
+    assert exchange["token_id_field"] == TOKEN_ID_FIELD_MARKER
+    assert exchange["headers"][HEADER_NAME_MARKER] == HEADER_VALUE_MARKER
+    assert exchange["revoke"]["url"] == REVOKE_URL_MARKER
+    # R-U15.3: запрос списка выпущенных токенов наружу не идёт никогда, даже когда exchange
+    # публикуется целиком.
+    assert "list" not in exchange
+    assert "exchange" not in methods["plain"]
+
+    # expiry (R-U18) не публикуется никогда, ни при каких условиях.
+    assert not (_all_keys(catalog.json()) & {"expiry"})
     for response in (catalog, page, connections):
         text = response.text
-        assert '"exchange"' not in text and '"expiry"' not in text
-        for secret in secrets:
-            assert secret not in text, f"{response.url}: {secret}"
+        assert '"expiry"' not in text
+        assert EXPIRY_URL_MARKER not in text
+    # exchange нужен только приложению для прямого режима, а не странице (R-U8.1 п. 11).
+    for response in (page, connections):
+        text = response.text
+        assert '"exchange"' not in text
+        for marker in (
+            EXCHANGE_URL_MARKER,
+            REVOKE_URL_MARKER,
+            DESCRIPTION_MARKER,
+            TOKEN_FIELD_MARKER,
+            TOKEN_ID_FIELD_MARKER,
+            HEADER_VALUE_MARKER,
+        ):
+            assert marker not in text, f"{response.url}: {marker}"
 
-    # Признак — единственное, что добавилось к публичному виду способа (R-U8, R-C6).
-    assert set(methods["plain"]) - set(methods["issuing"]) == set()
-    assert json.dumps(methods["issuing"], ensure_ascii=False).count("exchange") == 0
+    # Признак и exchange — единственное, что добавилось к публичному виду доступного способа с
+    # обменом сверх способа без него (R-U8, R-C6, R-U8.1).
+    assert set(methods["issuing"]) - set(methods["plain"]) == {"exchange"}

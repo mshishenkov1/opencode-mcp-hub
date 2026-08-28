@@ -724,6 +724,9 @@ async def test_public_view_has_allowed_fields_only(make_hub: HubFactory) -> None
         assert PUBLIC_FIELDS <= set(server)
         assert server["auth_kind"] == "oauth2"
         assert set(server) - PUBLIC_FIELDS == {"connection"}
+        # R-U8.1 п. 1, п. 4: ни у одной карточки нет доступного способа user_token, поэтому
+        # блока upstream нет тоже (AC-22 дополнен ревизией 4.4).
+        assert "upstream" not in server
     assert servers["gitlab"]["mcp_url"] == "https://hub.test/mcp/gitlab"
     assert servers["tag"]["mcp_url"] == "https://tag.test/mcp"
     assert not (_all_keys(resp.json()) & FORBIDDEN_KEYS)

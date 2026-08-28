@@ -30,6 +30,7 @@ from tests.support import (
     connect_with_token,
     dump_database,
     dump_kv,
+    exchange_block,
     facade_server,
     fetch_rows,
     gitlab_facade,
@@ -766,7 +767,8 @@ async def test_permission_upgrade_for_user_token_keeps_connection(make_hub: HubF
 
 @pytest.mark.ac("AC-185")
 async def test_catalog_publishes_methods_without_secrets(make_hub: HubFactory) -> None:
-    """Витрина отдаёт способы без ``verify``, секретов и OAuth-адресов (R-U8, R-C6)."""
+    """Витрина отдаёт способы по границе типа: у oauth2 — ничего сверх прежнего, у доступного
+    user_token — verify и блок upstream карточки (R-U8, R-U8.1)."""
     hub = await _hub(make_hub, servers=[user_token_facade(), native_server("plain")])
     await _user(hub)
     response = await hub.get("/api/catalog", headers=bearer("sk-ok"))
@@ -777,6 +779,7 @@ async def test_catalog_publishes_methods_without_secrets(make_hub: HubFactory) -
     assert set(methods) == {"corp_oauth", "session_token"}
     # R-U16 (ревизия 4): к публичному виду способа добавлен признак выпуска постоянного токена;
     # у способа без блока exchange он false, сам блок наружу не отдаётся.
+    # R-U8.1 п. 1: состав oauth2 не меняется ни на один ключ — независимо от available.
     assert set(methods["corp_oauth"]) == {
         "id",
         "title",
@@ -794,8 +797,37 @@ async def test_catalog_publishes_methods_without_secrets(make_hub: HubFactory) -
     assert {"label", "hint", "docs_url", "secret", "min_length", "max_length"} <= set(field)
     assert field["secret"] is True
 
-    forbidden_keys = {
+    # R-U8.1 п. 2: у доступного user_token публикуется verify дословно — адрес проверки и шаблон
+    # заголовка отныне часть публичного представления способа, а не секрет.
+    assert set(methods["session_token"]) == {
+        "id",
+        "title",
+        "type",
+        "available",
+        "unavailable_reason",
+        "issues_permanent_token",
+        "field",
         "verify",
+    }
+    assert methods["session_token"]["verify"] == {
+        "url": VERIFY_URL,
+        "method": "GET",
+        "headers": {"Authorization": "Bearer {{access_token}}"},
+        "expect_status": None,
+        "account_field": "username",
+        "require_account": False,
+    }
+    # У способа не объявлен exchange в каталоге — блока нет (независимо от границы публикации).
+    assert "exchange" not in methods["session_token"]
+
+    # R-U8.1 п. 4: блок upstream карточки — адрес целевого сервера и шаблоны заголовков, потому
+    # что у неё есть доступный способ user_token.
+    assert servers["tag"]["upstream"] == {
+        "url": TAG_UPSTREAM,
+        "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+    }
+
+    forbidden_keys = {
         "authorize_url",
         "token_url",
         "revoke_url",
@@ -804,10 +836,12 @@ async def test_catalog_publishes_methods_without_secrets(make_hub: HubFactory) -
         "client_secret",
     }
     assert not (_all_keys(response.json()) & forbidden_keys)
-    assert VERIFY_URL not in response.text
-    assert "/api/v4/users/me" not in response.text
-    # У сервера без auth_methods ключа в публичном представлении нет вовсе.
+    for forbidden_value in ("tag-client-id", "env:GL_SECRET", "GL_SECRET"):
+        assert forbidden_value not in response.text
+    # У сервера без auth_methods ни ключа auth_methods, ни ключа upstream в публичном
+    # представлении нет вовсе (R-U8.1 п. 1, п. 4; AC-22 не изменился).
     assert "auth_methods" not in servers["plain"]
+    assert "upstream" not in servers["plain"]
 
 
 def _all_keys(value: Any) -> set[str]:
@@ -820,6 +854,193 @@ def _all_keys(value: Any) -> set[str]:
         for item in value:
             keys |= _all_keys(item)
     return keys
+
+
+# --- AC-252 ------------------------------------------------------------------
+# Ревизия 4.4, R-U8.1 п. 3, 6-9: непубликуемое значение снимает весь блок, а не часть, и
+# оставляет ровно один след WARNING на блок при каждой загрузке каталога.
+
+# Четыре адреса — исключение из дословности (R-U8.1 п. 6): подставляются из ${VAR}.
+_B252_VERIFY_URL = "https://tag-direct.test/api/v4/users/me"
+_B252_EXCHANGE_URL = "https://tag-direct.test/api/v4/users/me/tokens"
+_B252_REVOKE_URL = "https://tag-direct.test/api/v4/users/tokens/revoke"
+_B252_MCP_URL = "https://mcp-tag-direct.test/mcp"
+# Значение переменной, подставляемой в заголовок 'subst' — маркер утечки, а не адрес.
+_B252_GW_HEADER_VALUE = "secret-value"
+
+_B252_ENV = {
+    "B252_VERIFY_URL": _B252_VERIFY_URL,
+    "B252_EXCHANGE_URL": _B252_EXCHANGE_URL,
+    "B252_REVOKE_URL": _B252_REVOKE_URL,
+    "B252_MCP_URL": _B252_MCP_URL,
+    "GW_HEADER": _B252_GW_HEADER_VALUE,
+}
+
+
+def _b252_method() -> dict[str, Any]:
+    """Способ ``session_token`` с verify и exchange, все адреса — через ``${VAR}`` (дословно
+    во всём остальном): опорная точка, от которой каждая карточка отклоняется на одно значение."""
+    method = user_token_method("session_token")
+    method["verify"]["url"] = "${B252_VERIFY_URL}"
+    method["exchange"] = exchange_block(
+        url="${B252_EXCHANGE_URL}", list_url=None, revoke_url="${B252_REVOKE_URL}"
+    )
+    return method
+
+
+@pytest.mark.ac("AC-252")
+async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
+    make_hub: HubFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Граница держится целиком: непубликуемое значение снимает весь блок (не часть), соседние
+    блоки и способ остаются на месте, секрет не попадает в тело ответа, а каждая загрузка
+    каталога оставляет ровно три записи WARNING (R-U8.1 п. 3, 6-9)."""
+    clean = user_token_facade("clean", methods=[_b252_method()], upstream_url="${B252_MCP_URL}")
+
+    envverify_method = _b252_method()
+    envverify_method["verify"]["headers"] = {
+        "Authorization": "Bearer {{access_token}}",
+        "X-Extra": "env:TAG_TOKEN",
+    }
+    envverify = user_token_facade(
+        "envverify", methods=[envverify_method], upstream_url="${B252_MCP_URL}"
+    )
+
+    envcred = user_token_facade(
+        "envcred",
+        methods=[_b252_method()],
+        upstream_url="${B252_MCP_URL}",
+        credential_headers={"Authorization": "Bearer {{access_token}}", "X-Key": "env:GW_KEY"},
+        static_headers={"X-Static": "static-literal-value"},
+    )
+
+    subst_method = _b252_method()
+    subst_method["exchange"]["revoke"]["headers"] = {
+        "Authorization": "Bearer {{access_token}}",
+        "X-Revoke-Extra": "${GW_HEADER}",
+    }
+    subst = user_token_facade("subst", methods=[subst_method], upstream_url="${B252_MCP_URL}")
+
+    closed_method = _b252_method()
+    closed_method["available"] = False
+    closed_method["unavailable_reason"] = "Способ отключён администратором"
+    closed = user_token_facade("closed", methods=[closed_method])
+
+    caplog.clear()
+    hub = await _hub(
+        make_hub,
+        servers=[clean, envverify, envcred, subst, closed],
+        env=_B252_ENV,
+        admin_token="adm",
+    )
+    await _user(hub)
+
+    def _assert_boundary(response: httpx.Response) -> None:
+        assert response.status_code == 200, response.text
+        servers = {s["alias"]: s for s in response.json()["servers"]}
+        assert set(servers) == {"clean", "envverify", "envcred", "subst", "closed"}
+
+        # 'clean': verify, exchange (с revoke) и upstream опубликованы дословно, все четыре
+        # адреса подставлены.
+        method = servers["clean"]["auth_methods"][0]
+        assert method["verify"] == {
+            "url": _B252_VERIFY_URL,
+            "method": "GET",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "expect_status": None,
+            "account_field": "username",
+            "require_account": False,
+        }
+        assert method["exchange"]["url"] == _B252_EXCHANGE_URL
+        assert method["exchange"]["revoke"]["url"] == _B252_REVOKE_URL
+        assert "list" not in method["exchange"]
+        assert servers["clean"]["upstream"] == {
+            "url": _B252_MCP_URL,
+            "credential_headers": {"Authorization": "Bearer {{access_token}}"},
+        }
+
+        # 'envverify': блока verify нет вовсе; exchange и upstream на месте, способ сохранил
+        # available, id, title, field и issues_permanent_token.
+        method = servers["envverify"]["auth_methods"][0]
+        assert "verify" not in method
+        assert method["exchange"]["url"] == _B252_EXCHANGE_URL
+        assert servers["envverify"]["upstream"]["url"] == _B252_MCP_URL
+        assert method["id"] == "session_token"
+        assert method["title"]
+        assert method["available"] is True
+        assert method["field"]["label"]
+        assert method["issues_permanent_token"] is True
+
+        # 'envcred': блока upstream нет целиком — вместе со static_headers, которые сами по себе
+        # публикуемы, — а verify и exchange способа на месте.
+        assert "upstream" not in servers["envcred"]
+        method = servers["envcred"]["auth_methods"][0]
+        assert "verify" in method
+        assert "exchange" in method
+
+        # 'subst': блока exchange нет целиком, вместе с вложенным revoke; verify и upstream
+        # на месте. Признак issues_permanent_token не зависит от публикации блока (R-U16).
+        method = servers["subst"]["auth_methods"][0]
+        assert "exchange" not in method
+        assert "verify" in method
+        assert servers["subst"]["upstream"]["url"] == _B252_MCP_URL
+        assert method["issues_permanent_token"] is True
+
+        # 'closed': ни verify, ни exchange, ни upstream у карточки; id, title, available,
+        # unavailable_reason, field и issues_permanent_token у способа прежние.
+        method = servers["closed"]["auth_methods"][0]
+        assert "verify" not in method
+        assert "exchange" not in method
+        assert "upstream" not in servers["closed"]
+        assert method["id"] == "session_token"
+        assert method["title"]
+        assert method["available"] is False
+        assert method["unavailable_reason"] == "Способ отключён администратором"
+        assert method["field"]["label"]
+        assert method["issues_permanent_token"] is True
+
+        # Ни ссылки env:, ни имени переменной, ни развёрнутого секрета нет нигде в теле ответа.
+        text = response.text
+        for leaked in ("env:", "TAG_TOKEN", "GW_KEY", _B252_GW_HEADER_VALUE):
+            assert leaked not in text, f"утечка '{leaked}' в /api/catalog"
+
+    def _warnings() -> list[logging.LogRecord]:
+        return [
+            r for r in caplog.records if r.name == "hub.catalog" and r.levelno == logging.WARNING
+        ]
+
+    # --- первая загрузка: старт приложения (уже произошёл в _hub выше) ---
+    warnings = _warnings()
+    assert len(warnings) == 3, [w.getMessage() for w in warnings]
+    seen = set()
+    for record in warnings:
+        message = record.getMessage()
+        if "'envverify'" in message and "verify" in message:
+            seen.add(("envverify", "verify"))
+        elif "'envcred'" in message and "upstream" in message:
+            seen.add(("envcred", "upstream"))
+        elif "'subst'" in message and "exchange" in message:
+            seen.add(("subst", "exchange"))
+        else:
+            pytest.fail(f"неожиданная запись WARNING: {message}")
+        for leaked in ("env:", "TAG_TOKEN", "GW_KEY", _B252_GW_HEADER_VALUE):
+            assert leaked not in message, f"утечка '{leaked}' в записи журнала: {message}"
+    assert seen == {("envverify", "verify"), ("envcred", "upstream"), ("subst", "exchange")}
+    assert not any("'clean'" in w.getMessage() for w in warnings)
+    assert not any("'closed'" in w.getMessage() for w in warnings)
+
+    first = await hub.get("/api/catalog", headers=bearer("sk-ok"))
+    _assert_boundary(first)
+
+    # --- вторая загрузка: POST /admin/catalog/reload — тот же файл, те же три следа ---
+    caplog.clear()
+    reload = await hub.post("/admin/catalog/reload", headers={"X-Admin-Token": "adm"})
+    assert reload.status_code == 200, reload.text
+    warnings_after_reload = _warnings()
+    assert len(warnings_after_reload) == 3, [w.getMessage() for w in warnings_after_reload]
+
+    second = await hub.get("/api/catalog", headers=bearer("sk-ok"))
+    _assert_boundary(second)
 
 
 # --- AC-186 ----------------------------------------------------------------
