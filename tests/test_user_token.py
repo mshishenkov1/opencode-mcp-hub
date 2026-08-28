@@ -868,6 +868,23 @@ def _all_keys(value: Any) -> set[str]:
 # raw_list[::-1] — тоже была зелёной, хотя путала соответствие сырых способов разобранным и
 # публиковала verify грязного способа с развёрнутым секретом). Карточки 'clean' и 'statichdr'
 # закрывают finding 1, карточка 'twoways' — finding 2.
+#
+# Дополнено по reports/review-rev44-2.json (findings 1 и 2, оба blocker — вердикт request_changes):
+# (а) три набора перечня R-U8.1 п. 7 — exchange.headers, exchange.body и exchange.revoke.body —
+# не имели собственного негативного прогона: инъекции I13/I14/I15 (добавление ('headers',),
+# ('body',), ('revoke','body') в _EXCHANGE_VERBATIM_SKIP) давали зелёный прогон, хотя каждая
+# выпускала секрет наружу. Карточки 'exchhdr', 'exchbody' и 'revokebody' закрывают ровно эти три
+# набора — каждая кладёт непубликуемое значение единственно в свой набор, остальные части
+# exchange (и verify, и upstream) остаются дословными, чтобы снятие не «расползлось». Для тел
+# годится только ${VAR} — env:VAR вне headers отвергает схема (AC-15, R-U8.1 п. 6).
+# (б) новая инъекция N5 (`_is_verbatim` сведена к `value.startswith("${")`) выпускала секрет из
+# credential_headers, static_headers и verify.headers сразу, потому что во всех прежних карточках
+# непубликуемое значение занимало строку целиком — форма «Bearer ${VAR}» (подстановка внутри
+# строки) не была покрыта ничем, хотя это самая частая запись боевого каталога. Карточка 'midstr'
+# кладёт ${VAR} внутрь строки в начале, в середине, в конце и дважды в одной строке — по одному
+# разу на каждый из трёх наборов. Инфиксная форма ссылки `env:VAR` не нужна: `ENV_REF_RE` требует
+# точного совпадения строки целиком (R-U8.1 п. 6, «является ссылкой env:VAR» — а не «содержит»),
+# поэтому `env:` внутри большей строки — обычный литерал, а не ссылка, и утечки не образует.
 
 # Четыре адреса — исключение из дословности (R-U8.1 п. 6): подставляются из ${VAR}.
 _B252_VERIFY_URL = "https://tag-direct.test/api/v4/users/me"
@@ -883,6 +900,21 @@ _B252_STATIC_LEAK_VALUE = "static-header-leak-marker-4Q"
 # (finding 2): маркер утечки, уникальная подстрока в пределах этого теста.
 _B252_METHOD_LEAK_VALUE = "method-independence-leak-marker-7Z"
 
+# rev44-2, blocker 1: по одному маркеру на каждый из трёх непокрытых наборов перечня п. 7.
+# 'exchhdr' — ссылка env:VAR (годится, набор не тело); имени переменной достаточно как маркера,
+# значение никогда не читается и не подставляется (как GW_KEY/TAG_TOKEN выше).
+_B252_EXCHHDR_LEAK_NAME = "B252_EXCHHDR_LEAK"
+_B252_EXCHBODY_LEAK_VALUE = "exchange-body-leak-marker-K3"
+_B252_REVOKEBODY_LEAK_VALUE = "exchange-revoke-body-leak-marker-Q9"
+
+# rev44-2, blocker 2: подстановка ${VAR} внутри большей строки — в начале, в середине, в конце и
+# дважды в одной строке — по одному разу на credential_headers, static_headers и verify.headers.
+_B252_MIDSTR_START_VALUE = "midstr-start-leak-marker-A1"
+_B252_MIDSTR_D1_VALUE = "midstr-double-leak-marker-B2"
+_B252_MIDSTR_D2_VALUE = "midstr-double-leak-marker-C3"
+_B252_MIDSTR_CRED_VALUE = "midstr-cred-leak-marker-D4"
+_B252_MIDSTR_STATIC_VALUE = "midstr-static-leak-marker-E5"
+
 _B252_ENV = {
     "B252_VERIFY_URL": _B252_VERIFY_URL,
     "B252_EXCHANGE_URL": _B252_EXCHANGE_URL,
@@ -891,6 +923,13 @@ _B252_ENV = {
     "GW_HEADER": _B252_GW_HEADER_VALUE,
     "B252_STATIC_LEAK": _B252_STATIC_LEAK_VALUE,
     "B252_METHOD_LEAK": _B252_METHOD_LEAK_VALUE,
+    "B252_EXCHBODY_LEAK": _B252_EXCHBODY_LEAK_VALUE,
+    "B252_REVOKEBODY_LEAK": _B252_REVOKEBODY_LEAK_VALUE,
+    "B252_MIDSTR_START": _B252_MIDSTR_START_VALUE,
+    "B252_MIDSTR_D1": _B252_MIDSTR_D1_VALUE,
+    "B252_MIDSTR_D2": _B252_MIDSTR_D2_VALUE,
+    "B252_MIDSTR_CRED": _B252_MIDSTR_CRED_VALUE,
+    "B252_MIDSTR_STATIC": _B252_MIDSTR_STATIC_VALUE,
 }
 
 # Все маркеры-секреты этого теста — используются и для тела ответа, и для полного текста записи
@@ -904,6 +943,16 @@ _B252_LEAK_MARKERS = (
     "B252_STATIC_LEAK",
     _B252_METHOD_LEAK_VALUE,
     "B252_METHOD_LEAK",
+    _B252_EXCHHDR_LEAK_NAME,
+    _B252_EXCHBODY_LEAK_VALUE,
+    "B252_EXCHBODY_LEAK",
+    _B252_REVOKEBODY_LEAK_VALUE,
+    "B252_REVOKEBODY_LEAK",
+    _B252_MIDSTR_START_VALUE,
+    _B252_MIDSTR_D1_VALUE,
+    _B252_MIDSTR_D2_VALUE,
+    _B252_MIDSTR_CRED_VALUE,
+    _B252_MIDSTR_STATIC_VALUE,
 )
 
 
@@ -924,7 +973,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
 ) -> None:
     """Граница держится целиком: непубликуемое значение снимает весь блок (не часть), соседние
     блоки и способ остаются на месте, секрет не попадает в тело ответа, а каждая загрузка
-    каталога оставляет ровно пять записей WARNING (R-U8.1 п. 3, 6-9).
+    каталога оставляет ровно десять записей WARNING (R-U8.1 п. 3, 6-9).
 
     'clean' и 'statichdr' закрывают finding 1 отчёта reports/review-rev44-1.json: 'clean' несёт
     непустые дословные static_headers, доходящие до опубликованного upstream (единственное место
@@ -933,6 +982,18 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
     быть снят. 'twoways' закрывает finding 2: два доступных способа user_token на одной
     карточке, один «грязный» (${VAR} в verify.headers), другой чистый — снятие блока у грязного
     не должно задевать чистый и не должно перепутать, какому способу какой блок принадлежит.
+
+    'exchhdr', 'exchbody' и 'revokebody' закрывают finding 1 отчёта reports/review-rev44-2.json
+    (blocker): три набора перечня R-U8.1 п. 7 — exchange.headers, exchange.body и
+    exchange.revoke.body — не имели собственного негативного прогона, и вывод любого из них из
+    проверки дословности (инъекции I13/I14/I15) выпускал секрет наружу при зелёном прогоне.
+    Каждая из трёх карточек кладёт непубликуемое значение единственно в свой набор — остальные
+    части exchange остаются дословными, а весь exchange (вместе с вложенным revoke) обязан быть
+    снят целиком. 'midstr' закрывает finding 2 (blocker): во всех прежних карточках непубликуемое
+    значение занимало строку целиком, и инъекция N5 (проверка '${' сведена к началу строки)
+    выпускала секрет из credential_headers, static_headers и verify.headers сразу. 'midstr'
+    кладёт ${VAR} внутрь строки — в начале, в середине, в конце и дважды в одной строке — по
+    одному разу на каждый из трёх наборов.
     """
     clean = user_token_facade(
         "clean",
@@ -998,10 +1059,75 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         "twoways", methods=[dirty_method, clean_method], upstream_url="${B252_MCP_URL}"
     )
 
+    # 'exchhdr' (rev44-2, blocker 1, набор 1/3): единственное непубликуемое значение — ссылка
+    # env:VAR в exchange.headers; exchange.body, revoke целиком и verify/upstream остаются
+    # дословными. Правило «только целиком» (R-U8.1 п. 7) обязано снять exchange вместе с
+    # вложенным revoke без остатка.
+    exchhdr_method = _b252_method()
+    exchhdr_method["exchange"]["headers"] = {
+        "Authorization": "Bearer {{access_token}}",
+        "X-Exch-Extra": f"env:{_B252_EXCHHDR_LEAK_NAME}",
+    }
+    exchhdr = user_token_facade(
+        "exchhdr", methods=[exchhdr_method], upstream_url="${B252_MCP_URL}"
+    )
+
+    # 'exchbody' (rev44-2, blocker 1, набор 2/3): единственное непубликуемое значение — ${VAR} в
+    # exchange.body (env:VAR в теле схема отвергает, AC-15 — годится только подстановка).
+    exchbody_method = _b252_method()
+    exchbody_method["exchange"]["body"] = {
+        "description": "{{token_description}}",
+        "note": "${B252_EXCHBODY_LEAK}",
+    }
+    exchbody = user_token_facade(
+        "exchbody", methods=[exchbody_method], upstream_url="${B252_MCP_URL}"
+    )
+
+    # 'revokebody' (rev44-2, blocker 1, набор 3/3): единственное непубликуемое значение — ${VAR}
+    # в exchange.revoke.body; headers обмена и отзыва дословны, exchange.body дословен.
+    revokebody_method = _b252_method()
+    revokebody_method["exchange"]["revoke"]["body"] = {
+        "token_id": "{{token_id}}",
+        "note": "${B252_REVOKEBODY_LEAK}",
+    }
+    revokebody = user_token_facade(
+        "revokebody", methods=[revokebody_method], upstream_url="${B252_MCP_URL}"
+    )
+
+    # 'midstr' (rev44-2, blocker 2): подстановка ${VAR} внутри большей строки, а не строкой
+    # целиком — форма «Bearer ${VAR}», самая частая запись боевого каталога. По одному разу на
+    # credential_headers (в конце строки), static_headers (в середине) и дважды на
+    # verify.headers одного способа (в начале строки и с двумя подстановками в одной строке).
+    midstr_method = _b252_method()
+    midstr_method["verify"]["headers"] = {
+        "Authorization": "Bearer {{access_token}}",
+        "X-Start": "${B252_MIDSTR_START}-tail",
+        "X-Double": "${B252_MIDSTR_D1}-and-${B252_MIDSTR_D2}",
+    }
+    midstr = user_token_facade(
+        "midstr",
+        methods=[midstr_method],
+        upstream_url="${B252_MCP_URL}",
+        credential_headers={"Authorization": "Bearer ${B252_MIDSTR_CRED}"},
+        static_headers={"X-Static-Mid": "prefix-${B252_MIDSTR_STATIC}-suffix"},
+    )
+
     caplog.clear()
     hub = await _hub(
         make_hub,
-        servers=[clean, envverify, envcred, subst, statichdr, closed, twoways],
+        servers=[
+            clean,
+            envverify,
+            envcred,
+            subst,
+            statichdr,
+            closed,
+            twoways,
+            exchhdr,
+            exchbody,
+            revokebody,
+            midstr,
+        ],
         env=_B252_ENV,
         admin_token="adm",
     )
@@ -1018,6 +1144,10 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
             "statichdr",
             "closed",
             "twoways",
+            "exchhdr",
+            "exchbody",
+            "revokebody",
+            "midstr",
         }
 
         # 'clean': verify, exchange (с revoke) и upstream опубликованы дословно, все четыре
@@ -1113,6 +1243,41 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
             "credential_headers": {"Authorization": "Bearer {{access_token}}"},
         }
 
+        # 'exchhdr' (rev44-2, blocker 1, набор 1/3): единственное непубликуемое значение — ссылка
+        # env:VAR в exchange.headers; verify и upstream не задеты, exchange снят целиком вместе с
+        # вложенным revoke.
+        method = servers["exchhdr"]["auth_methods"][0]
+        assert "exchange" not in method
+        assert method["verify"]["url"] == _B252_VERIFY_URL
+        assert servers["exchhdr"]["upstream"]["url"] == _B252_MCP_URL
+
+        # 'exchbody' (rev44-2, blocker 1, набор 2/3): единственное непубликуемое значение — ${VAR}
+        # в exchange.body; verify и upstream не задеты, exchange снят целиком вместе с вложенным
+        # revoke.
+        method = servers["exchbody"]["auth_methods"][0]
+        assert "exchange" not in method
+        assert method["verify"]["url"] == _B252_VERIFY_URL
+        assert servers["exchbody"]["upstream"]["url"] == _B252_MCP_URL
+
+        # 'revokebody' (rev44-2, blocker 1, набор 3/3): единственное непубликуемое значение —
+        # ${VAR} в exchange.revoke.body; верхний exchange.headers и exchange.body сами по себе
+        # дословны, но правило «только целиком» снимает exchange вместе с вложенным revoke без
+        # остатка. verify и upstream не задеты.
+        method = servers["revokebody"]["auth_methods"][0]
+        assert "exchange" not in method
+        assert method["verify"]["url"] == _B252_VERIFY_URL
+        assert servers["revokebody"]["upstream"]["url"] == _B252_MCP_URL
+
+        # 'midstr' (rev44-2, blocker 2): ${VAR} внутри строки (не строкой целиком) в
+        # credential_headers (в конце), static_headers (в середине) и дважды в verify.headers
+        # (в начале и с двумя подстановками) — снимает и verify, и upstream целиком; exchange
+        # способа не задет ни одной из этих подстановок.
+        assert "upstream" not in servers["midstr"]
+        method = servers["midstr"]["auth_methods"][0]
+        assert "verify" not in method
+        assert method["exchange"]["url"] == _B252_EXCHANGE_URL
+        assert method["exchange"]["revoke"]["url"] == _B252_REVOKE_URL
+
         # Ни ссылки env:, ни имени переменной, ни развёрнутого секрета нет нигде в теле ответа.
         text = response.text
         for leaked in _B252_LEAK_MARKERS:
@@ -1124,7 +1289,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         ]
 
     def _assert_warnings(warnings: list[logging.LogRecord]) -> None:
-        assert len(warnings) == 5, [w.getMessage() for w in warnings]
+        assert len(warnings) == 10, [w.getMessage() for w in warnings]
         seen = set()
         for record in warnings:
             message = record.getMessage()
@@ -1138,6 +1303,16 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
                 seen.add(("statichdr", "upstream"))
             elif "'twoways'" in message and "verify" in message:
                 seen.add(("twoways", "verify"))
+            elif "'exchhdr'" in message and "exchange" in message:
+                seen.add(("exchhdr", "exchange"))
+            elif "'exchbody'" in message and "exchange" in message:
+                seen.add(("exchbody", "exchange"))
+            elif "'revokebody'" in message and "exchange" in message:
+                seen.add(("revokebody", "exchange"))
+            elif "'midstr'" in message and "verify" in message:
+                seen.add(("midstr", "verify"))
+            elif "'midstr'" in message and "upstream" in message:
+                seen.add(("midstr", "upstream"))
             else:
                 pytest.fail(f"неожиданная запись WARNING: {message}")
             # finding 4 отчёта: след проверяется не только по getMessage(), но и по полному
@@ -1152,11 +1327,20 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
             ("subst", "exchange"),
             ("statichdr", "upstream"),
             ("twoways", "verify"),
+            ("exchhdr", "exchange"),
+            ("exchbody", "exchange"),
+            ("revokebody", "exchange"),
+            ("midstr", "verify"),
+            ("midstr", "upstream"),
         }
         assert not any("'clean'" in w.getMessage() for w in warnings)
         assert not any("'closed'" in w.getMessage() for w in warnings)
         assert not any("'twoways'" in w.getMessage() and "exchange" in w.getMessage() for w in warnings)
         assert not any("clean_token" in w.getMessage() for w in warnings)
+        assert not any("'exchhdr'" in w.getMessage() and "verify" in w.getMessage() for w in warnings)
+        assert not any("'exchbody'" in w.getMessage() and "verify" in w.getMessage() for w in warnings)
+        assert not any("'revokebody'" in w.getMessage() and "verify" in w.getMessage() for w in warnings)
+        assert not any("'midstr'" in w.getMessage() and "exchange" in w.getMessage() for w in warnings)
 
     # --- первая загрузка: старт приложения (уже произошёл в _hub выше) ---
     _assert_warnings(_warnings())
@@ -1164,7 +1348,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
     first = await hub.get("/api/catalog", headers=bearer("sk-ok"))
     _assert_boundary(first)
 
-    # --- вторая загрузка: POST /admin/catalog/reload — тот же файл, те же пять следов ---
+    # --- вторая загрузка: POST /admin/catalog/reload — тот же файл, те же десять следов ---
     caplog.clear()
     reload = await hub.post("/admin/catalog/reload", headers={"X-Admin-Token": "adm"})
     assert reload.status_code == 200, reload.text
