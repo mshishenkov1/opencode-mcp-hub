@@ -398,6 +398,8 @@ async def ui_server(alias: str, request: Request) -> Response:
     always, selectable = group_definitions(entry)
     view = entry.public_view(state.settings.public_url)
     view.pop("permission_model", None)
+    # §3.2: блок upstream нужен приложению для подключения без Hub, а не HTML-странице коннектора.
+    view.pop("upstream", None)
     # R-U8: способы подключения без секретов; поле ввода никогда не предзаполняется.
     methods = entry.public_auth_methods()
     status = conn.status if conn else "not_connected"

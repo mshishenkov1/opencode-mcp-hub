@@ -158,6 +158,8 @@ def html_error(
 def server_public_view(entry: ServerEntry, public_url: str) -> dict[str, Any]:
     view = entry.public_view(public_url)
     view.pop("permission_model", None)
+    # §3.2: блок upstream нужен приложению для подключения без Hub, а не HTML-странице коннектора.
+    view.pop("upstream", None)
     return view
 
 

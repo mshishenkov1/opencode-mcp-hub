@@ -483,6 +483,77 @@ class _PathError(ValueError):
         self.text = text
 
 
+def _public_headers(headers: Mapping[str, Any]) -> dict[str, str] | None:
+    """Заголовки наружу (§3.2 «Граница публикации», AC-14).
+
+    Публикуется только строковое значение — шаблон вида ``Bearer {{access_token}}``. Значение
+    ``env:VAR`` наружу не идёт **ни ссылкой, ни развёрнутым значением** (AC-14): подставить его
+    может лишь Hub, у которого есть переменные сборки каталога. Такой блок не публикуется целиком —
+    возвращается ``None``, и способ прямым режимом не подключается (§3.2). Половинчатая публикация
+    (заголовок выброшен, остальные оставлены) запрещена намеренно: клиент получил бы запрос без
+    обязательного заголовка и узнал бы об этом только по отказу целевой системы.
+    """
+    out: dict[str, str] = {}
+    for name, value in headers.items():
+        # Не ``str`` — это ``EnvRef`` (или ``Secret``): значения из них не читаются никогда.
+        if not isinstance(value, str):
+            return None
+        out[name] = value
+    return out
+
+
+def _public_verify(verify: TokenVerify) -> dict[str, Any] | None:
+    """Блок ``verify`` способа ``user_token`` наружу (§3.2): адрес, метод и шаблоны заголовков."""
+    headers = _public_headers(verify.headers)
+    if headers is None:
+        return None
+    return {
+        "url": verify.url,
+        "method": verify.method,
+        "headers": headers,
+        "expect_status": verify.expect_status,
+        "account_field": verify.account_field,
+        "require_account": verify.require_account,
+    }
+
+
+def _public_revoke(revoke: TokenExchangeRevoke) -> dict[str, Any] | None:
+    """Блок отзыва выпущенного токена наружу (§3.2). Клиент ищет его как ``exchange.revoke``."""
+    headers = _public_headers(revoke.headers)
+    if headers is None:
+        return None
+    return {
+        "url": revoke.url,
+        "method": revoke.method,
+        "headers": headers,
+        "body": dict(revoke.body) if revoke.body is not None else None,
+        "expect_status": revoke.expect_status,
+    }
+
+
+def _public_exchange(exchange: TokenExchange) -> dict[str, Any] | None:
+    """Блок ``exchange`` способа ``user_token`` наружу (§3.2) вместе с вложенным ``revoke``.
+
+    Запрос списка выпущенных токенов (``exchange.list``, R-U15.3) не публикуется: уборку «сирот»
+    делает Hub, в перечне §3.2 этого блока нет.
+    """
+    headers = _public_headers(exchange.headers)
+    revoke = _public_revoke(exchange.revoke)
+    if headers is None or revoke is None:
+        return None
+    return {
+        "url": exchange.url,
+        "method": exchange.method,
+        "headers": headers,
+        "body": dict(exchange.body) if exchange.body is not None else None,
+        "expect_status": exchange.expect_status,
+        "token_field": exchange.token_field,
+        "token_id_field": exchange.token_id_field,
+        "description": exchange.description,
+        "revoke": revoke,
+    }
+
+
 def _check_templates(values: Mapping[str, Any], parts: tuple[Any, ...], allowed: str) -> None:
     """В значениях ``имя → строка`` допустим ровно один шаблон ``{{<allowed>}}`` (R-C1)."""
     for name, value in values.items():
@@ -559,9 +630,18 @@ class ServerEntry:
         return (available or methods[0]).type
 
     def public_auth_methods(self) -> list[dict[str, Any]]:
-        """R-U8/R-U16: способы подключения наружу — без ``verify``, ``exchange``, ``expiry``,
-        client_id/secret, scopes и URL OAuth; наружу идёт только признак выпуска постоянного
-        токена."""
+        """R-U8/R-U16 и §3.2 «Граница публикации» (ревизия 1.13): способы подключения наружу.
+
+        Для ``type: "oauth2"`` граница прежняя **дословно**: ни ``client_id``/``client_secret``, ни
+        ``scopes``, ни URL авторизации и обмена — рядом с ними лежат секреты и ссылки ``env:VAR``.
+
+        Для ``type: "user_token"`` публикуются ``field``, ``verify`` и ``exchange`` (вместе с
+        вложенным ``revoke``): секретов в них нет по построению — это адреса, методы и шаблоны
+        заголовков вида ``{{access_token}}``, а единственное секретное значение схемы (сам токен
+        пользователя) в каталоге не лежит и лежать не может. Блок со ссылкой ``env:VAR`` в
+        заголовках не публикуется целиком (см. ``_public_headers``). ``expiry`` (R-U18) не
+        публикуется: срок годности присланного токена читает Hub, в перечне §3.2 блока нет.
+        """
         result: list[dict[str, Any]] = []
         for method in self.auth_methods:
             view: dict[str, Any] = {
@@ -586,8 +666,43 @@ class ServerEntry:
                     "min_length": f.min_length,
                     "max_length": f.max_length,
                 }
+                # R-U1 (решение 73): у способа с available: false значения наружу не отдаются —
+                # внутри него допустимы незаданные ${VAR}, и подключиться им нельзя (409, R-U4).
+                if method.available:
+                    verify = _public_verify(method.verify)
+                    if verify is not None:
+                        view["verify"] = verify
+                    if method.exchange is not None:
+                        exchange = _public_exchange(method.exchange)
+                        if exchange is not None:
+                            view["exchange"] = exchange
             result.append(view)
         return result
+
+    def public_upstream(self) -> dict[str, Any] | None:
+        """Блок ``upstream`` наружу (§3.2, ревизия 1.13): ``{url, credential_headers, static_headers?}``.
+
+        Публикуется **только** у карточек с **доступным** способом ``type: "user_token"``: адрес
+        целевого MCP-сервера и шаблоны заголовков нужны приложению, чтобы подключиться без Hub.
+        У карточки, где все способы — ``oauth2``, блока нет: граница для них прежняя дословно; у
+        карточки, где единственный способ ``user_token`` объявлен недоступным, блока тоже нет —
+        подключиться им нельзя (R-U1, R-U4), и отдавать наружу адрес незачем.
+        Ссылка ``env:VAR`` в любом из заголовков снимает публикацию блока целиком — подставить её
+        клиенту нечем, и прямым режимом такой коннектор не подключается (§3.2).
+        """
+        m = self.model
+        if not any(method.available for method in self.user_token_methods()) or not m.upstream_url:
+            return None
+        credential = _public_headers(m.credential_headers or {})
+        if not credential:
+            return None
+        block: dict[str, Any] = {"url": m.upstream_url, "credential_headers": credential}
+        if m.static_headers:
+            static = _public_headers(m.static_headers)
+            if static is None:
+                return None
+            block["static_headers"] = static
+        return block
 
     def public_mcp_url(self, public_url: str) -> str:
         if self.model.mode == "native":
@@ -610,7 +725,12 @@ class ServerEntry:
         }
 
     def public_view(self, public_url: str) -> dict[str, Any]:
-        """Публичное представление сервера (R-C6): без секретов и внутренних URL."""
+        """Публичное представление сервера (R-C6): без секретов.
+
+        Ревизия 1.13 (§3.2): у карточки со способом ``user_token`` появился блок ``upstream`` —
+        адрес целевого MCP-сервера и шаблоны заголовков нужны приложению для подключения без Hub.
+        У карточек, где все способы — ``oauth2``, состав представления не изменился.
+        """
         m = self.model
         view: dict[str, Any] = {
             "alias": m.alias,
@@ -628,6 +748,10 @@ class ServerEntry:
         # R-C6/R-U8 (решение 69): ключ auth_methods есть только у серверов, объявивших его в каталоге.
         if m.auth_methods is not None:
             view["auth_methods"] = self.public_auth_methods()
+        # §3.2 (ревизия 1.13): блок upstream — только у карточек со способом user_token.
+        upstream = self.public_upstream()
+        if upstream is not None:
+            view["upstream"] = upstream
         # R-C7.2, R-C7.3: сквозные поля отдаются дословно и только у объявивших их серверов —
         # ключи, порядок, вложенность и типы значений те же, что в каталоге.
         if m.permission_groups is not None:
