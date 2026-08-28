@@ -13,6 +13,8 @@ from typing import Any
 import httpx
 import pytest
 
+from hub.catalog import parse_catalog
+from hub.errors import CatalogError
 from tests.conftest import Hub, HubFactory
 from tests.support import (
     CATALOG_ENV,
@@ -915,6 +917,10 @@ _B252_MIDSTR_D2_VALUE = "midstr-double-leak-marker-C3"
 _B252_MIDSTR_CRED_VALUE = "midstr-cred-leak-marker-D4"
 _B252_MIDSTR_STATIC_VALUE = "midstr-static-leak-marker-E5"
 
+# rev44-3, minor (положительный прогон п. 5): подстановка ${VAR} внутри exchange.list — значения
+# exchange.list наружу не идут никогда (R-U15.3), поэтому они не имеют права снять блок exchange.
+_B252_LISTEX_LEAK_VALUE = "listex-not-a-leak-marker-L7"
+
 _B252_ENV = {
     "B252_VERIFY_URL": _B252_VERIFY_URL,
     "B252_EXCHANGE_URL": _B252_EXCHANGE_URL,
@@ -930,6 +936,7 @@ _B252_ENV = {
     "B252_MIDSTR_D2": _B252_MIDSTR_D2_VALUE,
     "B252_MIDSTR_CRED": _B252_MIDSTR_CRED_VALUE,
     "B252_MIDSTR_STATIC": _B252_MIDSTR_STATIC_VALUE,
+    "B252_LISTEX_LEAK": _B252_LISTEX_LEAK_VALUE,
 }
 
 # Все маркеры-секреты этого теста — используются и для тела ответа, и для полного текста записи
@@ -953,6 +960,7 @@ _B252_LEAK_MARKERS = (
     _B252_MIDSTR_D2_VALUE,
     _B252_MIDSTR_CRED_VALUE,
     _B252_MIDSTR_STATIC_VALUE,
+    _B252_LISTEX_LEAK_VALUE,
 )
 
 
@@ -965,6 +973,20 @@ def _b252_method() -> dict[str, Any]:
         url="${B252_EXCHANGE_URL}", list_url=None, revoke_url="${B252_REVOKE_URL}"
     )
     return method
+
+
+def _b252_clean_card(alias: str) -> dict[str, Any]:
+    """Эталонная карточка «clean»: все значения дословны (адреса — через ``${VAR}``), все блоки
+    публикуются, ``static_headers`` непусты и доходят до опубликованного ``upstream`` (единственное
+    место в наборе, где это происходит). Отдельная функция — не только карточка исходного прогона
+    (``alias='clean'``), но и опорная точка сторожа перечня (§34.5): он ходит по опубликованному
+    представлению ровно этой карточки, а не по списку, зашитому в код."""
+    return user_token_facade(
+        alias,
+        methods=[_b252_method()],
+        upstream_url="${B252_MCP_URL}",
+        static_headers={"X-Static": "static-header-literal-value"},
+    )
 
 
 @pytest.mark.ac("AC-252")
@@ -994,13 +1016,14 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
     выпускала секрет из credential_headers, static_headers и verify.headers сразу. 'midstr'
     кладёт ${VAR} внутрь строки — в начале, в середине, в конце и дважды в одной строке — по
     одному разу на каждый из трёх наборов.
+
+    Дополнено по reports/review-rev44-3.json (minor, задание §34.5): 'listex' — положительный
+    прогон п. 5. Утверждение «значения exchange.list на публикацию exchange не влияют» до этого
+    прогона не имело, ни при каком изменении. Карточка кладёт ${VAR} внутрь exchange.list.headers
+    при дословных headers, body и revoke — exchange обязан остаться опубликованным целиком, без
+    ключа 'list', и записи следа на эту карточку быть не должно ни одной.
     """
-    clean = user_token_facade(
-        "clean",
-        methods=[_b252_method()],
-        upstream_url="${B252_MCP_URL}",
-        static_headers={"X-Static": "static-header-literal-value"},
-    )
+    clean = _b252_clean_card("clean")
 
     envverify_method = _b252_method()
     envverify_method["verify"]["headers"] = {
@@ -1112,6 +1135,26 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         static_headers={"X-Static-Mid": "prefix-${B252_MIDSTR_STATIC}-suffix"},
     )
 
+    # 'listex' (rev44-3, minor — положительный прогон п. 5): подстановка ${VAR} внутри
+    # exchange.list, headers, body и revoke дословны. Значения exchange.list наружу не идут
+    # никогда (R-U15.3), поэтому непубликуемое значение внутри него не имеет права снять exchange —
+    # ссылка env:VAR здесь не годится: вне разрешённых полей её отвергает схема (AC-15), и прогон
+    # покраснел бы ошибкой загрузки, а не тем, ради чего написан (§34.5).
+    listex_method = _b252_method()
+    listex_method["exchange"]["list"] = {
+        "url": _B252_EXCHANGE_URL,
+        "method": "GET",
+        "headers": {
+            "Authorization": "Bearer {{access_token}}",
+            "X-List-Extra": "${B252_LISTEX_LEAK}",
+        },
+        "id_field": "id",
+        "description_field": "description",
+    }
+    listex = user_token_facade(
+        "listex", methods=[listex_method], upstream_url="${B252_MCP_URL}"
+    )
+
     caplog.clear()
     hub = await _hub(
         make_hub,
@@ -1127,6 +1170,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
             exchbody,
             revokebody,
             midstr,
+            listex,
         ],
         env=_B252_ENV,
         admin_token="adm",
@@ -1148,6 +1192,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
             "exchbody",
             "revokebody",
             "midstr",
+            "listex",
         }
 
         # 'clean': verify, exchange (с revoke) и upstream опубликованы дословно, все четыре
@@ -1278,6 +1323,34 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         assert method["exchange"]["url"] == _B252_EXCHANGE_URL
         assert method["exchange"]["revoke"]["url"] == _B252_REVOKE_URL
 
+        # 'listex' (rev44-3, minor, п. 5): подстановка ${VAR} лежит только внутри exchange.list —
+        # блока, который наружу не идёт никогда (R-U15.3). exchange обязан быть опубликован и
+        # сверен с образцом целиком (byte-в-byte), ключа 'list' в нём нет; verify и upstream не
+        # задеты. Ни одной записи следа на эту карточку быть не должно — послабление в эту сторону
+        # (наружу пропускается блок, потерявший бы прямой режим по любому другому набору) здесь не
+        # проверяется, но и не отменяется: exchange.list просто вне области действия п. 7.
+        method = servers["listex"]["auth_methods"][0]
+        assert method["exchange"] == {
+            "url": _B252_EXCHANGE_URL,
+            "method": "POST",
+            "headers": {"Authorization": "Bearer {{access_token}}"},
+            "body": {"description": "{{token_description}}"},
+            "expect_status": 200,
+            "token_field": "token",
+            "token_id_field": "id",
+            "description": "OpenCode Hub",
+            "revoke": {
+                "url": _B252_REVOKE_URL,
+                "method": "POST",
+                "headers": {"Authorization": "Bearer {{access_token}}"},
+                "body": {"token_id": "{{token_id}}"},
+                "expect_status": 200,
+            },
+        }
+        assert "list" not in method["exchange"]
+        assert "verify" in method
+        assert servers["listex"]["upstream"]["url"] == _B252_MCP_URL
+
         # Ни ссылки env:, ни имени переменной, ни развёрнутого секрета нет нигде в теле ответа.
         text = response.text
         for leaked in _B252_LEAK_MARKERS:
@@ -1341,6 +1414,7 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
         assert not any("'exchbody'" in w.getMessage() and "verify" in w.getMessage() for w in warnings)
         assert not any("'revokebody'" in w.getMessage() and "verify" in w.getMessage() for w in warnings)
         assert not any("'midstr'" in w.getMessage() and "exchange" in w.getMessage() for w in warnings)
+        assert not any("'listex'" in w.getMessage() for w in warnings)
 
     # --- первая загрузка: старт приложения (уже произошёл в _hub выше) ---
     _assert_warnings(_warnings())
@@ -1356,6 +1430,205 @@ async def test_publication_boundary_drops_whole_block_and_leaves_a_trace(
 
     second = await hub.get("/api/catalog", headers=bearer("sk-ok"))
     _assert_boundary(second)
+
+
+# rev44-3, задание §34.5, приоритет высокий — «сторож перечня»: четыре пробела подряд
+# (static_headers, три набора exchange, подстановка внутри строки, четыре описательных значения)
+# были одной ошибкой, повторённой четырежды, — перечень публикуемых значений вёлся вручную, в
+# тексте правила и в тексте прогона. Ниже — прогон, порождающий случаи из ОПУБЛИКОВАННОГО
+# представления, а не из перечня, зашитого в код.
+
+_B252_WATCH_MARKER = "b252-watch-leak-9f3ac2"
+
+# R-U8.1 п. 6: четыре адреса — единственное исключение из дословности. Записаны здесь литералом,
+# а не выведены структурно из кода: появление нового такого исключения обязано стать видимой
+# строкой в диффе этого множества, а не проскочить мимо прогона молча (§34.5).
+_B252_ADDRESS_EXCEPTIONS: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
+    {
+        ("verify", ("url",)),
+        ("exchange", ("url",)),
+        ("exchange", ("revoke", "url")),
+        ("upstream", ("url",)),
+    }
+)
+
+
+def _b252_walk_string_paths(node: Any, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Пути всех строковых **значений** узла — имена ключей не берутся (по ним подстановка не
+    выполняется, R-U8.1 п. 6). Обходит словари и списки рекурсивно."""
+    if isinstance(node, dict):
+        paths: list[tuple[str, ...]] = []
+        for key, value in node.items():
+            paths.extend(_b252_walk_string_paths(value, (*prefix, str(key))))
+        return paths
+    if isinstance(node, list):
+        paths = []
+        for i, value in enumerate(node):
+            paths.extend(_b252_walk_string_paths(value, (*prefix, str(i))))
+        return paths
+    if isinstance(node, str):
+        return [prefix]
+    return []
+
+
+def _b252_set_watch(raw_server: dict[str, Any], block: str, path: tuple[str, ...], value: str) -> None:
+    """Поставить ``value`` (строку, содержащую ``${B252_WATCH}``) ровно в одном месте сырой
+    карточки — по пути, снятому с опубликованного представления. Соответствие путей прямое,
+    единственное исключение — опубликованный ``upstream.url`` отвечает полю ``upstream_url``
+    карточки (R-U8.1 п. 6)."""
+    if block == "upstream":
+        if path == ("url",):
+            raw_server["upstream_url"] = value
+            return
+        target: Any = raw_server[path[0]]
+        for key in path[1:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return
+    target = raw_server["auth_methods"][0][block]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+
+@pytest.mark.ac("AC-252")
+async def test_publication_boundary_watches_every_published_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Сторож перечня (rev44-3, задание §34.5, приоритет высокий): прогон порождает случаи
+    непосредственно из ОПУБЛИКОВАННОГО представления карточки 'clean' (``_b252_clean_card``), а не
+    из перечня, зашитого в текст правила R-U8.1 п. 7 или в код прежних прогонов, — закрывает класс
+    дефекта, а не очередной его экземпляр. Четыре пробела подряд не находили один и тот же дефект:
+    ``static_headers`` (finding 1, rev44-1), три набора ``exchange`` и подстановка внутри строки
+    (blocker 1/2, rev44-2), четыре описательных значения — ``verify.account_field``,
+    ``exchange.description``, ``exchange.token_field``, ``exchange.token_id_field`` (major,
+    инъекция N16, rev44-3). Каждый раз пробел закрывался новой карточкой на конкретное значение;
+    этот прогон новых карточек на новое значение не требует.
+
+    Алгоритм: у эталонной карточки 'clean' разбираются опубликованные ``verify``, ``exchange``
+    (вместе с вложенным ``revoke``) и ``upstream``; для каждого пути строкового значения в них (имя
+    ключа не берётся, п. 6) строится вариант карточки, где ровно в этом месте сырых данных стоит
+    ``${B252_WATCH}``, и карточка загружается. Четыре адреса — исключение из дословности (п. 6) и
+    записаны здесь литералом (``_B252_ADDRESS_EXCEPTIONS``) с ОБРАТНЫМ ожиданием: блок публикуется,
+    а значение — маркер, развёрнутый подстановкой (иначе новое исключение стало бы видимой строкой
+    в диффе, а не тихой правкой этого множества). Для всякого другого пути ожидание одно: блок,
+    которому путь принадлежит, отсутствует целиком, маркера нет нигде в опубликованном
+    представлении, и на загрузку приходится ровно одна запись WARNING про этот блок (п. 7, п. 9).
+    Отказ схемы на подстановку (поля с перечислением — ``method`` у ``verify``, ``exchange`` и
+    ``revoke``, ограниченные тремя литералами каждое) засчитывается как второй валидный исход:
+    маркер наружу и тогда не вышел — прогон обязан принимать оба исхода, иначе он покраснеет на
+    верной реализации (§34.5).
+
+    Что это ловит, чего не ловили прежние инъекции по отдельности: новое публикуемое строковое
+    значение в блоках verify/exchange/upstream попадает в обход автоматически — правку кода,
+    добавляющую путь в ``_VERIFY_VERBATIM_SKIP``/``_EXCHANGE_VERBATIM_SKIP`` (сужение первого
+    рубежа), этот прогон обнаруживает без единой новой карточки.
+    """
+    baseline = parse_catalog(catalog_doc([_b252_clean_card("watchbase")]), env=_B252_ENV)
+    entry = baseline.get("watchbase")
+    assert entry is not None
+    view = entry.public_view("https://hub.test")
+    method_view = view["auth_methods"][0]
+    assert "verify" in method_view
+    assert "exchange" in method_view
+    assert "upstream" in view
+
+    paths: list[tuple[str, tuple[str, ...]]] = []
+    for block, node in (
+        ("verify", method_view["verify"]),
+        ("exchange", method_view["exchange"]),
+        ("upstream", view["upstream"]),
+    ):
+        for path in _b252_walk_string_paths(node):
+            paths.append((block, path))
+
+    exceptions = [p for p in paths if p in _B252_ADDRESS_EXCEPTIONS]
+    others = [p for p in paths if p not in _B252_ADDRESS_EXCEPTIONS]
+    # Сверка самого перечня (rev44-3): опубликованное представление 'clean' сегодня несёт ровно
+    # четыре адреса, три поля method (verify.method, exchange.method, exchange.revoke.method —
+    # тоже строки; п. 7 не требует им собственного прогона по указанной в правиле причине —
+    # множество значений схемой ограничено тремя литералами, но из ОБХОДА представления они не
+    # исключаются: у них просто есть второй валидный исход, отказ загрузки) и одиннадцать прочих
+    # строковых значений — семь наборов заголовков/тел плюс четыре описательных значения, ровно то
+    # число, что называет R-U8.1 п. 7. Итого четырнадцать путей вне четырёх адресов. Разойдётся
+    # число — разошлось само представление 'clean', и это тоже обязано быть видно, а не проглочено
+    # молча.
+    assert set(exceptions) == _B252_ADDRESS_EXCEPTIONS, exceptions
+    method_paths = [p for p in others if p[1][-1] == "method"]
+    assert len(method_paths) == 3, method_paths
+    assert len(others) == 14, others
+
+    env = dict(_B252_ENV)
+    env["B252_WATCH"] = _B252_WATCH_MARKER
+
+    for i, (block, path) in enumerate(exceptions):
+        # Alias — короткий и заведомо валидный (R-C1, ``^[a-z][a-z0-9-]{0,31}$`` — имена полей вида
+        # ``account_field`` подчёркивание не проходят): путь и блок идут в сообщение об ошибке, а
+        # не в имя карточки.
+        alias = f"watchx{i}"
+        raw = _b252_clean_card(alias)
+        _b252_set_watch(raw, block, path, "${B252_WATCH}")
+        caplog.clear()
+        parsed = parse_catalog(catalog_doc([raw]), env=env)
+        entry = parsed.get(alias)
+        assert entry is not None, f"{alias}: адрес — исключение п. 6, карточка обязана загрузиться"
+        view = entry.public_view("https://hub.test")
+        node: Any = (
+            view["auth_methods"][0]["verify"]
+            if block == "verify"
+            else view["auth_methods"][0]["exchange"]
+            if block == "exchange"
+            else view["upstream"]
+        )
+        for key in path:
+            node = node[key]
+        assert node == _B252_WATCH_MARKER, (block, path, node)
+
+    schema_rejected: list[tuple[str, tuple[str, ...]]] = []
+    for i, (block, path) in enumerate(others):
+        # Alias — короткий и заведомо валидный (см. пояснение у карточек-исключений выше).
+        alias = f"watch{i}"
+        raw = _b252_clean_card(alias)
+        # Маркер — ВНУТРИ большей строки, не строкой целиком (форма «Bearer ${VAR}», самая частая
+        # запись боевого каталога, и регрессия N5 отчёта reports/review-rev44-2.json: `_is_verbatim`,
+        # суженная до ``value.startswith("${")``, такую подстановку не ловит). Подстановка строкой
+        # целиком этот случай не проверяет — на нём N5 не отличима от верной реализации.
+        _b252_set_watch(raw, block, path, "lit-${B252_WATCH}-tail")
+        caplog.clear()
+        try:
+            parsed = parse_catalog(catalog_doc([raw]), env=env)
+        except CatalogError:
+            # Схема отвергла подставленное значение (перечень — 'method' у verify/exchange/revoke):
+            # маркер наружу не вышел, отказ загрузки — второй валидный исход (§34.5). Отказ по
+            # любой другой причине (например, собственная ошибка построения карточки в этом
+            # прогоне) прогон обязан отличить, а не молча засчитать as принятый исход — отсюда
+            # сверка ``schema_rejected == method_paths`` ниже.
+            schema_rejected.append((block, path))
+            continue
+        entry = parsed.get(alias)
+        assert entry is not None, alias
+        view = entry.public_view("https://hub.test")
+        method_view = view["auth_methods"][0]
+        if block == "upstream":
+            assert "upstream" not in view, (block, path, view)
+        else:
+            assert block not in method_view, (block, path, method_view)
+        body_text = json.dumps(view, ensure_ascii=False)
+        assert _B252_WATCH_MARKER not in body_text, (block, path, body_text)
+
+        warnings = [
+            r for r in caplog.records if r.name == "hub.catalog" and r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1, (block, path, [w.getMessage() for w in warnings])
+        message = warnings[0].getMessage()
+        assert f"'{alias}'" in message, (block, path, message)
+        assert block in message, (block, path, message)
+        assert _B252_WATCH_MARKER not in message, (block, path, message)
+
+    # Отказ схемы обязан объясняться ровно тремя полями method (перечень — литерал, а не догадка):
+    # отказ по любой другой причине сигналил бы о собственной ошибке этого прогона (а не о втором
+    # валидном исходе R-U8.1 п. 7) и не имеет права быть проглочен молча веткой ``except`` выше.
+    assert set(schema_rejected) == set(method_paths), schema_rejected
 
 
 # --- AC-186 ----------------------------------------------------------------
