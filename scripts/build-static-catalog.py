@@ -15,15 +15,26 @@
   (``hub.catalog``), поэтому расхождение «Hub отдаёт одно, файл — другое» невозможно по построению.
   Способы подключения (``auth_methods``, R-U8) подхватываются, если эта версия Hub их знает.
 * **Утечка секрета — отказ сборки, а не предупреждение.** Поверх публичного представления работает
-  проверка запрещённых ключей и значений: ``client_secret``, ``verify``, ``exchange``,
-  ``credential_headers``, внутренние ``upstream_url``, ссылки ``env:VAR`` и неподставленные
-  ``${VAR}``. Публичный файл раздаётся без авторизации — «почти публичное представление» здесь
-  означает утечку, поэтому сборка падает.
+  проверка запрещённых ключей и значений: ``client_secret``, ``upstream_url``, ``expiry``,
+  ``permission_model.header``, ссылки ``env:VAR`` и неподставленные ``${VAR}``. Публичный файл
+  раздаётся без авторизации — «почти публичное представление» здесь означает утечку, поэтому
+  сборка падает.
+* **Граница проходит по типу способа подключения, а не по имени поля (R-U8.1).** Прямой режим
+  (ревизия 1.13 форка, S-V24) невозможен без описания цели, поэтому у **доступного** способа
+  ``type: user_token`` наружу идут блоки ``verify`` и ``exchange`` (вместе с вложенным ``revoke``),
+  а у карточки с таким способом — блок ``upstream`` (``url``, ``credential_headers``,
+  ``static_headers``). У способа ``oauth2`` те же имена запрещены дословно как прежде: рядом с ними
+  лежат ``client_secret`` и ссылки ``env:VAR``. Состав каждого открытого блока проверяется по
+  **перечню разрешённого**: поле, добавленное в ``public_view`` завтра, останавливает сборку, а не
+  утекает молча (так же не пройдут ``exchange.list`` и ``expiry``).
 * **``${VAR}`` подставляются только в несекретных полях.** Это свойство самого каталога: секреты
   объявляются ссылкой ``env:VAR`` (``auth.client_secret``, ``credential_headers``,
   ``static_headers``), и в публичное представление такие поля не входят вовсе. Сервер с
   неподставленной переменной считается ненастроенным и в файл не попадает — ровно как он не попадает
-  в ответ Hub.
+  в ответ Hub. Подстановка выполняется **до** проверки схемы, поэтому в открытых блоках заголовок,
+  записанный как ``"${GW_SECRET}"``, к моменту публикации неотличим от литерала: его ловит отдельная
+  проверка — значение переменной окружения, названной в каталоге, в заголовке или теле запроса
+  запрещено (R-U8.1 п. 6 разрешает подстановку только в четырёх адресах).
 * **Словари разрешений** (``catalog/permissions/<alias>.yaml``, правило S-V20) прикладываются к
   карточке полем ``permission_groups`` дословно: клиент разбирает их сам и деградирует на прежний
   экран прав, если формат ему незнаком.
@@ -56,9 +67,13 @@ DEFAULT_PERMISSIONS = "catalog/permissions"
 DEFAULT_OUT = "dist/catalog.json"
 
 #: Ключи, которых в публичном файле быть не может ни на каком уровне вложенности.
-#: ``verify`` и ``exchange`` — блоки способа ``user_token`` (R-U8): первый описывает, каким запросом
-#: Hub проверяет введённый токен, второй — как обменивает его на рабочий. Оба содержат внутренние
-#: адреса и заголовки и наружу не отдаются даже в усечённом виде.
+#: ``verify`` и ``exchange`` — блоки способа подключения (R-U8): первый описывает, каким запросом
+#: проверяется введённый токен, второй — как он обменивается на рабочий. У способа ``oauth2`` рядом
+#: с ними лежат ``client_secret`` и ссылки ``env:VAR``, поэтому запрет по имени остаётся дословно
+#: прежним; исключение делается **только** для мест, перечисленных в ``_boundary`` — блоков
+#: доступного способа ``type: user_token`` и блока ``upstream`` его карточки (R-U8.1 п. 2 и п. 4).
+#: ``expiry`` (R-U18) и внутренний ``upstream_url`` наружу не идут ни при каком типе способа
+#: (R-U8.1 п. 5): адрес цели публикуется как ``upstream.url``, а не этим ключом.
 FORBIDDEN_KEYS = frozenset(
     {
         "client_secret",
@@ -71,14 +86,55 @@ FORBIDDEN_KEYS = frozenset(
         "token_url",
         "revoke_url",
         "audience",
+        "expiry",
     }
 )
+
+#: Ключи, запрещённые не везде, а на своём месте: ``(родительский ключ, ключ)``. Имя заголовка
+#: групп разрешений (R-C6) наружу не идёт, но само слово ``header`` слишком общее, чтобы запрещать
+#: его на любой глубине: в словарях разрешений (S-V20) оно кладётся дословно.
+FORBIDDEN_AT = frozenset({("permission_model", "header")})
+
+#: Обратный случай: имя из ``FORBIDDEN_KEYS``, которое на своём месте означает не секрет, а признак.
+#: В составе ``field`` способа ``user_token`` (R-U8) ``secret: true`` — указание приложению
+#: маскировать ввод; поле публиковалось и до ревизии 4.4, и ревизия его не трогает. Послабление
+#: намеренно узкое: только непосредственно в ``field`` и только для булева значения — строка с этим
+#: именем остаётся запрещённой везде, включая сам ``field``.
+ALLOWED_FLAGS_AT = frozenset({("field", "secret")})
+
+#: Полный состав блоков, открытых ревизией 4.4 (R-U8.1 п. 2 и п. 4). Это перечень **разрешённого**,
+#: а не запрещённого: решение 120 отвергло «публиковать всё, кроме перечисленного» именно потому,
+#: что забытое поле утекало бы молча. Ключ, которого здесь нет, останавливает сборку — так ловятся
+#: и ``exchange.list`` (R-U15.3), и любое поле, добавленное в ``public_view`` завтра.
+VERIFY_KEYS = frozenset(
+    {"url", "method", "headers", "expect_status", "account_field", "require_account"}
+)
+EXCHANGE_KEYS = frozenset(
+    {
+        "url",
+        "method",
+        "headers",
+        "body",
+        "expect_status",
+        "token_field",
+        "token_id_field",
+        "description",
+        "revoke",
+    }
+)
+REVOKE_KEYS = frozenset({"url", "method", "headers", "body", "expect_status"})
+UPSTREAM_KEYS = frozenset({"url", "credential_headers", "static_headers"})
 
 #: Ссылка на секрет в переменной окружения (``env:VAR``) — форма, в которой секреты лежат в YAML.
 ENV_REF_RE = re.compile(r"^env:[A-Za-z_][A-Za-z0-9_]*$")
 
 #: Неподставленная переменная ``${VAR}``: означает, что сервер собран не полностью.
 VAR_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+#: Имена переменных, названных в каталоге: ``${VAR}`` и ``env:VAR``. По ним берутся значения,
+#: которым в заголовках и телах запросов быть нельзя (R-U8.1 п. 6).
+VAR_NAME_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+ENV_NAME_RE = re.compile(r"env:([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class BuildError(Exception):
@@ -140,30 +196,173 @@ def public_card(entry: ServerEntry, public_url: str, permission_groups: dict[str
     return card
 
 
-def audit(value: Any, path: str = "$") -> list[str]:
-    """Найти в готовом теле всё, чего в публичном файле быть не должно.
+def _unknown_keys(block: Any, allowed: frozenset[str], where: str) -> list[str]:
+    """Ключи открытого блока, которых нет в перечне разрешённого (R-U8.1 п. 2, п. 4, п. 5)."""
+    if not isinstance(block, dict):
+        return []
+    return [
+        f"{where}.{key}: поле не входит в состав публикуемого блока"
+        for key in block
+        if key not in allowed
+    ]
 
-    Проверка идёт по **результату**, а не по namespace исходника: она ловит и поле, добавленное в
-    ``public_view`` завтра, и словарь разрешений, в который кто-то положил лишнее. Возвращается
-    список путей — все сразу, чтобы чинить за один заход.
+
+def _boundary(document: Any) -> tuple[set[tuple[Any, ...]], set[tuple[Any, ...]], list[str]]:
+    """Где запрет по имени поля снимается (R-U8.1), и что там дополнительно проверяется.
+
+    Возвращает три вещи:
+
+    * ``permitted`` — точные пути, на которых запрещённое имя законно: ``verify`` и ``exchange``
+      у **доступного** способа ``type: user_token`` и ``credential_headers``/``static_headers``
+      внутри блока ``upstream`` его карточки. Граница по типу способа, а не по имени (решение 120):
+      у ``oauth2`` и у недоступного ``user_token`` (R-U1, решение 73) те же имена остаются
+      запрещёнными, и путь в перечень не попадает.
+    * ``sensitive`` — наборы «имя → строка», открытые ревизией 4.4: заголовки и тела запросов.
+      Значения в них обязаны быть дословными (R-U8.1 п. 6), поэтому именно там ищется значение
+      переменной окружения. Четыре адреса (``upstream.url``, ``verify.url``, ``exchange.url``,
+      ``exchange.revoke.url``) сюда не входят: подстановка в них разрешена, без неё прямого режима
+      не существует.
+    * ``problems`` — нарушения состава: лишний ключ в открытом блоке и блок ``upstream`` у карточки,
+      которая доступного способа ``user_token`` не объявила (R-U8.1 п. 4).
     """
+    permitted: set[tuple[Any, ...]] = set()
+    sensitive: set[tuple[Any, ...]] = set()
+    problems: list[str] = []
+
+    servers = document.get("servers") if isinstance(document, dict) else None
+    if not isinstance(servers, list):
+        return permitted, sensitive, problems
+
+    for i, server in enumerate(servers):
+        if not isinstance(server, dict):
+            continue
+        base: tuple[Any, ...] = ("servers", i)
+        raw_methods = server.get("auth_methods")
+        methods = raw_methods if isinstance(raw_methods, list) else []
+        direct = False
+
+        for j, method in enumerate(methods):
+            if not isinstance(method, dict):
+                continue
+            # R-U8.1 п. 1 и п. 3: открывается только доступный способ типа user_token.
+            if method.get("type") != "user_token" or method.get("available") is not True:
+                continue
+            direct = True
+            mpath = (*base, "auth_methods", j)
+            mwhere = f"$.servers[{i}].auth_methods[{j}]"
+            permitted.add((*mpath, "verify"))
+            permitted.add((*mpath, "exchange"))
+
+            verify = method.get("verify")
+            if isinstance(verify, dict):
+                problems.extend(_unknown_keys(verify, VERIFY_KEYS, f"{mwhere}.verify"))
+                sensitive.add((*mpath, "verify", "headers"))
+
+            exchange = method.get("exchange")
+            if isinstance(exchange, dict):
+                problems.extend(_unknown_keys(exchange, EXCHANGE_KEYS, f"{mwhere}.exchange"))
+                sensitive.add((*mpath, "exchange", "headers"))
+                sensitive.add((*mpath, "exchange", "body"))
+                revoke = exchange.get("revoke")
+                if isinstance(revoke, dict):
+                    problems.extend(_unknown_keys(revoke, REVOKE_KEYS, f"{mwhere}.exchange.revoke"))
+                    sensitive.add((*mpath, "exchange", "revoke", "headers"))
+                    sensitive.add((*mpath, "exchange", "revoke", "body"))
+
+        upstream = server.get("upstream")
+        if upstream is None:
+            continue
+        if not direct:
+            # R-U8.1 п. 4: адрес цели и шаблоны заголовков отдаются только карточке, которая
+            # объявила доступный способ user_token. Иначе это утечка внутреннего адреса.
+            problems.append(
+                f"$.servers[{i}].upstream: блок upstream у карточки без доступного "
+                "способа user_token"
+            )
+            continue
+        permitted.add((*base, "upstream", "credential_headers"))
+        permitted.add((*base, "upstream", "static_headers"))
+        sensitive.add((*base, "upstream", "credential_headers"))
+        sensitive.add((*base, "upstream", "static_headers"))
+        problems.extend(_unknown_keys(upstream, UPSTREAM_KEYS, f"$.servers[{i}].upstream"))
+
+    return permitted, sensitive, problems
+
+
+def _walk(
+    value: Any,
+    path: str,
+    parts: tuple[Any, ...],
+    permitted: set[tuple[Any, ...]],
+    sensitive: set[tuple[Any, ...]],
+    secret_values: frozenset[str],
+) -> list[str]:
+    """Обход готового тела: запрещённые имена, ссылки на секреты и подставленные значения."""
     problems: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
             here = f"{path}.{key}"
-            if key in FORBIDDEN_KEYS:
+            hp = (*parts, key)
+            flag = isinstance(item, bool) and bool(parts) and (parts[-1], key) in ALLOWED_FLAGS_AT
+            if key in FORBIDDEN_KEYS and hp not in permitted and not flag:
                 problems.append(f"{here}: запрещённое поле в публичном каталоге")
                 continue
-            problems.extend(audit(item, here))
+            if parts and (parts[-1], key) in FORBIDDEN_AT:
+                problems.append(f"{here}: запрещённое поле в публичном каталоге")
+                continue
+            problems.extend(_walk(item, here, hp, permitted, sensitive, secret_values))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            problems.extend(audit(item, f"{path}[{index}]"))
+            problems.extend(
+                _walk(item, f"{path}[{index}]", (*parts, index), permitted, sensitive, secret_values)
+            )
     elif isinstance(value, str):
         if ENV_REF_RE.match(value):
             problems.append(f"{path}: ссылка на секрет env:VAR")
         elif VAR_RE.search(value):
             problems.append(f"{path}: неподставленная переменная ${{VAR}}")
+        elif value in secret_values and parts[:-1] in sensitive:
+            # R-U8.1 п. 6: наружу идёт только дословно записанная строка. Подстановка ${VAR}
+            # выполняется до валидации схемы, поэтому заголовок "${GW_SECRET}" к этому моменту
+            # неотличим от литерала — отличить его можно только по значению переменной.
+            problems.append(
+                f"{path}: значение переменной окружения в публикуемом заголовке или теле запроса "
+                "(дословной строкой это быть не может)"
+            )
     return problems
+
+
+def audit(
+    value: Any, path: str = "$", *, secret_values: frozenset[str] = frozenset()
+) -> list[str]:
+    """Найти в готовом теле всё, чего в публичном файле быть не должно.
+
+    Проверка идёт по **результату**, а не по namespace исходника: она ловит и поле, добавленное в
+    ``public_view`` завтра, и словарь разрешений, в который кто-то положил лишнее. Возвращается
+    список путей — все сразу, чтобы чинить за один заход.
+
+    ``secret_values`` — значения переменных окружения, названных в каталоге (см.
+    ``referenced_env_values``). Без них проверка на подставленный ``${VAR}`` в заголовке не
+    работает: отличить подстановку от литерала по самой строке невозможно.
+    """
+    permitted, sensitive, problems = _boundary(value)
+    problems.extend(_walk(value, path, (), permitted, sensitive, secret_values))
+    return problems
+
+
+def referenced_env_values(catalog_path: Path, env: dict[str, str] | None) -> frozenset[str]:
+    """Значения переменных, названных в тексте каталога (``${VAR}`` и ``env:VAR``).
+
+    Читается сам файл каталога: имена нужны до и независимо от разбора, а ``$ref`` в нём внутренние
+    (``#/servers/...``). Пустые значения отбрасываются — сравнивать с ними бессмысленно.
+    """
+    environ = os.environ if env is None else env
+    try:
+        text = catalog_path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    names = set(VAR_NAME_RE.findall(text)) | set(ENV_NAME_RE.findall(text))
+    return frozenset(value for value in (environ.get(name) for name in names) if value)
 
 
 def build(
@@ -205,7 +404,7 @@ def build(
 
     document = {"version": catalog.version, "servers": servers}
 
-    problems = audit(document)
+    problems = audit(document, secret_values=referenced_env_values(catalog_path, env))
     if problems:
         raise BuildError(
             "публичный каталог не собран — в теле остались непубличные данные:\n  "
