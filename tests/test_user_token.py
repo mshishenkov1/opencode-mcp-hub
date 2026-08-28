@@ -1509,13 +1509,32 @@ def _b252_capture_verbatim_skip(
     именно такова эталонная карточка ``_b252_clean_card``. Рекурсивные вызовы внутри
     ``_all_verbatim`` всегда расширяют ``rel``, поэтому ``rel == ()`` однозначно отмечает верхний
     вызов на блок, а не узел внутри него.
+
+    Ревью ``reports/review-rev44-6.json`` (N29, major) показало, что перехвата ТОЛЬКО верхних
+    вызовов недостаточно: он видит аргумент ``skip``, с которым проверка была ВЫЗВАНА на блок, но
+    не видит послабление, которое сама ``_all_verbatim`` вносит НИЖЕ верхнего вызова — инъекция
+    добавляет `if rel == ('headers',): skip = skip | {('headers', 'X-Request-Id')}` уже ПОСЛЕ
+    `if rel in skip: return True`, и дальше рекурсия идёт с расширенным множеством, которое верхний
+    вызов никогда не наблюдает (4 записанных значения против 28 фактических обращений к проверке
+    при разборе эталонной карточки). Лечится тем же приёмом на уровень глубже: перехватывается
+    ``skip`` КАЖДОГО обращения к ``_all_verbatim``, а не только верхнего, и сверяется МНОЖЕСТВО
+    РАЗЛИЧНЫХ значений, реально дошедших до функции за весь разбор, — с той же тройкой литералов
+    (``_B252_EXPECTED_*_SKIP``), что и раньше. Число самих обращений (сегодня 28) в прогон
+    сознательно не зашивается: это runtime-инвариант ФОРМЫ эталонной карточки, а не число, которое
+    стоит закреплять литералом, — иначе безобидная правка карточки (новый способ, новый заголовок)
+    красила бы прогон без всякого послабления в коде. На чистом коде ``skip`` вдоль рекурсии не
+    меняется, поэтому различных значений за весь разбор ровно три (та же тройка, что и у верхних
+    вызовов); послабление ниже верхнего вызова добавляет к множеству ЧЕТВЁРТОЕ, отличное от
+    литералов, значение, и сверка красится.
     """
     original = _b252_catalog_module._all_verbatim
-    calls: list[frozenset[tuple[str, ...]]] = []
+    top_calls: list[frozenset[tuple[str, ...]]] = []
+    all_calls: set[frozenset[tuple[str, ...]]] = set()
 
     def _spy(node: Any, rel: tuple[str, ...], skip: frozenset[tuple[str, ...]]) -> bool:
+        all_calls.add(skip)
         if rel == ():
-            calls.append(skip)
+            top_calls.append(skip)
         return original(node, rel, skip)
 
     _b252_catalog_module._all_verbatim = _spy
@@ -1525,9 +1544,21 @@ def _b252_capture_verbatim_skip(
         _b252_catalog_module._all_verbatim = original
     assert parsed.get(alias) is not None
 
-    assert len(calls) == 4, calls
-    verify_skip, exchange_skip, upstream_cred_skip, upstream_static_skip = calls
+    assert len(top_calls) == 4, top_calls
+    verify_skip, exchange_skip, upstream_cred_skip, upstream_static_skip = top_calls
     assert upstream_cred_skip == upstream_static_skip, (upstream_cred_skip, upstream_static_skip)
+
+    # N29: сверка ТОЛЬКО верхних вызовов (выше) не видит послабление, внесённое ``_all_verbatim``
+    # себе самой ниже верхнего вызова — она сверяет тот же самый набор значений и на послабленном,
+    # и на чистом коде, потому что аргумент верхнего вызова инъекция не трогает. Множество ЗНАЧЕНИЙ,
+    # реально дошедших до функции за ВЕСЬ разбор (верхних и рекурсивных вызовов вместе), послабление
+    # уже отличает от литерала: рекурсия под расширенным ``skip`` передаёт его своим детям, и это
+    # значение в множество литералов не входит.
+    assert all_calls == {
+        _B252_EXPECTED_VERIFY_SKIP,
+        _B252_EXPECTED_EXCHANGE_SKIP,
+        _B252_EXPECTED_UPSTREAM_SKIP,
+    }, all_calls
     return verify_skip, exchange_skip, upstream_cred_skip
 
 
