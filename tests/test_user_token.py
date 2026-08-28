@@ -8,12 +8,23 @@ from __future__ import annotations
 
 import json
 import logging
+import types
+import typing
 from typing import Any
 
 import httpx
 import pytest
+from pydantic import BaseModel
 
-from hub.catalog import parse_catalog
+from hub.catalog import _EXCHANGE_VERBATIM_SKIP as _B252_ACTUAL_EXCHANGE_SKIP
+from hub.catalog import _UPSTREAM_VERBATIM_SKIP as _B252_ACTUAL_UPSTREAM_SKIP
+from hub.catalog import _VERIFY_VERBATIM_SKIP as _B252_ACTUAL_VERIFY_SKIP
+from hub.catalog import (
+    TokenExchange,
+    TokenExchangeRevoke,
+    TokenVerify,
+    parse_catalog,
+)
 from hub.errors import CatalogError
 from tests.conftest import Hub, HubFactory
 from tests.support import (
@@ -1453,6 +1464,113 @@ _B252_ADDRESS_EXCEPTIONS: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
 )
 
 
+# --- §34.5, сверка 1: множества пропуска против литерала (ревью reports/review-rev44-4.json,
+# major) ----------------------------------------------------------------------------------------
+# Литерал того, что проверка дословности (``_all_verbatim``) пропускает СЕГОДНЯ, записан здесь
+# руками — выводить его из кода нельзя ни в какой форме, иначе сверка проверяла бы код им же самим
+# и проходила бы всегда. Равенство, а не включение: и новый путь пропуска, и исчезнувший обязаны
+# стать видимой строкой в диффе этих множеств. Опровергается инъекцией N23 ревью: путь
+# ``('headers', 'X-Request-Id')`` в множестве ``verify`` — обход выше его не ловит (эталонная
+# карточка такого заголовка не задаёт), а эта сверка обязана покраснеть.
+_B252_EXPECTED_VERIFY_SKIP: frozenset[tuple[str, ...]] = frozenset({("url",)})
+_B252_EXPECTED_EXCHANGE_SKIP: frozenset[tuple[str, ...]] = frozenset(
+    {("url",), ("revoke", "url"), ("list",)}
+)
+# Единая константа кода обслуживает оба набора карточки (``credential_headers``, ``static_headers``,
+# см. ``_publication``) — пустое множество пропуска у обоих (§34.5).
+_B252_EXPECTED_UPSTREAM_SKIP: frozenset[tuple[str, ...]] = frozenset()
+
+
+# --- §34.5, сверка 2: состав публикуемых полей против состава обхода (то же ревью, major) -------
+
+
+def _b252_strip_optional(annotation: Any) -> Any:
+    """Снять ``| None`` с аннотации поля, если это ровно один непустой вариант объединения."""
+    if typing.get_origin(annotation) in (types.UnionType, typing.Union):
+        rest = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(rest) == 1:
+            return rest[0]
+    return annotation
+
+
+def _b252_unwrap_annotated(annotation: Any) -> Any:
+    """Снять ``Annotated[X, ...]`` до ``X`` (значения заголовков — ``Annotated[str | EnvRef, ...]``)."""
+    if typing.get_origin(annotation) is typing.Annotated:
+        return typing.get_args(annotation)[0]
+    return annotation
+
+
+def _b252_type_carries_string(annotation: Any) -> bool:
+    """Тип способен нести строку: сам ``str``, либо объединение, где ``str`` — один из вариантов
+    (нужно для значений словарей вроде ``HeaderValue = str | EnvRef``)."""
+    annotation = _b252_unwrap_annotated(_b252_strip_optional(annotation))
+    if annotation is str:
+        return True
+    if typing.get_origin(annotation) in (types.UnionType, typing.Union):
+        return any(_b252_type_carries_string(a) for a in typing.get_args(annotation))
+    return False
+
+
+def _b252_field_carries_string(annotation: Any) -> bool:
+    """Поле модели способно нести строку наружу (§34.5, сверка 2): аннотация после снятия ``| None``
+    — это ``str``, ``Literal[...]`` из строк, ``dict`` со строковым значением, или вложенная модель
+    (её имя учитывается как поле — рекурсия по её собственным полям делается отдельным вызовом для
+    соответствующего вложенного блока, а не здесь)."""
+    annotation = _b252_strip_optional(annotation)
+    if annotation is str:
+        return True
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        return all(isinstance(v, str) for v in typing.get_args(annotation))
+    if origin is dict:
+        _, value_t = typing.get_args(annotation)
+        return _b252_type_carries_string(value_t)
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def _b252_string_fields(model_cls: type[BaseModel]) -> set[str]:
+    """Имена полей модели, способных нести строку наружу (§34.5, сверка 2)."""
+    return {
+        name
+        for name, info in model_cls.model_fields.items()
+        if _b252_field_carries_string(info.annotation)
+    }
+
+
+def _b252_literal_fields(model_cls: type[BaseModel]) -> set[str]:
+    """Имена полей модели с аннотацией ``Literal[...]`` из строк — единственная причина, по которой
+    схема может отвергнуть подставленное значение у этих моделей (R-U8.1 п. 7). §34.5, minor:
+    причина выводится из аннотации поля, а не из имени сегмента ``method`` (ручной суррогат)."""
+    names: set[str] = set()
+    for name, info in model_cls.model_fields.items():
+        annotation = _b252_strip_optional(info.annotation)
+        if typing.get_origin(annotation) is typing.Literal and all(
+            isinstance(v, str) for v in typing.get_args(annotation)
+        ):
+            names.add(name)
+    return names
+
+
+def _b252_is_literal_string_path(block: str, path: tuple[str, ...]) -> bool:
+    """Путь ведёт к строковому полю с ``Literal[...]``-аннотацией — второй валидный исход обхода
+    (отказ схемы) вместо снятия блока. Заменяет прежний суррогат по имени сегмента ``method``
+    выводом из тех же аннотаций, что читает сверка 2 (§34.5, minor)."""
+    if block == "verify" and len(path) == 1:
+        return path[0] in _b252_literal_fields(TokenVerify)
+    if block == "exchange":
+        if len(path) == 1:
+            return path[0] in _b252_literal_fields(TokenExchange)
+        if len(path) == 2 and path[0] == "revoke":
+            return path[1] in _b252_literal_fields(TokenExchangeRevoke)
+    return False
+
+
+# Исключение сверки 2 — сегодня ровно одно, с причиной (R-U15.3, п. 5): ``exchange.list`` наружу не
+# идёт никогда, поэтому в опубликованном представлении его нет и путь обхода для него не строится,
+# хотя модель ``TokenExchange`` несёт поле ``list`` (вложенная модель, способная нести строку).
+_B252_FIELD_EXCEPTIONS: frozenset[tuple[str, str]] = frozenset({("exchange", "list")})
+
+
 def _b252_walk_string_paths(node: Any, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
     """Пути всех строковых **значений** узла — имена ключей не берутся (по ним подстановка не
     выполняется, R-U8.1 п. 6). Обходит словари и списки рекурсивно."""
@@ -1523,6 +1641,35 @@ async def test_publication_boundary_watches_every_published_value(
     значение в блоках verify/exchange/upstream попадает в обход автоматически — правку кода,
     добавляющую путь в ``_VERIFY_VERBATIM_SKIP``/``_EXCHANGE_VERBATIM_SKIP`` (сужение первого
     рубежа), этот прогон обнаруживает без единой новой карточки.
+
+    Честная граница обхода (найдена ревью ``reports/review-rev44-4.json``, N23 и N22b): обход ходит
+    по значениям ОДНОГО экземпляра эталонной карточки, поэтому видит только пути, которые этот
+    экземпляр порождает. Путь, которого карточка не задаёт, для обхода не существует — ни новый
+    путь пропуска (N23: ``('headers', 'X-Request-Id')`` в ``_VERIFY_VERBATIM_SKIP``), ни новое
+    публикуемое поле модели, которого карточка не задаёт (N22b). Обе инъекции дают полностью
+    зелёный сьют при подтверждённой оракулом утечке — воспроизведено этим review и закрыто ниже
+    двумя сверками состава (§34.5, задание того же ревью, major), которые обход не заменяют, а
+    дополняют:
+
+    Сверка 1 — множества пропуска против литерала, записанного в этой функции руками
+    (``_B252_EXPECTED_*_SKIP``), а не выведенного из кода. Равенство, не включение: и новый путь
+    пропуска, и исчезнувший обязаны стать видимой строкой в диффе. Ловит N23 — обход его не видит.
+
+    Сверка 2 — состав полей моделей ``TokenVerify``/``TokenExchange``/``TokenExchangeRevoke``,
+    способных нести строку (``str``, ``Literal[...]`` из строк, ``dict`` со строковым значением,
+    вложенная модель), сверенный с составом первых сегментов путей обхода. Исключение — одно,
+    с причиной: ``exchange.list`` наружу не идёт никогда (п. 5). У ``upstream`` модели нет —
+    сверяется состав ОПУБЛИКОВАННЫХ ключей с тройкой п. 4; эта половина слабее двух других и ловит
+    только безусловно публикуемый новый ключ (незакрытый вход, названный в спеке честно). Ловит
+    N22b без правки множеств пропуска (поле модели есть — пути обхода нет).
+
+    Обе сверки нужны вместе: N22b (поле в модели + путь в множестве пропуска) трогает и то, и
+    другое, поэтому её одной недостаточно как доказательства — доказательство даёт разделённая
+    пара (поле без кортежа / кортеж без поля, см. проверку выше и N23).
+
+    §34.5, minor: причина отказа схемы (``method_paths``) выводится из аннотации поля
+    (``Literal[...]`` из строк — ``_b252_is_literal_string_path``), а не из имени сегмента
+    ``method`` — тот же приём и то же место, что сверка 2.
     """
     baseline = parse_catalog(catalog_doc([_b252_clean_card("watchbase")]), env=_B252_ENV)
     entry = baseline.get("watchbase")
@@ -1554,9 +1701,54 @@ async def test_publication_boundary_watches_every_published_value(
     # число — разошлось само представление 'clean', и это тоже обязано быть видно, а не проглочено
     # молча.
     assert set(exceptions) == _B252_ADDRESS_EXCEPTIONS, exceptions
-    method_paths = [p for p in others if p[1][-1] == "method"]
+    # §34.5, minor: причина отказа схемы выводится из аннотации поля (``Literal[...]`` из строк),
+    # а не из имени сегмента ``method`` — тот же приём, что читает сверка 2 ниже.
+    method_paths = [p for p in others if _b252_is_literal_string_path(p[0], p[1])]
     assert len(method_paths) == 3, method_paths
     assert len(others) == 14, others
+
+    # --- §34.5, сверка 1: множества пропуска против литерала (задание ревью rev44-4, major) -----
+    # Равенство с литералом, записанным руками (см. определение выше этой функции), а не с чем-то
+    # выведенным из кода. Опровергается инъекцией N23: путь ('headers', 'X-Request-Id'), добавленный
+    # в множество пропуска ``verify``, — обход выше молчит (эталонная карточка такой заголовок не
+    # задаёт), а эта сверка обязана покраснеть.
+    assert _B252_ACTUAL_VERIFY_SKIP == _B252_EXPECTED_VERIFY_SKIP, _B252_ACTUAL_VERIFY_SKIP
+    assert _B252_ACTUAL_EXCHANGE_SKIP == _B252_EXPECTED_EXCHANGE_SKIP, _B252_ACTUAL_EXCHANGE_SKIP
+    assert _B252_ACTUAL_UPSTREAM_SKIP == _B252_EXPECTED_UPSTREAM_SKIP, _B252_ACTUAL_UPSTREAM_SKIP
+
+    # --- §34.5, сверка 2: состав публикуемых полей против состава обхода (то же ревью, major) ----
+    # Свести пути обхода (полные, включая четыре адреса-исключения — поле, публикующее адрес,
+    # тоже часть состава модели) к первым сегментам на блок и сверить с моделями. Для ``revoke`` —
+    # вторые сегменты у путей, начинающихся с ``revoke``.
+    verify_path_names = {path[0] for block, path in paths if block == "verify"}
+    exchange_path_names = {path[0] for block, path in paths if block == "exchange"}
+    revoke_path_names = {
+        path[1] for block, path in paths if block == "exchange" and path[0] == "revoke"
+    }
+
+    verify_field_names = _b252_string_fields(TokenVerify)
+    exchange_field_names = _b252_string_fields(TokenExchange) - {
+        field for exc_block, field in _B252_FIELD_EXCEPTIONS if exc_block == "exchange"
+    }
+    revoke_field_names = _b252_string_fields(TokenExchangeRevoke)
+
+    # Опровергается необязательным публикуемым строковым полем модели (например,
+    # ``verify.account_prefix``), добавленным БЕЗ правки множеств пропуска (N22b без второй
+    # половины инъекции, ревью rev44-4): поле модели есть, пути обхода нет — красный здесь, тогда
+    # как сверка 1 выше на этой же инъекции остаётся зелёной (множества пропуска не менялись).
+    assert verify_field_names == verify_path_names, (verify_field_names, verify_path_names)
+    assert exchange_field_names == exchange_path_names, (exchange_field_names, exchange_path_names)
+    assert revoke_field_names == revoke_path_names, (revoke_field_names, revoke_path_names)
+
+    # У блока ``upstream`` модели нет — сверяется состав ОПУБЛИКОВАННЫХ ключей с литеральной тройкой
+    # R-U8.1 п. 4. Половина слабее двух предыдущих сверок, и §34.5 это не скрывает: она ловит новый
+    # ключ, публикуемый безусловно, но не ловит ключ, отдаваемый только при заданном значении —
+    # незакрытый вход, названный в спеке прямо (нет модели, по которой его увидеть до публикации).
+    assert set(view["upstream"].keys()) == {
+        "url",
+        "credential_headers",
+        "static_headers",
+    }, view["upstream"]
 
     env = dict(_B252_ENV)
     env["B252_WATCH"] = _B252_WATCH_MARKER
