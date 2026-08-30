@@ -7,7 +7,14 @@
 #
 # Имя файла = alias коннектора. Состав инструментов — 77 курируемых инструментов
 # ~/Documents/magnit-tag-mcp/docs/TOOLS.md; `rest` страхует те, что появятся позже.
-version: 1
+#
+# version: 2 добавляет раздел `tools` — строку на каждый инструмент с человеческим именем и
+# классом риска, из которых клиент строит экран разрешений по классам, а не по группам. Группы,
+# их тексты и умолчания остались от версии 1 дословно (согласованы заказчиком 2026-08-26):
+# умолчание инструмента по-прежнему берётся из его группы. Совпадение состава `tools` и
+# объединения групповых `tools` проверяется при сборке каталога
+# (scripts/build-static-catalog.py, check_tool_index) — расхождение останавливает сборку.
+version: 2
 groups:
   - id: profile_and_server
     title: "Смотреть ваш профиль и состояние ТЭГ"
@@ -84,6 +91,243 @@ groups:
     description: "Необратимое и внешнее: удаление сообщений, исключение участников, архивация каналов, закрытие опросов, вебхуки и запуск слэш-команд, включая команды сторонних интеграций. Отменить эти действия из ТЭГ нельзя."
     default: deny
     tools: [delete_post, remove_channel_member, archive_channel, close_poll, create_incoming_webhook, list_incoming_webhooks, list_outgoing_webhooks, execute_slash_command]
+tools:
+  # Строка на каждый инструмент: человеческое имя и класс риска. Классы: `read_only` — ничего не
+  # меняет; `write_delete` — меняет или удаляет данные в ТЭГ; `interactive` — действие вовне или
+  # запуск чужого кода. Класс берётся по существу инструмента, а не по группе: в
+  # `destructive_and_integrations` соседствуют все три. Умолчание инструмента по-прежнему берётся
+  # из его группы — класс описывает, что инструмент делает, а не насколько его стоит опасаться.
+  whoami:
+    title: "Узнать, под кем вы вошли в ТЭГ"
+    class: read_only
+  get_my_profile:
+    title: "Смотреть ваш профиль"
+    class: read_only
+  get_my_preferences:
+    title: "Смотреть ваши личные настройки"
+    class: read_only
+  get_org_profile:
+    title: "Смотреть подразделение и руководителя сотрудника"
+    class: read_only
+  server_health:
+    title: "Проверять связь с ТЭГ"
+    class: read_only
+  server_info:
+    title: "Смотреть настройки сервера ТЭГ"
+    class: read_only
+  list_my_channels:
+    title: "Смотреть список ваших каналов"
+    class: read_only
+  list_all_my_channels:
+    title: "Смотреть ваши каналы во всех командах"
+    class: read_only
+  browse_public_channels:
+    title: "Смотреть открытые каналы команды"
+    class: read_only
+  resolve_channel:
+    title: "Находить канал по ссылке или имени"
+    class: read_only
+  get_channel:
+    title: "Смотреть карточку канала"
+    class: read_only
+  get_channel_stats:
+    title: "Смотреть счётчики канала"
+    class: read_only
+  list_my_teams:
+    title: "Смотреть список ваших команд"
+    class: read_only
+  get_team:
+    title: "Смотреть карточку команды"
+    class: read_only
+  get_channel_posts:
+    title: "Читать сообщения канала"
+    class: read_only
+  get_post:
+    title: "Читать отдельное сообщение"
+    class: read_only
+  get_post_by_permalink:
+    title: "Открывать сообщение по присланной ссылке"
+    class: read_only
+  get_posts_around:
+    title: "Читать соседние сообщения для контекста"
+    class: read_only
+  get_thread:
+    title: "Читать тред целиком"
+    class: read_only
+  list_my_threads:
+    title: "Смотреть список ваших тредов"
+    class: read_only
+  get_thread_participation:
+    title: "Смотреть треды, на которые вы подписаны"
+    class: read_only
+  get_pinned_posts:
+    title: "Читать закреплённые сообщения канала"
+    class: read_only
+  get_saved_posts:
+    title: "Читать ваши сохранённые сообщения"
+    class: read_only
+  get_permalink:
+    title: "Получать постоянную ссылку на сообщение"
+    class: read_only
+  get_my_unreads:
+    title: "Смотреть ваши непрочитанные сообщения"
+    class: read_only
+  get_post_read_receipts:
+    title: "Смотреть, кто прочитал сообщение"
+    class: read_only
+  get_poll:
+    title: "Смотреть опрос и результаты голосования"
+    class: read_only
+  search_posts:
+    title: "Искать по сообщениям"
+    class: read_only
+  search_files:
+    title: "Искать по вложениям"
+    class: read_only
+  search_channels:
+    title: "Искать каналы по названию"
+    class: read_only
+  search_teams:
+    title: "Искать команды по названию"
+    class: read_only
+  search_users:
+    title: "Искать людей"
+    class: read_only
+  search_emoji:
+    title: "Искать эмодзи по имени"
+    class: read_only
+  get_user:
+    title: "Смотреть карточку коллеги"
+    class: read_only
+  list_users:
+    title: "Смотреть список пользователей"
+    class: read_only
+  list_channel_members:
+    title: "Смотреть участников канала"
+    class: read_only
+  list_team_members:
+    title: "Смотреть участников команды"
+    class: read_only
+  get_user_statuses:
+    title: "Смотреть, кто сейчас на связи"
+    class: read_only
+  list_bots:
+    title: "Смотреть список ботов"
+    class: read_only
+  get_file_info:
+    title: "Смотреть сведения о вложении"
+    class: read_only
+  download_file:
+    title: "Скачивать вложение"
+    class: read_only
+  list_custom_emoji:
+    title: "Смотреть кастомные эмодзи"
+    class: read_only
+  list_reactions:
+    title: "Смотреть реакции на сообщение"
+    class: read_only
+  list_slash_commands:
+    title: "Смотреть список слэш-команд"
+    class: read_only
+  upload_file:
+    title: "Загружать файл в канал"
+    class: write_delete
+  get_file_public_link:
+    title: "Делать публичную ссылку на вложение"
+    class: write_delete
+  create_post:
+    title: "Отправлять сообщение в канал"
+    class: write_delete
+  reply_in_thread:
+    title: "Отвечать в треде"
+    class: write_delete
+  update_post:
+    title: "Изменять своё отправленное сообщение"
+    class: write_delete
+  forward_posts:
+    title: "Пересылать сообщения в другой канал"
+    class: write_delete
+  send_direct_message:
+    title: "Писать человеку в личные сообщения"
+    class: write_delete
+  add_reaction:
+    title: "Ставить реакцию на сообщение"
+    class: write_delete
+  remove_reaction:
+    title: "Снимать свою реакцию с сообщения"
+    class: write_delete
+  pin_post:
+    title: "Закреплять сообщение в канале"
+    class: write_delete
+  unpin_post:
+    title: "Снимать закрепление сообщения"
+    class: write_delete
+  vote_in_poll:
+    title: "Голосовать в опросе"
+    class: write_delete
+  revoke_poll_vote:
+    title: "Отзывать свой голос в опросе"
+    class: write_delete
+  create_channel:
+    title: "Создавать канал"
+    class: write_delete
+  join_channel:
+    title: "Вступать в открытый канал"
+    class: write_delete
+  leave_channel:
+    title: "Выходить из канала"
+    class: write_delete
+  add_channel_member:
+    title: "Добавлять человека в канал"
+    class: write_delete
+  set_channel_header:
+    title: "Менять заголовок канала"
+    class: write_delete
+  set_channel_purpose:
+    title: "Менять описание канала"
+    class: write_delete
+  set_my_status:
+    title: "Менять ваше присутствие в ТЭГ"
+    class: write_delete
+  set_my_custom_status:
+    title: "Ставить ваш текстовый статус"
+    class: write_delete
+  set_my_preference:
+    title: "Менять вашу личную настройку"
+    class: write_delete
+  mark_channel_read:
+    title: "Отмечать канал прочитанным"
+    class: write_delete
+  mark_post_read:
+    title: "Отмечать сообщение прочитанным"
+    class: write_delete
+  save_post:
+    title: "Сохранять сообщение в закладки"
+    class: write_delete
+  delete_post:
+    title: "Удалять сообщение"
+    class: write_delete
+  remove_channel_member:
+    title: "Исключать человека из канала"
+    class: write_delete
+  archive_channel:
+    title: "Архивировать канал"
+    class: write_delete
+  close_poll:
+    title: "Завершать голосование"
+    class: write_delete
+  create_incoming_webhook:
+    title: "Заводить вебхук, через который в канал пишет внешняя система"
+    class: interactive
+  list_incoming_webhooks:
+    title: "Смотреть входящие вебхуки команды"
+    class: read_only
+  list_outgoing_webhooks:
+    title: "Смотреть исходящие вебхуки команды"
+    class: read_only
+  execute_slash_command:
+    title: "Выполнять слэш-команду в канале"
+    class: interactive
 rest:
   title: "Остальные возможности ТЭГ"
   description: "Инструменты коннектора, не попавшие ни в одну группу, — например появившиеся у сервера после публикации этого словаря."
