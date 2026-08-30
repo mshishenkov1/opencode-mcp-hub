@@ -1,0 +1,126 @@
+{
+  "review": "Hub 4.4 — граница публикации по типу способа (R-U8.1, раздел 34)",
+  "branch": "pipeline/i3-hub-oauth-facade-proxy",
+  "head": "fec2b86",
+  "base": "b9dc2bb",
+  "date": "2026-08-28",
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "severity": "blocker",
+      "where": "tests/test_user_token.py::test_publication_boundary_drops_whole_block_and_leaves_a_trace (AC-252); src/hub/catalog.py:798-801",
+      "what": "static_headers — единственное публикуемое поле новой границы, у которого нет ни одного прогона. Ни одна карточка во всём наборе (983 теста) не доводит непустые static_headers до опубликованного upstream и ни одна не кладёт в них непубликуемое значение: у user_token_facade() по умолчанию static_headers={} (tests/support.py:1541), у карточки 'envcred' в AC-252 они непустые, но её блок upstream снят из-за credential_headers, поэтому ветка публикации не исполняется. Доказательства: (1) прогон с --cov=hub.catalog не исполняет строки 798-801 ни разу; (2) инъекция I10 — 'if False and m.static_headers' (static_headers никогда не публикуются) — 983 passed, зелено; (3) инъекция I11 — снять 'static_headers' из кортежа проверки дословности в _publication (src/hub/catalog.py:557-560) — 983 passed, зелено, при этом карточка со static_headers {'X-S': '${GW}'} публикует наружу развёрнутое значение переменной (проверено прогоном: SECRET_LEAK=Y). То есть половина правила R-U8.1 п. 6-7 держится сегодня на одном слове в кортеже, снятие которого выпускает секрет наружу при полностью зелёном прогоне. §34.3 spec.md при этом прямо утверждает покрытие, которого нет: «ссылка env:VAR в заголовке verify, exchange, exchange.revoke, credential_headers и static_headers — соответствующий блок отсутствует целиком … (AC-252)». Нужны две карточки: (а) с непустыми дословными static_headers — они обязаны появиться внутри upstream дословно; (б) с ${VAR} (и/или env:) в static_headers при дословных credential_headers — upstream снят целиком, ровно одна запись WARNING, значения переменной в теле ответа нет. Требуется и дополнение текста AC-252 (given/then), и сам прогон.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "major",
+      "where": "tests/test_user_token.py::test_publication_boundary_drops_whole_block_and_leaves_a_trace (AC-252); src/hub/catalog.py:545 (_publication)",
+      "what": "Утверждение R-U8.1 п. 7 «Снятие блока у одного способа не влияет ни на другие способы той же карточки» сторожа не имеет: во всём наборе нет ни одной карточки с двумя способами user_token, где один способ несёт непубликуемое значение, а другой дословен. У всех пяти карточек AC-252 ровно по одному способу; у карточки AC-227 оба способа дословны; у карточки AC-236 второй способ — available: false. Из-за этого сопоставление сырых способов с разобранными (zip(model.auth_methods, raw_list)) ничем не проверено. Инъекция I12 — 'raw_list[::-1]' — 983 passed, зелено, а на карточке со способами [dirty(${GW} в verify.headers), clean] тот же приём публикует verify грязного способа с развёрнутым значением переменной (проверено прогоном: LEAK=True). Нужна карточка с двумя доступными способами user_token — грязным и чистым — с проверкой, что блок снят ровно у грязного, а у чистого остался, и что значения переменной в ответе нет.",
+      "must_fix": true,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "src/hub/catalog.py:579 (_public_headers), 588, 604, 628; R-U8.1 п. 8",
+      "what": "«Второй затвор» — возврат None из _public_headers и, следом, из _public_verify/_public_revoke/_public_exchange — недостижим: _publication уже снял всё, где в сырой карточке есть env: или ${, поэтому не-str (EnvRef) в _public_headers попасть не может. Строки не исполняются ни разу; инъекция I1 (заменить 'return None' на 'continue', то есть разрешить половинчатую публикацию) — 983 passed, зелено. Утечки сегодня нет — первый затвор держит, — но утверждение спеки «добавить позже частичную публикацию, не тронув это правило, невозможно» (R-U8.1 п. 8) не подкреплено ни одним прогоном, и код, объявленный единственным путём наружу, на деле мёртв. Достаточно либо прогона, подающего EnvRef мимо _publication, либо честной оговорки в п. 8, что это защита в глубину, а не проверяемый затвор.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_user_token.py (AC-252, проверка следа); src/hub/logging_.py:30 (JsonFormatter)",
+      "what": "След п. 9 проверяется только по record.getMessage(). JsonFormatter кладёт в строку журнала любые нестандартные атрибуты записи (src/hub/logging_.py:44-51), поэтому значение, переданное через extra=, попадёт в реальный лог и сторожем замечено не будет: инъекция I9b (передать заголовки отзыва в extra=) — 983 passed, зелено. Основная половина сторожа работает: инъекция I9c (тот же секрет в тексте сообщения) — красная, с явным «утечка 'secret-value' в записи журнала». Стоит проверять форматированную строку (JsonFormatter().format(record)), а не только getMessage().",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "tests/test_token_origin_view.py::test_only_the_flag_is_published_not_the_exchange_block (AC-227)",
+      "what": "Два расхождения теста с переписанным текстом AC-227. (1) Из перечня маркеров, запрещённых в HTML, выпал HEADER_NAME_MARKER — он был там до ревизии, а текст AC по-прежнему требует, чтобы в HTML не было «ни одного их значения (адресов, заголовков, description, token_field, token_id_field)». Имя заголовка законно публикуется в /api/catalog, но на страницах его быть не должно, и раньше это проверялось. (2) Обещанная текстом AC проверка «нет ключа list внутри опубликованного exchange и ни одного значения, встречающегося только в нём (id_field, description_field)» в тесте сведена к 'assert \"list\" not in exchange': сами значения в exchange_block заданы как 'id' и 'description' и по тексту ответа неотличимы, поэтому проверка по значению в нынешнем виде недостижима. Либо промаркировать id_field/description_field, либо снять обещание из текста AC.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "where": "spec.md, R-U8.1 п. 6 (оговорка про состав field); src/hub/catalog.py:748-760 (public_auth_methods, блок field)",
+      "what": "Информационное. ${VAR} в field.hint / field.placeholder / field.label публикуется развёрнутым: проверено прогоном — значение переменной SUPER-SECRET-VALUE оказывается в теле /api/catalog. Это не регресс ревизии 4.4 (подобъект field публиковался и до неё, AC-185 базовой ревизии) и формально закрыто «правилом ведения каталога» в R-C2, но п. 6 сейчас называет непроверяемым входом только четыре адреса, а фактически их пять: четыре адреса плюс весь подобъект field. Стоит назвать field рядом с адресами в тексте п. 6, чтобы перечень непроверяемых кодом входов был полным.",
+      "must_fix": false,
+      "assignee": "dev"
+    }
+  ],
+  "leak_analysis": {
+    "question": "Может ли секрет утечь через публикуемый каталог на HEAD fec2b86?",
+    "answer": "На текущем коде — нет. Проверено 30 самостоятельными прогонами границы (пробы 0-8 ниже) плюс побайтовым сравнением с базой.",
+    "evidence": [
+      "env: в credential_headers / static_headers / verify.headers / exchange.headers / exchange.revoke.headers — соответствующий блок снят целиком, ни имени переменной, ни значения в ответе нет.",
+      "env: в exchange.body и exchange.revoke.body вообще не доходит до публикации: это ошибка загрузки каталога (_env_ref_allowed, AC-15) — 'servers[0].auth_methods.0.exchange.body.extra: ссылка env:VAR недопустима в этом поле'.",
+      "${VAR} в credential_headers, static_headers, verify.headers, verify.account_field, exchange.headers, exchange.body, exchange.description, exchange.token_field, exchange.revoke.headers, exchange.revoke.body — блок снят целиком (exchange — вместе с вложенным revoke), значение переменной в ответе отсутствует. Половинчатой публикации не получено ни в одном из 30 случаев.",
+      "Решение принимается по сырой карточке после $ref и до подстановки (parse_catalog: _publication(raw, model), где raw = servers_resolved[i]); проверено отдельной пробой, что заимствование заголовков через $ref у другой карточки границу не обходит.",
+      "Четыре адреса (upstream.url, verify.url, exchange.url, exchange.revoke.url) публикуются подставленными — это безопасно относительно env:: все четыре отвергаются схемой при загрузке (проверено: 'servers[0].upstream_url: ссылка env:VAR недопустима в этом поле' и три аналогичных). ${VAR} в адресе публикуется развёрнутым — ровно так, как решено в R-U8.1 п. 6 и решении 123, и объявлено ошибкой ведения каталога, кодом не проверяемой.",
+      "expiry (R-U18) и exchange.list (R-U15.3) не публикуются ни в одном из прогонов; непубликуемое значение внутри них публикацию соседних блоков не снимает (skip-пути _EXCHANGE_VERBATIM_SKIP), что соответствует п. 5.",
+      "Способ с available: false не отдаёт ни verify, ни exchange, и у карточки, где он единственный, нет блока upstream; следа при этом не пишется (п. 9).",
+      "oauth2 — сверено побайтово: публичное представление четырёх карточек без доступного user_token (facade с auth, native, карточка с двумя oauth2-способами, карточка с единственным недоступным user_token) на HEAD и на b9dc2bb совпадает байт в байт (3348 = 3348, cmp без расхождений). На смешанной карточке (oauth2 available + user_token с exchange) diff чисто аддитивный: добавились ровно method.verify, method.exchange (с вложенным revoke, без list) и карточный upstream {url, credential_headers}; объект oauth2-способа не изменился ни на ключ."
+    ],
+    "residual_risk": "Утечка возможна не в коде, а в сторожах: инъекции I11 и I12 (см. таблицу) выпускают секрет наружу при полностью зелёном прогоне. Это и есть основание вердикта request_changes."
+  },
+  "trace_assessment": {
+    "verdict": "работает, покрытие достаточное с одной оговоркой",
+    "notes": [
+      "Одна запись WARNING на снятый блок, логгер 'hub.catalog'; в тексте только alias, id способа и имя блока — ни значений, ни имён env:-переменных. Проверено самостоятельно: 30 проб дали ровно 16 записей — по одной на каждый реально снятый блок и ни одной на карточку с available: false.",
+      "«Ровно три записи» в AC-252 достижимо: load_catalog вызывается один раз при старте (src/hub/app.py:152) и один раз на POST /admin/catalog/reload (src/hub/routes/admin.py:29); третий вызов — hub.cli validate (src/hub/cli.py:61) — в тесте не участвует. Двойного разбора на одну загрузку нет.",
+      "Инъекция I4 (писать след только при первой загрузке) — красная: 'assert 2 == 3' после reload, то есть требование «при каждой загрузке» сторожем закрыто.",
+      "Оговорка — finding 4: сторож смотрит только на getMessage(), а реальный форматтер сериализует и extra=."
+    ]
+  },
+  "injections": [
+    {"id": "I1", "where": "_public_headers", "change": "'return None' → 'continue' (половинчатая публикация)", "result": "983 passed — ЗЕЛЕНО", "meaning": "затвор п. 8 недостижим и не проверен (finding 3)"},
+    {"id": "I2", "where": "_VERIFY_VERBATIM_SKIP", "change": "добавлен ('headers',) — verify.headers выведены из-под дословности", "result": "1 failed (AC-252)", "meaning": "сторож держит"},
+    {"id": "I3", "where": "_EXCHANGE_VERBATIM_SKIP", "change": "добавлен ('revoke','headers')", "result": "1 failed (AC-252, 'assert 2 == 3' по следу)", "meaning": "держит; отдельно проверено, что инъекция реально выпускает секрет (SECRET_LEAK=Y)"},
+    {"id": "I4", "where": "_log_dropped_public_blocks", "change": "след пишется только при первой загрузке", "result": "1 failed (AC-252)", "meaning": "требование «каждая загрузка» закрыто"},
+    {"id": "I5", "where": "public_upstream", "change": "снято условие «есть доступный user_token»", "result": "2 failed (AC-22, AC-252)", "meaning": "граница по типу способа закрыта"},
+    {"id": "I6", "where": "_public_exchange", "change": "в блок добавлен list {url, id_field}", "result": "1 failed (AC-227)", "meaning": "запрет на exchange.list закрыт"},
+    {"id": "I7", "where": "public_auth_methods", "change": "'if method.available' → 'if True'", "result": "2 failed (AC-236, AC-252)", "meaning": "запрет для available: false закрыт"},
+    {"id": "I8", "where": "_is_verbatim", "change": "'return \"${\" not in value' → 'return True' (ловится только env:)", "result": "1 failed (AC-252)", "meaning": "половина дословности про ${VAR} закрыта — но только там, где сторож смотрит (см. I11)"},
+    {"id": "I9b", "where": "_log_dropped_public_blocks", "change": "заголовки отзыва переданы в extra=", "result": "983 passed — ЗЕЛЕНО", "meaning": "след проверяется только по getMessage() (finding 4)"},
+    {"id": "I9c", "where": "_log_dropped_public_blocks", "change": "те же заголовки в тексте сообщения", "result": "1 failed (AC-252, «утечка 'secret-value' в записи журнала»)", "meaning": "основная половина сторожа следа держит"},
+    {"id": "I10", "where": "public_upstream", "change": "'if False and m.static_headers' — static_headers никогда не публикуются", "result": "983 passed — ЗЕЛЕНО", "meaning": "публикация static_headers не проверена ничем (finding 1)"},
+    {"id": "I11", "where": "_publication", "change": "'static_headers' убран из проверки дословности", "result": "983 passed — ЗЕЛЕНО, при этом ${VAR} в static_headers выпускает значение переменной наружу", "meaning": "УТЕЧКА ПРИ ЗЕЛЁНОМ ПРОГОНЕ (finding 1)"},
+    {"id": "I12", "where": "_publication", "change": "raw_list[::-1] — сырые способы сопоставлены в обратном порядке", "result": "983 passed — ЗЕЛЕНО, при этом на карточке [dirty, clean] публикуется verify грязного способа с развёрнутым значением", "meaning": "УТЕЧКА ПРИ ЗЕЛЁНОМ ПРОГОНЕ (finding 2)"}
+  ],
+  "spec_assessment": {
+    "verdict": "правки честные и аддитивные; подгонки под код не обнаружено, кроме двух завышенных утверждений о покрытии",
+    "checked": [
+      "§3.2 R-C6: перечень «отсутствуют всегда и у всех» сохранён, upstream_url/credential_headers/static_headers переведены в условный блок upstream с явной оговоркой про well-known и /ui/*. Противоречия R-U8.1 в этой ветке не нашёл: в коде well-known карточку не строит из public_view, а обе страницы /ui/* снимают ключ upstream (src/hub/web.py:161, src/hub/routes/web.py:401); шаблоны выводят только именованные поля, дампа объекта способа в HTML нет.",
+      "§3.2 R-C2: безусловность запрета env: не ослаблена, добавлено правило ведения каталога про ${VAR} с честным признанием «кодом не проверяется».",
+      "R-U8: прежний запрет для oauth2 сохранён дословно, дополнение отнесено к user_token с available: true.",
+      "R-U16: признак issues_permanent_token отвязан от публикации блока — соответствует коду (проверено: у 'subst' блок exchange снят, признак остался true).",
+      "AC-227 — ловушка про совпадающие адреса exchange.list.url и exchange.url реальна и снята верно: в tests/test_token_origin_view.py::_marked_exchange list_url == EXCHANGE_URL_MARKER, и прежняя формулировка «нет ни одного значения exchange» дала бы ложный красный на верной реализации. Текст AC переписан так, что проверяются только значения, встречающиеся ТОЛЬКО в непубликуемом блоке.",
+      "AC-236 — ловушка реальна: шаблон 'Bearer {{access_token}}' теперь законно публикуется в upstream и verify той же карточки, и прежний перечень запрещённых значений дал бы ложный красный. Текст сужен; сам тест (tests/test_orphan_issued_token.py) не менялся и остаётся зелёным, все его маркеры (EX_URL, EX_REVOKE, EX_DESCRIPTION, EX_TOKEN_FIELD, EX_TOKEN_ID_FIELD) на месте.",
+      "AC-185 — сохранившиеся части сохранены: состав field {label, hint, docs_url, secret, min_length, max_length}, отсутствие client_id, client_secret, scopes, authorize_url, token_url, revoke_url. Тест стал строже прежнего: теперь сверяется точный набор ключей oauth2-способа и отсутствие значений 'tag-client-id', 'env:GL_SECRET', 'GL_SECRET'.",
+      "AC-227 — сохранившиеся части сохранены: вычисление issues_permanent_token, отсутствие expiry (ключа и EXPIRY_URL_MARKER), отсутствие новых ключей у сервера без auth_methods."
+    ],
+    "overstated_coverage": [
+      "§34.3, перечень обязательных негативных сценариев: «ссылка env:VAR в заголовке … credential_headers и static_headers — соответствующий блок отсутствует целиком … (AC-252)» — про static_headers это неверно, такого прогона нет (finding 1).",
+      "§34.3, строка «R-U8.1 п. 7 (только целиком; гранулярность снятия) | AC-252» — часть п. 7 про независимость способов одной карточки не покрыта: у всех карточек AC-252 по одному способу (finding 2)."
+    ]
+  },
+  "runs": {
+    "pytest": "983 passed, 1 deselected, 0 failed (22.8 s) — совпадает с ориентиром",
+    "check_ac_traceability": "G6 OK: все 252 критериев покрыты тестами",
+    "ruff": "All checks passed!",
+    "mypy": "Success: no issues found in 41 source files",
+    "coverage_hub_catalog": "96%; не исполнены строки 521, 579, 588, 604, 628, 795, 798-801 нового кода (521 — список внутри блока, схемой невозможен; 795 — пустые credential_headers, схемой невозможны у facade; 579/588/604/628 — finding 3; 798-801 — finding 1)"
+  },
+  "dispute_resolutions": [
+    {
+      "dispute": "disputes/test-dispute-BUG-I4-008-ac40-whole-response.json",
+      "resolution": "needs_human",
+      "reasoning": "Диспут не относится ни к предмету ревизии 4.4, ни к этому репозиторию: он про тест форка packages/opencode/src/corp/hub.test.ts и опирается на corp/docs/spec.md ревизии 1.7 и corp/docs/acceptance-criteria.yaml, которых в ветке pipeline/i3-hub-oauth-facade-proxy нет. Решить его по spec.md Hub нельзя — источник истины лежит в конвейере форка (i4). Передаю без вердикта: разбирать должен ревьюер той ветки, имея перед глазами S-V2, S-V14 и текст AC-40/AC-160 форка."
+    }
+  ],
+  "notes": [
+    "Ревью проведено в чистом дереве; все инъекции применялись во временных копиях файла и снимались через git checkout, дерево после ревью чистое (git status пуст).",
+    "scripts/build-static-catalog.py в предмет не входил и в диффе b9dc2bb..HEAD не менялся."
+  ]
+}

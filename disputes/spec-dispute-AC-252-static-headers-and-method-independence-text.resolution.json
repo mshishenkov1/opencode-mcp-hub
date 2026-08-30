@@ -1,0 +1,18 @@
+{
+  "dispute": "disputes/spec-dispute-AC-252-static-headers-and-method-independence-text.json",
+  "resolved_by": "review-agent",
+  "review": "reports/review-rev44-3.json",
+  "head": "608df72",
+  "date": "2026-08-28",
+  "resolution": "uphold_test",
+  "status": "closed",
+  "reasoning": "Диспут был прав по существу и к HEAD 608df72 удовлетворён полностью. (1) given AC-252 дополнен: карточка 'clean' несёт непустые дословные static_headers ({'X-Static': 'static-header-literal-value'}), появились 'statichdr' (${VAR} в static_headers при дословных credential_headers) и 'twoways' (dirty_token с ${VAR} в verify.headers и целиком дословный clean_token) — и сверх запрошенного ещё четыре карточки (exchhdr, exchbody, revokebody, midstr), итого одиннадцать. (2) then дополнен требуемыми утверждениями, а число ожидаемых записей WARNING доведено до десяти (диспут просил пять; ещё пять добавили карточки следующего круга). (3) §34.3 spec.md приведена к факту коммитами 5cc8e9b и 027fd1d: утверждение о покрытии static_headers переписано, строка п. 7 отмечает независимость способов как покрытую карточкой twoways. Сверка текста критерия с тестом проведена построчно (см. ac252_vs_test в отчёте) — расхождений по числам, составу карточек и составу записей нет.",
+  "zones": "Довод диспута о зонах записи подтверждаю: acceptance-criteria.yaml и spec.md вне zones.test, поэтому обращение через диспут было для test-агента единственным законным ходом, а не обходом обязанности.",
+  "test_defect": "нет — тест на момент подачи диспута был зелёным и верным, правки требовал только текст",
+  "code_change_required": "нет — оба сценария проходят на src/hub/catalog.py без изменений",
+  "verified_by_review": [
+    "инъекция I11 (static_headers убраны из проверки дословности upstream в _publication) — 1 failed (AC-252), оракул подтверждает утечку значения переменной до правки сторожа",
+    "инъекция I10 ('if False and m.static_headers' — static_headers никогда не публикуются) — 1 failed (AC-252): положительный прогон 'clean' держит",
+    "инъекция I12 (raw_list[::-1]) — 1 failed (AC-252): карточка twoways ловит перепутывание способов"
+  ]
+}
