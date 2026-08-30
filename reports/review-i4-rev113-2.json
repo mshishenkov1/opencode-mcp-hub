@@ -1,0 +1,190 @@
+{
+  "review": "review-i4-rev113-2",
+  "subject": "Ревизия 1.13 «подключение без Hub» — ВТОРОЙ цикл: проверка закрытия BLK-1 и MAJ-1…MAJ-4",
+  "repo": "/Users/miroslavshishenkov/Documents/opencode",
+  "branch": "corp/i4-sso-connectors",
+  "head": "67306115f9",
+  "previous_review": "reports/review-i4-rev113-1.json",
+  "diff_base_for_this_cycle": "2f39bcaa50",
+  "date": "2026-08-28",
+  "verdict": "request_changes",
+
+  "runs": {
+    "opencode_src_corp": "562 pass / 0 fail (22 файла, 3012 expect)",
+    "opencode_test_mcp_headers": "4 pass / 0 fail — ВНЕ набора src/corp, см. MIN-B",
+    "opencode_full_package": "3557 pass / 22 skip / 1 todo / 1 fail (265 файлов) — единственное падение test/server/httpapi-v2-pty.test.ts «serves location-wrapped PTY routes and retains exited sessions», к корп-коду отношения не имеющее; в одиночку файл даёт 4/0, то есть неустойчивость при параллельном полном прогоне, а не дефект ревизии",
+    "app_full": "598 pass / 0 fail (80 файлов)",
+    "app_src_corp_plus_i18n": "191 + 1 = 192 pass / 0 fail — ориентир задания «194/0» не воспроизвёлся; фактическое число 192, все зелёные",
+    "tui_src_corp": "122 pass / 0 fail (1326 expect)",
+    "corp_patches": "13 pass / 0 fail",
+    "playwright_test_layout": "20 passed",
+    "typecheck": "23/23 successful",
+    "worktree_after_review": "git status --short пуст; git diff HEAD пуст; все инъекции откачены немедленно после каждого прогона"
+  },
+  "runs_note": "Полный прогон пакета opencode выполнен отдельно, потому что сторож MAJ-1 (test/mcp/headers.test.ts) в набор src/corp не входит — см. MIN-B. Первая попытка полного прогона была загрязнена одновременной инъекцией и перезапущена начисто на пустом дереве; в отчёте приведён чистый прогон. Ориентир задания «app 194/0» не воспроизвёлся: `./src/corp ./src/i18n` даёт 192/0 (191 + 1), падений нет ни одного.",
+
+  "previous_findings_status": [
+    {
+      "id": "BLK-1",
+      "status": "закрыт по существу в коде",
+      "evidence": "Признак nativeConnectDisabled(input) введён в corp/status.ts:396 и считается ОДИН раз (server.mode === \"native\" && banActive(input)). Его спрашивают connectMode (status.ts:421), connectModeUnavailableCode (status.ts:443) и ОБА роута (handlers/corp.ts:1130 connect, :1402 permissions). Производный код причины охранником больше нигде не служит: грепом по packages/ и corp/ единственные оставшиеся места чтения connect_mode_unavailable_code — формирование ответа каталога (handlers/corp.ts:661) и отрисовка в оболочках (dialog-connector.tsx, dialog-connectors.tsx), то есть предъявление, а не охрана. Сторож на форму данных BLK-1 (connect-token.test.ts:842…924) поднят через НАСТОЯЩИЙ HTTP-роут и явно закрепляет предпосылку (connect_mode == \"direct\", connect_mode_unavailable_code == undefined) перед проверкой отказа."
+    },
+    { "id": "MAJ-1", "status": "закрыт", "evidence": "test/mcp/headers.test.ts:132-216 — транспорт создаётся настоящим mcp.add(), проверяется requestInit обеих точек. Инъекция ИНЖ-16 краснеет (3/1). Оговорка — MIN-B: этот файл вне набора src/corp." },
+    { "id": "MAJ-2", "status": "закрыт", "evidence": "connect-token.test.ts:470-581 — AC-324 и AC-325 подняты через POST …/connect-token и GET /corp/catalog?refresh=true. ИНЖ-8 краснеет (561/1), ИНЖ-22 (порча хранилища перестала помечаться) краснеет (560/2)." },
+    { "id": "MAJ-3", "status": "закрыт", "evidence": "credentials-leak.test.ts: добавлены второй маркер выпущенного токена и ветка без account_field; тело GET /config перехвачено. ИНЖ-15 краснеет (561/1), ИНЖ-14a краснеет (561/1). Оговорка — MIN-A: перехватывается тело, отданное ЛОКАЛЬНОЙ реализацией группы config в харнессе, а не продуктовым handlers/config.ts." },
+    { "id": "MAJ-4", "status": "закрыт", "evidence": "connect-form.test.ts:208-240 — утверждение привязано к содержимому самого атрибута disabled={…} (границы находятся подсчётом скобок). ИНЖ-9 краснеет (190/1). Остаточная слабость — MIN-C." },
+    { "id": "MIN-1", "status": "не тронут (был must_fix:false)", "evidence": "шина и диагностика по-прежнему не перехватываются; по существу утечки нет." },
+    { "id": "MIN-2", "status": "НЕ закрыт", "evidence": "corp/docs/spec.md за этот цикл не изменялся вовсе (git diff 2f39bcaa50..HEAD -- corp/docs/ пуст). Расхождение S-V7 строка 1 ↔ Hub R-U8.1 п.4 не названо. См. MAJ-A и MIN-D." },
+    { "id": "MIN-3", "status": "закрыт", "evidence": "groups/corp.ts:63-66 и :99 — нумерация таблицы S-V25 п.1 исправлена на «строки 2, 4 и 6» и «строка 5»." },
+    { "id": "MIN-4", "status": "исправлен, но БЕЗ покрытия", "evidence": "direct.ts:162-169 — сравнение с expect_status теперь предшествует разбору 401/403. Правка поведенчески верна (на умолчании 200 исходы прежние), но слова expect_status нет НИ В ОДНОМ тесте пакета (греп по packages/opencode/**/*.test.ts пуст). См. MIN-E." }
+  ],
+
+  "reproduced_injections_from_cycle_1": [
+    { "n": 8, "where": "handlers/corp.ts connectToken", "what": "снят охранник if (!saved.ok) — отказ хранилища перестал быть фатальным", "was": "556/0 ЗЕЛЕНО", "now": "561/1 КРАСНО", "test": "AC-324 (connect-token.test.ts)" },
+    { "n": 9, "where": "app/components/corp/dialog-connector.tsx", "what": "сняты disabled= по oauth_disabled и охранник onClick", "was": "598+2/0 ЗЕЛЕНО", "now": "190/1 КРАСНО", "test": "AC-341 (connect-form.test.ts)" },
+    { "n": "14a", "where": "handlers/corp.ts connectToken", "what": "токен утекает в account ответа ТОЛЬКО когда система account не назвала", "was": "556/0 ЗЕЛЕНО", "now": "561/1 КРАСНО", "test": "S-Q14 «способ без account_field»" },
+    { "n": 15, "where": "handlers/corp.ts connectToken", "what": "выпущенный токен (issued:true) пишется в лог открытым текстом", "was": "556/0 ЗЕЛЕНО", "now": "561/1 КРАСНО", "test": "S-Q14 «выпущенный обменом токен»" },
+    { "n": 16, "where": "packages/opencode/src/mcp/index.ts", "what": "шов снят: обе точки транспорта снова берут requestInit из mcp.headers", "was": "556/0 и patches 13/0 ЗЕЛЕНО", "now": "test/mcp/headers.test.ts 3/1 КРАСНО; НО src/corp 562/0 и patches 13/0 остаются ЗЕЛЁНЫМИ", "test": "AC-323/AC-347 (test/mcp/headers.test.ts)", "caveat": "см. MIN-B" }
+  ],
+
+  "own_injections_this_cycle": [
+    { "n": 17, "where": "handlers/corp.ts, ОБА роута", "what": "охранник возвращён на connectModeUnavailableCode(...) === \"oauth_disabled\" (сторож BLK-1)", "result": "560/2 КРАСНО — падают оба теста сторожа" },
+    { "n": "17a", "where": "handlers/corp.ts connect", "what": "то же, только в роуте connect", "result": "22/1 КРАСНО (connect-token.test.ts)" },
+    { "n": "17b", "where": "handlers/corp.ts permissions", "what": "то же, только в роуте permissions", "result": "22/1 КРАСНО (connect-token.test.ts)" },
+    { "n": 18, "where": "corp/status.ts nativeConnectDisabled", "what": "признак игнорирует mode — возвращает один banActive(input)", "result": "547/15 КРАСНО" },
+    { "n": 19, "where": "corp/status.ts nativeConnectDisabled", "what": "признак игнорирует запрет — возвращает один server?.mode === \"native\"", "result": "561/1 КРАСНО" },
+    { "n": 20, "where": "handlers/config.ts ConfigHttpApi.get", "what": "ПРОДУКТОВЫЙ обработчик GET /config отдаёт токены хранилища в теле ответа", "result": "credentials-leak.test.ts 4/0 ЗЕЛЕНО → MIN-A: тест проверяет локальную реализацию харнесса, а не продуктовый обработчик" },
+    { "n": 21, "where": "corp/connectors.ts directConnectPatch", "what": "в патч добавлен ключ oauth:false", "result": "558/4 КРАСНО — форма патча закреплена четырьмя тестами (S-V25 п.6б, D-57). Инъекция диагностическая: показывает цену починки MAJ-C" },
+    { "n": 22, "where": "corp/credentials.ts read()", "what": "битый JSON и неразобранный набор больше не помечаются corrupted", "result": "560/2 КРАСНО (AC-325)" },
+    { "n": "9b", "where": "app/components/corp/dialog-connector.tsx", "what": "подстрока внутри disabled= сохранена, но обезврежена: (… === \"oauth_disabled\" && false)", "result": "191/0 ЗЕЛЕНО → MIN-C, остаточная слабость среза исходника" },
+    { "n": "probe-1", "where": "временный тест через настоящий роут (удалён)", "what": "PUT /corp/connectors/:alias/permissions на alias, ОТСУТСТВУЮЩИЙ в каталоге, при ответе Hub needs_reauth", "result": "200, state.calls == [\"authenticate:native_gone\"] → шаг 2 правила S-V7 ЗАПУЩЕН → BLK-2" },
+    { "n": "probe-2", "where": "временный тест через настоящий роут (удалён)", "what": "содержимое тела GET /config после прямого подключения", "result": "тело несёт ключ mcp и alias — проверка на маркер НЕ вырожденная, схема ConfigApi запись не вырезает" }
+  ],
+  "injections_rolled_back": "все, немедленно после каждого прогона; итоговый git status --short пуст, git diff HEAD пуст, оба временных probe-файла удалены",
+
+  "oauth_and_native_ban_bypassable": {
+    "answer": "запрет native через штатную форму данных — ЗАКРЫТ; третий путь — НАЙДЕН, и он в корп-роуте",
+    "closed_now": [
+      "POST /corp/connectors/:alias/connect на карточке mode:\"native\" с разобранным upstream и доступным user_token (форма BLK-1): 409 auth_method_unavailable/oauth_disabled ДО записи mcp.<alias> и до единого исходящего запроса; конфиг и хранилище побайтово те же; mcp.add и mcp.authenticate не вызваны; браузер не открыт — воспроизведено сторожем, и сторож краснеет на ИНЖ-17a",
+      "PUT /corp/connectors/:alias/permissions на той же карточке при ответе Hub needs_reauth: права в Hub записаны, mcp.authenticate НЕ вызван, браузер не открыт — краснеет на ИНЖ-17b",
+      "все прежние закрытые пути цикла 1 (connect-token с oauth2, попытка снять запрет телом и строкой запроса, native без upstream, каталог отдаёт native дословно) — не регрессировали"
+    ],
+    "third_path_found": "ДА — BLK-2, роут permissions при карточке, отсутствующей в каталоге. Третьего пути ТОГО ЖЕ вида (охранник на производной величине) не осталось: грепом подтверждено, что connectModeUnavailableCode больше нигде не служит охранником. BLK-2 — тот же класс дефекта другой формы: предикат отвечает «не запрещено» там, где режим карточки НЕИЗВЕСТЕН.",
+    "fourth_path_boundary": "MAJ-C — прямо подключённый корп-сервер несёт вооружённый MCP-OAuth-провайдер, поэтому цепочка native достижима через upstream-роут POST /mcp/:alias/auth/authenticate. Спека этот роут из границы правила выводит намеренно (S-V28 п.5), но ОБОСНОВАНИЕ границы («этой записи запрет появиться не даёт») с ревизии 1.13 фактически неверно."
+  },
+
+  "config_harness_assessment": {
+    "question": "не проверяет ли тест собственную заглушку",
+    "verdict": "частично — да, и это названо честно, но проверка тела GET /config продуктового обработчика не покрывает",
+    "facts": [
+      "харнесс поднимает НАСТОЯЩУЮ группу ConfigApi (schema, кодирование ответа — продукт) и НАСТОЯЩИЙ Config.layer (configSvc.get() — продукт), локально переписаны только три обработчика группы",
+      "локальный get идентичен продуктовому дословно: `return yield* configSvc.get()`; отличие продуктового — только вызов markInstanceForDisposal в обработчике update, который тестам не нужен",
+      "probe-2: тело GET /config действительно несёт ключ mcp и запись alias — проверка на маркер НЕ вырожденная и покраснела бы на утечке токена в mcp.<alias>.headers",
+      "ИНЖ-20: утечка, внесённая в ПРОДУКТОВЫЙ handlers/config.ts, оставляет credentials-leak.test.ts 4/0 зелёным — эта поверхность тестом не защищена"
+    ],
+    "conclusion": "тест не тавтологичен и способен упасть на реальном векторе утечки (содержимое конфига), поэтому третий пункт MAJ-3 считаю закрытым по существу. Но AC-326 называет поимённо «ответ GET /config», а защищена копия обработчика, а не он сам: дрейф продуктового обработчика тест не поймает. Оформлено как MIN-A (must_fix: false) с двумя минимальными вариантами починки."
+  },
+
+  "token_containment_assessment": {
+    "verdict": "герметичность подтверждена, покрытие стало достаточным",
+    "covered_now": [
+      "введённый токен — маркер, способ без exchange, account назван (цикл 1)",
+      "ВЫПУЩЕННЫЙ токен — отдельный второй маркер; проверено, что в хранилище лежит именно выпущенный, а введённый ушёл ровно в один запрос /verify и никуда больше",
+      "ветка без account_field (умолчание контракта S-V24 п.2) — поле account в ответе отсутствует, маркера в ответе и логе нет",
+      "поверхности: перехваченный лог всех уровней, тела GET /corp/catalog, GET /corp/status, GET /config, файлы конфигурации на диске",
+      "механизм (проверен повторно чтением): directConnectPatch даёт ровно {type,url,enabled}; в лог уходит только Object.keys(credential_headers); наружу видно только has_credentials и account; файл 0o600"
+    ],
+    "still_uncovered": [
+      "тело GET /config, отданное ПРОДУКТОВЫМ обработчиком (MIN-A, доказано ИНЖ-20)",
+      "события шины и отчёт corp/diagnostics.ts — названы в AC-326 поимённо; принято как MIN-1 цикла 1 (по существу утечки нет, тест был бы тавтологическим)",
+      "вывод CLI `opencode corp status` — назван в AC-326, не перехватывается; по чтению кода печатается карточка (has_credentials, account), значения токена там нет",
+      "ответы роутов disconnect / forget / permissions — маркером не проходятся; по чтению кода токена в них нет ни по одной ветке"
+    ]
+  },
+
+  "errata_assessment": {
+    "verdict": "подгонки текста под реализацию НЕТ — спека за цикл не менялась ни одной строкой; но обратная беда налицо: код ушёл вперёд текста",
+    "checked": "git diff 2f39bcaa50..HEAD -- corp/docs/ пуст; acceptance-criteria.yaml тоже не менялся",
+    "sixth_divergence_status": "НЕ учтено. Расхождение S-V7 строка 1 ↔ Hub R-U8.1 п.4 («user_token при mode:native запрещён схемой R-U1»), найденное циклом 1 (MIN-2), в спеке не названо. Правки поведения оно по-прежнему не требует (S-V24 п.6 верно запрещает опираться на добросовестность источника), но именно эта форма данных — предмет сторожа BLK-1, и она осталась в спеке безымянной.",
+    "code_ahead_of_spec": "S-V28 п.5, строки 2 и 3 таблицы, и дополнение S-V9 микроревизии 1.13.1 по-прежнему формулируют условие отказа через connect_mode_unavailable_code == \"oauth_disabled\" — ровно ту производную величину, отказ от которой и был починкой BLK-1. Пометка also_for_spec из BLK-1 не исполнена. См. MAJ-A."
+  },
+
+  "findings": [
+    {
+      "severity": "blocker",
+      "id": "BLK-2",
+      "where": "packages/opencode/src/server/routes/instance/httpapi/handlers/corp.ts:1360 (permissions, `const { server } = yield* serverFor(addr, alias)`) и :1402 (охранник oauthClosed)",
+      "what": "ТРЕТИЙ ПУТЬ, найден и воспроизведён через настоящий корп-роут. Роут permissions — единственный из трёх, который НЕ прекращает действие при карточке, отсутствующей в каталоге: connectToken отвечает 404 (:959), connect отвечает unavailable/not_found (:1109), а permissions идёт дальше с server === undefined. Охранник при этом вычисляется как CorpStatus.nativeConnectDisabled({ ...(server === undefined ? {} : { server }), hubConfigured: true }), а nativeConnectDisabled на пустом входе возвращает FALSE (input.server?.mode === \"native\" даёт undefined === \"native\"). Итог: oauthClosed === false, и при ответе Hub reauth_required запускается шаг 2 правила S-V7 — mcp.authenticate(alias), то есть браузер, discovery /.well-known/*, DCR, authorize, token. Воспроизведено: временный тест через настоящий роут, каталог отдаёт servers: [], Hub отвечает {status:\"needs_reauth\"} → HTTP 200 и state.calls == [\"authenticate:native_gone\"]. Практическая достижимость: alias, у которого локально есть запись mcp.<alias> (карточка была подключена native-способом на досборочной версии либо запись осталась после S-V8), а из каталога карточка ИСЧЕЗЛА — её убрал администратор, либо она отброшена разбором S-V14 (для рукописного статического каталога S-C10 п.3 это рядовое событие). Из интерфейса такую карточку не видно, но S-V28 п.5 существует именно для запросов МИМО интерфейса и поимённо называет curl, скрипт и старую сборку оболочки. Нарушены: S-V28 п.8 (гейт «ни одного исходящего запроса… ни при повторной авторизации из экрана прав»; «ни одно действие витрины коннекторов за сеанс браузер не открывает») и S-V28 п.9 (цена запрета названа: повторная авторизация подключённой native-карточки из экрана прав перестаёт работать). Класс дефекта тот же, что у BLK-1: предикат отвечает «не запрещено» в состоянии, где ответ НЕИЗВЕСТЕН. Починка — одно условие: при server === undefined шаг 2 не запускать (деградация неразобранного признака идёт в сторону запрета — прецедент назван самой же спекой, S-V28 п.1б). Ни один из 562+122+598+13+4 тестов этого не ловит.",
+      "must_fix": true,
+      "assignee": "dev",
+      "also_for_spec": "S-V28 п.5, третья строка таблицы, обусловливает отказ наличием у карточки кода причины oauth_disabled — при отсутствующей карточке кода нет вовсе, и буква правила случай не покрывает. Случай «карточки нет, а запись mcp.<alias> есть» нужно назвать явно и указать сторону деградации."
+    },
+    {
+      "severity": "major",
+      "id": "MAJ-A",
+      "where": "corp/docs/spec.md — S-V28 п.5 (строки 2 и 3 таблицы роутов) и дополнение S-V9 микроревизии 1.13.1",
+      "what": "Код и спека разошлись, и разошлись в ту сторону, где спека прописывает уязвимую формулировку. Оба роута теперь спрашивают признак nativeConnectDisabled; спека же по-прежнему формулирует условие отказа через производную величину: строка 2 — «connect_mode карточки равен \"none\" с connect_mode_unavailable_code: \"oauth_disabled\"», строка 3 — «у карточки, чей connect_mode_unavailable_code равен \"oauth_disabled\"», и то же в дополнении S-V9. На форме данных BLK-1 (native + разобранный upstream + доступный user_token) обе формулировки дают «не отказывать» — то есть буква спеки описывает ровно тот обход, который признан blocker'ом и закрыт. Реализация, написанная по действующему тексту, дыру восстановит; тест, написанный по действующему тексту, её узаконит. Пометка also_for_spec из BLK-1 цикла 1 не исполнена. Условие в п.5 обязано формулироваться через признак уровня карточки («mode: \"native\" и запрет действует»), а не через код причины, который п.2 сам объявляет заполняемым только при connect_mode: \"none\".",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "major",
+      "id": "MAJ-C",
+      "where": "packages/opencode/src/corp/connectors.ts:47-49 (directConnectPatch) ↔ corp/docs/spec.md S-V25 п.6(б), S-V28 п.5 («граница запрета названа»)",
+      "what": "Обоснование границы запрета фактически неверно с ревизии 1.13, и это открывает цепочку native мимо корп-роутов. S-V28 п.5 выводит upstream-роут POST /mcp/:A/auth/authenticate из-под правила с доводом: «Практически дыра пуста: upstream-роут авторизует alias, уже присутствующий в mcp.<alias>, а этой записи запрет появиться не даёт (строка 2 таблицы выше)». Строка 2 — это роут connect. Но запись mcp.<alias> создаёт и роут connect-token (S-V25 п.6б) — в том числе на карточке mode:\"native\" с разобранным upstream, где прямое подключение разрешено строкой 1 таблицы S-V7. Патч directConnectPatch даёт {type:\"remote\", url, enabled:true} БЕЗ ключа oauth, а mcp/index.ts:229 считает OAuth выключенным только при mcp.oauth === false — значит authProvider создаётся. Это не догадка: пре-существующий upstream-тест test/mcp/headers.test.ts утверждает дословно «OAuth should be enabled by default, so authProvider should exist» для записи без ключа oauth. Итог: у любого прямо подключённого корп-сервера MCP-OAuth вооружён, и на карточке формы BLK-1 полная цепочка native достижима в два разрешённых шага — POST …/connect-token, затем POST /mcp/<alias>/auth/authenticate. Отдельное следствие, которое стоит проверить отдельно: S-V25 п.7 описывает отказ целевой системы 401/403 как «соединение не поднимается, класс ошибки token_rejected», тогда как вооружённый authProvider на 401 запускает OAuth-поток транспорта (discovery, при неудаче DCR) — то есть исходящие OAuth-запросы в сборке, где OAuth запрещён. Починка «одной строкой» (oauth: false в патче) требует errata: форма патча закреплена четырьмя тестами (ИНЖ-21 → 558/4), а S-V25 п.6(б) предписывает патч дословно. Решение — за спекой: либо errata на патч, либо явное признание, что довод про пустую дыру более не действует, с названной ценой.",
+      "must_fix": true,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "id": "MIN-A",
+      "where": "packages/opencode/test/fixture/corp-direct-harness.ts:175-212 (локальная группа config) ↔ packages/opencode/src/server/routes/instance/httpapi/handlers/config.ts",
+      "what": "Побочный фикс 67306115f9 оценён отдельно (см. config_harness_assessment). Заглушка честно объявлена комментарием, поднимает НАСТОЯЩИЕ ConfigApi и Config.layer, а её get дословно совпадает с продуктовым; probe-2 подтвердил, что тело ответа несёт mcp.<alias>, то есть проверка на маркер не вырожденная и покраснела бы на реальном векторе утечки (токен в mcp.<alias>.headers). Тавтологии здесь нет, и третий пункт MAJ-3 считаю закрытым по существу. Остаток: AC-326 называет поимённо «ответ GET /config», а защищена копия обработчика — ИНЖ-20 (утечка токенов хранилища, внесённая в продуктовый ConfigHttpApi.get) оставляет credentials-leak.test.ts 4/0 зелёным. Две минимальные починки на выбор: (1) поднять настоящий configHandlers, предоставив харнессу InstanceState.context, которого ему не хватает; (2) добавить утверждение по срезу исходника, что продуктовый ConfigHttpApi.get — это ровно `return yield* configSvc.get()` (приём уже применён в AC-341 и AC-344), чтобы дрейф обработчика краснел.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "id": "MIN-B",
+      "where": "corp/README.md:178 («Тесты») и список прогонов конвейера ↔ packages/opencode/test/mcp/headers.test.ts",
+      "what": "Сторож MAJ-1 стоит вне того набора, которым эту ревизию гоняют. Инъекция ИНЖ-16 (шов D-60 снят целиком) оставляет `bun test src/corp` = 562/0 и corp/patches = 13/0 ЗЕЛЁНЫМИ и краснеет только в `bun test test/mcp/headers.test.ts`. Задокументированный корп-гейт (corp/README.md: `cd packages/opencode && bun test src/corp`) этот файл не запускает. Полный `bun --cwd packages/opencode test`, который гоняет corp/upstream-sync.sh, его запускает — то есть при синхронизации с upstream шов защищён, а при обычной работе над ревизией нет. Починка — дописать путь в corp/README.md и в список прогонов конвейера: `bun test src/corp test/mcp/headers.test.ts`.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "id": "MIN-C",
+      "where": "packages/app/src/corp/connect-form.test.ts:208-240 (AC-341)",
+      "what": "Починка верна и строго сильнее прежней: утверждение теперь привязано к содержимому самого атрибута disabled={…}, и реалистичная инъекция ИНЖ-9 краснеет. Остаточная слабость приёма «срез исходника» названа для полноты: ИНЖ-9b — подстрока внутри disabled= сохранена, но обезврежена — `(entry().connect_mode_unavailable_code === \"oauth_disabled\" && false)` — оставляет 191/0 зелёным. AC-341 требует дословно «отрисована страница коннектора» и «действие ПРИСУТСТВУЕТ в дереве с атрибутом disabled», то есть в пределе — отрисовку, а не чтение файла; в пакете app happy-dom уже подключён препрелоадом и соседние корп-тесты (connectors-view.test.ts, no-hub-texts.test.ts) рендерят. Повышать планку задним числом не считаю правильным: приём был назван мной же в цикле 1 как образец (TUI-близнец AC-344). Фиксирую как остаток, а не как долг.",
+      "must_fix": false,
+      "assignee": "test"
+    },
+    {
+      "severity": "minor",
+      "id": "MIN-D",
+      "where": "corp/docs/spec.md, S-V7 строка 1 таблицы connect_mode ↔ спека Hub R-U8.1 п.4",
+      "what": "Повтор MIN-2 цикла 1: шестое расхождение спеки форка со спекой Hub не названо, спека за цикл не менялась. Правки поведения не требует, но теперь это ещё и предпосылка сторожа BLK-1 и родня BLK-2 — форма данных, вокруг которой крутятся оба blocker'а, в спеке по-прежнему безымянна.",
+      "must_fix": false,
+      "assignee": "dev"
+    },
+    {
+      "severity": "minor",
+      "id": "MIN-E",
+      "where": "packages/opencode/src/corp/direct.ts:162-169 (правка MIN-4 из ea11790899)",
+      "what": "Правка порядка проверок в exchange() поведенчески верна (разобрал по случаям: при expect_status 200 все исходы прежние; изменился ровно объявленный случай expect_status 401/403 → exchanged), но покрытия не получила: слова expect_status нет ни в одном тесте пакета. Правка была необязательной (MIN-4 цикла 1 — «наблюдение, не дефект»), поэтому это не долг, а замечание: изменение поведения без сторожа. Либо тест на способ с exchange.expect_status: 401, либо откат правки.",
+      "must_fix": false,
+      "assignee": "test"
+    }
+  ],
+
+  "out_of_scope_accepted": [
+    "AC-337 (type: manual) — покрывается в репозитории Hub",
+    "граница публикации и генератор статического каталога — отдельное ревью репозитория Hub",
+    "часть AC-326 про диагностику и шину — принято как MIN-1 цикла 1"
+  ],
+
+  "dispute_resolutions": [],
+  "disputes_note": "Открытых диспутов в corp/disputes/ нет; новых за цикл не заведено. DISPUTE-I13-01 закрыт резолюцией spec-агента 2026-08-28, сверен в цикле 1, к этому циклу отношения не имеет.",
+
+  "approve_blockers": ["BLK-2", "MAJ-A", "MAJ-C"]
+}

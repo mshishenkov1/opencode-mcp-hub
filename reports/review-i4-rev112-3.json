@@ -1,0 +1,174 @@
+{
+  "review": "review-i4-rev112-3",
+  "iteration": "I-4 форк, ревизия 1.12 «выход из приложения» + микроревизия 1.12.1 + errata 1.12.1 + BUG-I12-002",
+  "cycle": 3,
+  "kind": "focused_review (доработка по G-1…G-3 + регрессия + финальный прогон)",
+  "date": "2026-08-28",
+  "reviewer": "REVIEW-AGENT",
+  "verdict": "approve",
+
+  "scope": {
+    "repo": "~/Documents/opencode, ветка corp/i4-sso-connectors",
+    "head_at_review": "c0bc8585f7 (спек-агент, 1.13.1) — предмет ревью на два коммита ниже",
+    "reviewed_commits": [
+      "69f227bd81 — test-агент: сторож G-1 (AC-287 / S-Q9 п.(р)) + G-2 в test-layout/README.md и шапке connectors-layout.layout.test.ts",
+      "94bfc40661 — оркестратор: G-2 в .github/workflows/corp-ci.yml (working-directory + bun x)"
+    ],
+    "predecessor": "reports/review-i4-rev112-2.json (request_changes; G-1 must_fix, G-2 и G-3 minor)",
+    "out_of_scope": [
+      "ревизии 1.13 (b072975115) и 1.13.1 (c0bc8585f7) спек-агента — отдельное ревью; проверено только, не ломают ли они 1.12 (не ломают, см. spec_edits_impact_on_112)",
+      "средовой отказ `acp lifecycle` в upstream-tests (allow_failure: true)"
+    ]
+  },
+
+  "runs": {
+    "opencode_src_corp": "bun run --cwd packages/opencode test src/corp — 510 pass / 0 fail (2631 expect), 19 файлов, 64.1 с",
+    "app_package_test": "bun run --cwd packages/app test — test:unit 572 pass / 0 fail (78 файлов, 4.4 с) + test:virtualizer 2 pass / 0 fail. Рост с 568 до 572 — ровно четыре теста сторожа G-1",
+    "app_corp_i18n": "из packages/app: bun test --preload ./happydom.ts ./src/corp ./src/i18n — 166 pass / 0 fail (1762 expect), 9 файлов. Ориентир «168» в задании завышен на два: это тесты test-browser из второго прогона скрипта пакета, к src/corp и src/i18n они не относятся",
+    "tui": "bun run --cwd packages/tui test src/corp/ — 105 pass / 0 fail (1116 expect), 7 файлов",
+    "corp_patches": "из каталога corp/: bun test patches.test.ts — 12 pass / 0 fail (565 expect)",
+    "playwright_layout": "из packages/app: bun x playwright test --config test-layout/playwright.config.ts — 20 passed (47.5 с)",
+    "typecheck": "packages/opencode (tsgo --noEmit), packages/app (tsgo -b), packages/tui (tsgo --noEmit) — чисто, ни одной диагностики",
+    "note": "Все прогоны выполнены на чистом дереве (git status пуст, кроме уже закоммиченных правок спек-агента); каждая инъекция откатывалась git checkout -- сразу после прогона"
+  },
+
+  "g_items_status": [
+    {
+      "id": "G-1",
+      "severity_cycle2": "major/must_fix",
+      "closed": true,
+      "evidence": "packages/app/src/corp/logout-view.test.ts, describe «AC-287, S-Q9 п.(р): признак «Войти»/«Выйти» берётся из authenticated, а не из hub_error каталога» — четыре прогона действующей редакции AC-287, признак исполняется из исходника dialog-connectors.tsx. ОБЕ инъекции ревьюера повторены заново и обе краснеют: И-4 (возврат дефекта F-1) — 2 fail, И-5 (схлопывание третьего состояния) — 1 fail. Формулировки прогонов совпадают с текстом AC-287 (строки 3326-3341 acceptance-criteria.yaml) поимённо, включая требование «признак берётся из authenticated и ни из чего другого». Тавтологии нет: ожидания («logout»/«login»/«none») вычислены из критерия, а не из реализации; сама реализация в тест не пересказана, а исполнена."
+    },
+    {
+      "id": "G-2",
+      "severity_cycle2": "minor",
+      "closed": "документация — да; шаг установки браузера в corp-ci — нет (новая находка H-2)",
+      "evidence": "Проверено ЗАПУСКОМ, а не чтением. (а) Рабочая форма из packages/app — `bun x playwright test --config test-layout/playwright.config.ts` — 20 passed за 47.5 с. (б) Прежняя форма `bun --cwd packages/app x playwright …` из корня по-прежнему отвечает `error: Script not found \"x\"` — диагноз подтверждён. (в) .github/workflows/corp-ci.yml разобран YAML-парсером: шаг «Тесты раскладки корп-окон» имеет working-directory: packages/app и run: bun x playwright test --config test-layout/playwright.config.ts — синтаксис валиден, форма рабочая. (г) grep по *.yml/*.yaml/*.md/*.ts/*.tsx/*.json (без node_modules): неисполнимая форма не осталась НИГДЕ как команда — два оставшихся упоминания (test-layout/README.md:22 и connectors-layout.layout.test.ts:32) стоят внутри объяснения, ПОЧЕМУ она не работает, и это правильно. Прочие `bun --cwd <dir> <script>` в дереве — обращения к настоящим скриптам пакетов (test, test:unit, dev, build), к дефекту отношения не имеют."
+    },
+    {
+      "id": "G-3",
+      "severity_cycle2": "minor",
+      "closed": false,
+      "evidence": "corp/docs/spec.md, S-A3 (ныне строки 2032-2035) — формулировка НЕ изменена: «сервер выполняет Auth.set … затем … инвалидирует конфиг/провайдеров так же, как это делает upstream-флоу (`instance.dispose()` + `sync.bootstrap()` со стороны UI, F6)». Двусмысленность, названная BUG-I12-002 одной из причин дефекта, на месте. Спек-агент за это время выпустил 1.13 и 1.13.1; по расположению ханков коммита c0bc8585f7 видно, что участок S-A3 им не затронут. Остаётся ОТКРЫТЫМ minor, блокером не является: код исправлен, снабжён точным комментарием и защищён сторожами (подтверждено инъекцией R-4)."
+    }
+  ],
+
+  "injections": [
+    {
+      "id": "И-4 (повтор)",
+      "target": "packages/app/src/components/corp/dialog-connectors.tsx:340",
+      "change": "const signedOut = createMemo(() => authenticated() === false) → createMemo(() => catalog.data?.hub_error === \"unauthorized\") — буквальный возврат дефекта F-1",
+      "result": "КРАСНО. logout-view.test.ts: 24 pass / 2 fail. Прогон 2 («authenticated:false при пустом hub_error → «Войти»») дал \"none\" вместо \"login\"; прогон 3 («authenticated:true при hub_error:\"unauthorized\" → «Выйти»») упал на охраннике «Войти» и «Выйти» одновременно. Заявление test-агента подтверждено точь-в-точь."
+    },
+    {
+      "id": "И-5 (повтор)",
+      "target": "packages/app/src/components/corp/dialog-connectors.tsx:334",
+      "change": "const authenticated = createMemo(() => (status.data?.enabled === true ? status.data.authenticated : undefined)) → createMemo(() => status.data?.authenticated === true) — схлопывание третьего состояния",
+      "result": "КРАСНО. 25 pass / 1 fail. Прогон 4 («статус ещё не получен → ни одной из двух кнопок») дал \"login\" вместо \"none\". Заявление test-агента подтверждено."
+    },
+    {
+      "id": "И-6 (новая — проверка хрупкости приёма)",
+      "target": "packages/app/src/components/corp/dialog-connectors.tsx:395, разметка ряда заголовка",
+      "change": "fallback={<Show when={signedOut()}> → <Show when={!signedIn()}> — мемо не тронуты, изменено только то, ЧЕМ разметка гейтит «Войти». Правдоподобное «упрощение»: signedOut остаётся объявленным и неиспользуемым, noUnusedLocals в packages/app не включён",
+      "result": "ЗЕЛЕНО, дефект пропущен. logout-view.test.ts 26 pass / 0 fail; весь набор app src/corp+src/i18n 166 pass / 0 fail. Между тем на экране «Войти» показалась бы при незагруженном статусе — ровно то, что запрещает прогон 4 AC-287. См. находку H-1."
+    },
+    {
+      "id": "И-7 (новая — проверка тихой деградации извлечения)",
+      "target": "packages/app/src/components/corp/dialog-connectors.tsx:334",
+      "change": "createMemo( → createMemo<boolean | undefined>( — маркер поиска перестаёт совпадать",
+      "result": "КРАСНО, 22 pass / 4 fail. Ненайденный маркер валит тест через expect(at).toBeGreaterThan(-1), а не деградирует молча. Тихой деградации «не нашёл — пропустил» у приёма НЕТ."
+    },
+    {
+      "id": "R-1 (регрессия F-2/F-3)",
+      "target": "packages/app/src/context/corp.ts:316 — logoutReasonKey печатает сам код вместо invalidResponse",
+      "result": "КРАСНО, app src/corp 164 pass / 1 fail. F-3 закрыт по-прежнему."
+    },
+    {
+      "id": "R-2 (регрессия F-5)",
+      "target": "packages/app/src/components/corp/dialog-connectors.tsx:66 — третий член ConnectorsTab",
+      "result": "КРАСНО, connectors-view.test.ts 39 pass / 1 fail. F-5 закрыт по-прежнему."
+    },
+    {
+      "id": "R-3 (регрессия F-8/F-9)",
+      "target": "packages/tui/src/config/keybind.ts — дописана непоименованная привязка dialog.corp.audit",
+      "result": "КРАСНО, tui src/corp 104 pass / 1 fail. Требование ПОЛНОТЫ перечня dialog.corp.* держится."
+    },
+    {
+      "id": "R-4 (регрессия BUG-I12-002)",
+      "target": "packages/opencode/src/server/routes/instance/httpapi/handlers/corp.ts:296 — снят yield* invalidateProviders() на пути входа (оставлен только configSvc.invalidate())",
+      "result": "КРАСНО, opencode src/corp 507 pass / 3 fail. Критический дефект по-прежнему под сторожем на входе."
+    },
+    {
+      "id": "R-5 (новая — паритет TUI по S-T11)",
+      "target": "packages/tui/src/component/corp/dialog-connectors.tsx:742 — hidden: authenticated() !== false → hidden: authenticated() === true (схлопывание третьего состояния, аналог И-5 в TUI)",
+      "result": "ЗЕЛЕНО, дефект пропущен. tui src/corp 105 pass / 0 fail. См. находку H-3."
+    }
+  ],
+
+  "injections_summary": "Девять инъекций. Обе инъекции, ради которых заведён сторож G-1 (И-4, И-5), краснеют — сторож негодным не является. Четыре регрессионные (R-1…R-4) краснеют — F-2, F-3, F-5, F-8, F-9 и BUG-I12-002 закрыты по-прежнему. Проверка тихой деградации приёма (И-7) краснеет — приём при ненайденном маркере падает, а не пропускает. Две инъекции (И-6, R-5) прошли зелёными и дали новые minor-находки H-1 и H-3.",
+
+  "fragility_assessment": {
+    "subject": "Извлечение выражений authenticated/signedIn/signedOut из текста dialog-connectors.tsx балансом скобок + исполнение через new Function",
+    "verdict": "Приём приемлем: он не деградирует молча ни в одном из проверенных сценариев отказа, но он покрывает только половину цепочки — как ВЫЧИСЛЯЕТСЯ признак, и не покрывает, КАКОЙ признак разметка спрашивает.",
+    "checked_failure_modes": [
+      {"scenario": "Маркер не найден (переименование мемо, тип-параметр createMemo<…>, переезд в общий хук, замена createMemo на createSignal/createResource)", "outcome": "ГРОМКО. expect(at).toBeGreaterThan(-1) валит тест. Проверено инъекцией И-7: 4 fail."},
+      {"scenario": "Выражение начинает читать третий источник (props, импортированную функцию, переименованный статус-запрос)", "outcome": "ГРОМКО. new Function получает только status и catalog — любое другое имя даёт ReferenceError на исполнении."},
+      {"scenario": "Переименование поля ответа (authenticated → signed_in и т.п.)", "outcome": "ГРОМКО. Подставной status его не несёт, признак становится undefined, прогоны 1-3 краснеют."},
+      {"scenario": "Форматирование, перенос на несколько строк, вложенные скобки в выражении", "outcome": "БЕЗОПАСНО. Баланс скобок это переживает; маркер оканчивается «(» сразу за createMemo."},
+      {"scenario": "В файле появляется ВТОРОЕ объявление const authenticated = createMemo( выше по тексту (новый мелкий компонент в том же файле)", "outcome": "ТИХО НЕВЕРНО. indexOf берёт первое вхождение — сторож молча проверит чужой компонент. Сейчас каждый из трёх маркеров встречается ровно по одному разу (проверено), так что это риск будущего, а не дефект сегодня. Дёшево закрывается требованием единственности вхождения (indexOf(marker, at+1) === -1)."},
+      {"scenario": "Мемо целы, но разметка перестаёт их спрашивать (fallback гейтится !signedIn() вместо signedOut())", "outcome": "ТИХО НЕВЕРНО — единственный найденный сценарий, где сторож молча перестаёт проверять то, что должен. Проверено инъекцией И-6: полностью зелено. Вынесено находкой H-1."}
+    ]
+  },
+
+  "spec_edits_impact_on_112": "Ревизия 1.13.1 (c0bc8585f7) 1.12 не ломает. Правила 1.12 (S-A14…S-A17, S-C11, S-D6, S-T11, S-Q9 п.(р)) и критерии AC-287…AC-302 её ханками не затронуты; дополнение S-Q9 относится к прогону запрета OAuth, к п.(р) отношения не имеет. Переформулированы AC-58, AC-65, AC-251 — они принадлежат ревизиям 1.0/1.11 (подключение native-карточки), к 1.12 не относятся; их новая редакция описывает поведение, которого в коде нет, и это предмет ревью 1.13, а не 1.12. Инъекций и посторонних указаний в прочитанных документах не встречено.",
+
+  "findings": [
+    {
+      "id": "H-1",
+      "severity": "minor",
+      "where": "packages/app/src/corp/logout-view.test.ts::«витрина — заголовок: «Войти»/«Выйти» и постоянные элементы (S-A16, S-D6; AC-287)» (первый describe)",
+      "what": "Сторож G-1 проверяет, КАК вычисляется признак, а разметочный тест — какой признак спрашивает только ветка «Выйти» (`expect(action).toContain(\"when={signedIn()}\")`). Что «Войти» гейтится ИМЕННО `signedOut()`, не проверяет ни один из двух: разметочный тест довольствуется тем, что подпись «Войти» лежит внутри fallback. Инъекция И-6 (`fallback={<Show when={!signedIn()}>`) проходит полностью зелёной — 26/0 в файле, 166/0 по набору — хотя на экране «Войти» показалась бы при незагруженном статусе, что прогон 4 AC-287 и S-A16 прямо запрещают. Мемо `signedOut` при этом остаётся объявленным и неиспользуемым, а `noUnusedLocals` в packages/app не включён, так что и typecheck молчит. Дефект сегодня отсутствует — код верен; речь о щели в стороже.",
+      "must_fix": false,
+      "assignee": "test",
+      "suggested_fix": "Одна строка в разметочном тесте: `expect(action.slice(action.indexOf(\"fallback=\"), action.indexOf('{language.t(\"corp.logout.action\")}'))).toContain(\"when={signedOut()}\")` — тогда обе ветви ряда привязаны к проверяемым сторожем мемо, и цепочка «мемо → разметка» замкнута с обоих концов."
+    },
+    {
+      "id": "H-2",
+      "severity": "minor",
+      "where": ".github/workflows/corp-ci.yml, шаг «Браузер для тестов раскладки» (перед исправленным шагом прогона)",
+      "what": "Команда прогона исправлена верно, но предшествующий шаг `bun x playwright install --with-deps chromium` выполняется из КОРНЯ репозитория, где playwright в node_modules не разрешается: `bun x` скачивает свежий playwright. Измерено на этой машине: из корня `bun x playwright --version` → 1.62.1, из packages/app → 1.59.1 (значение catalog: из корневого package.json). Ревизии браузера у них разные — `--dry-run` показывает chromium-1234 против chromium-1217. На чистом раннере шаг установки положит chromium-1234, а шаг прогона (playwright 1.59.1) будет искать chromium-1217 и упадёт «Executable doesn't exist». Запасной путь конфигурации не спасает: `hasBundledChromium()` довольствуется ЛЮБЫМ каталогом на «chromium» (найдёт 1234 и решит, что всё на месте), а на Linux он и вовсе смотрит в захардкоженный macOS-путь `~/Library/Caches/ms-playwright` вместо `~/.cache/ms-playwright`, после чего ищет /usr/bin/google-chrome, которого в образе oven/bun нет. Дефект пред­существующий (шаг установки G-2 не трогал) и в действующем CI не всплывает: в .gitlab-ci.yml задания на тесты раскладки нет вовсе, а corp-ci.yml — workflow GitHub, который в этом контуре не гоняется.",
+      "must_fix": false,
+      "assignee": "dev",
+      "suggested_fix": "Тому же шагу установки дать `working-directory: packages/app` — тогда обе команды берут один и тот же playwright 1.59.1 и одну и ту же ревизию браузера. Заодно в test-layout/playwright.config.ts заменить захардкоженный macOS-путь на `PLAYWRIGHT_BROWSERS_PATH` с платформенным значением по умолчанию, иначе запасной путь на Linux не работает вовсе."
+    },
+    {
+      "id": "H-3",
+      "severity": "minor",
+      "where": "packages/tui/src/component/corp/dialog-connectors.tsx:742,751 — покрытия нет ни в одном тесте packages/tui/src/corp/",
+      "what": "Паритет TUI по S-T11 («взаимоисключающая видимость по ТОМУ ЖЕ признаку, что в S-A16», а у признака в S-A16 три значения) в коде соблюдён — `hidden: authenticated() !== false` и `hidden: authenticated() !== true`, — но не защищён ничем. Инъекция R-5 (`!== false` → `=== true`, то есть «Войти» показывается и при незагруженном статусе — точный аналог И-5, из-за которой G-1 стал must_fix в Desktop) проходит зелёной: 105 pass / 0 fail. Грепом подтверждено, что ни один тест TUI этих двух строк не касается вовсе. Отдельного критерия на ряд TUI в acceptance-criteria.yaml нет (AC-287 привязан к S-D6, то есть к Desktop), поэтому это одновременно и щель покрытия, и щель критериев: S-T11 требует паритета, но проверить его нечем.",
+      "must_fix": false,
+      "assignee": "test",
+      "suggested_fix": "test: те же четыре прогона, что в logout-view.test.ts, но на выражениях `hidden:` из TUI-исходника — приём переносится один в один (в TUI это не мемо, а сигнал, поэтому достаточно исполнить два выражения `hidden` на трёх значениях `authenticated()`). spec: завести критерий-близнец AC-287 для TUI либо явно распространить AC-287 на обе оболочки — иначе паритет S-T11 останется утверждением без проверки."
+    }
+  ],
+
+  "verified_ok": [
+    "G-1 закрыт по существу: обе прописанные инъекции повторены ревьюером самостоятельно и обе краснеют ровно в тех прогонах, в которых должны (И-4 — прогоны 2 и 3; И-5 — прогон 4).",
+    "Приём извлечения из исходника при ненайденном маркере падает громко (И-7), чужих имён в область видимости не пускает, форматирование переживает; тихой деградации у самого приёма не найдено.",
+    "Формулировки четырёх прогонов сверены с телом AC-287 в acceptance-criteria.yaml построчно — подгонки критерия под тест нет, ожидания вычислены из критерия.",
+    "G-2 проверен запуском: рабочая команда даёт 20 passed; прежняя форма воспроизводимо отвечает `error: Script not found \"x\"`; corp-ci.yml разобран YAML-парсером и содержит рабочую форму; неисполнимой формы как команды в дереве не осталось.",
+    "F-1…F-10 и BUG-I12-002 закрыты по-прежнему — подтверждено пятью инъекциями (И-4/И-5 по F-1, R-1…R-4).",
+    "Полный прогон зелёный во всех пяти наборах и в трёх typecheck; ни одного пропущенного/отключённого теста не добавлено.",
+    "Правки спек-агента (1.13, 1.13.1) правил и критериев 1.12 не касаются и их не ослабляют."
+  ],
+
+  "dispute_resolutions": [
+    {"dispute": "corp/disputes/dispute-I12-01-logout-endpoint.json", "resolution": "uphold_dispute (закрыт до ревью, подтверждён в циклах 1 и 2)", "reasoning": "Без изменений."},
+    {"dispute": "corp/disputes/dispute-I12-02-provider-enable-route.json", "resolution": "uphold_dispute (закрыт до ревью, подтверждён в циклах 1 и 2)", "reasoning": "Без изменений."},
+    {"dispute": "corp/disputes/dispute-I12-03-logout-unavailable-reason.json", "resolution": "uphold_dispute (вынесен в цикле 1, применён errata dd09ac9cb6)", "reasoning": "Без изменений, закрыт."},
+    {"dispute": "corp/disputes/dispute-I12-04-ac218-body-not-updated.json", "resolution": "uphold_dispute (подтверждён в циклах 1 и 2)", "reasoning": "Без изменений, закрыт."}
+  ],
+  "new_disputes": [],
+
+  "conclusion": "Единственный must_fix второго цикла (G-1) закрыт по существу, а не формально: сторож исполняет действующую редакцию AC-287 четырьмя прогонами, признак берётся из исходника витрины, и обе инъекции, ради которых он заведён, повторены ревьюером и обе краснеют — И-4 (возврат дефекта F-1) двумя прогонами, И-5 (схлопывание третьего состояния) одним. Приём извлечения выражений из текста исходника проверен на тихую деградацию отдельно: при ненайденном маркере, чужом имени в выражении и переименованном поле ответа он падает громко. Единственная щель приёма — он не проверяет, какой признак спрашивает разметка ветки «Войти» (H-1, чинится одной строкой). G-2 проверен запуском во всех трёх местах и закрыт; при этом обнаружен пред­существующий соседний дефект того же задания CI — шаг установки браузера берёт другую версию playwright, чем шаг прогона (H-2). G-3 спек-агентом не исправлен и остаётся открытым minor, блокером не является. Регрессий нет: F-1…F-10 и BUG-I12-002 держатся под сторожами, подтверждено четырьмя адресными инъекциями. Найдена одна не замеченная прежними циклами щель покрытия в TUI (H-3): паритет S-T11 по третьему состоянию признака в коде есть, а проверить его нечем. Ни одна из трёх новых находок не является must_fix — все три об укреплении сторожей и о CI, ни одна не описывает дефект в поведении продукта. Вердикт — approve: ревизия 1.12 закрыта и идёт в пересборку приложения; H-1, H-2, H-3 и G-3 переносятся в задел следующей итерации."
+}
