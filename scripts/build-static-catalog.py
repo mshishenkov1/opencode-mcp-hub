@@ -37,7 +37,11 @@
   запрещено (R-U8.1 п. 6 разрешает подстановку только в четырёх адресах).
 * **Словари разрешений** (``catalog/permissions/<alias>.yaml``, правило S-V20) прикладываются к
   карточке полем ``permission_groups`` дословно: клиент разбирает их сам и деградирует на прежний
-  экран прав, если формат ему незнаком.
+  экран прав, если формат ему незнаком. Дословно — не значит без проверки: у словаря версии 2 есть
+  раздел ``tools`` (имя и класс риска на каждый инструмент), и его состав обязан побуквенно
+  совпадать с объединением групповых ``tools``. Экран разрешений строит строку на каждый инструмент
+  из этого раздела, поэтому инструмент без имени и класса на нём не появится вовсе, а имя без
+  группы появится без умолчания — и то и другое ловится здесь, а не у пользователя.
 
 Пример::
 
@@ -145,14 +149,93 @@ class BuildError(Exception):
 # Словари разрешений (S-V20)
 # ---------------------------------------------------------------------------
 
+#: Классы риска инструмента (словарь версии 2). Экран разрешений группирует инструменты по ним:
+#: ``read_only`` — ничего не меняет, ``write_delete`` — меняет или удаляет данные, ``interactive`` —
+#: действие вовне или запуск чужого кода (слэш-команды, вебхуки). Перечень закрыт: незнакомый класс
+#: клиенту показать не во что.
+TOOL_CLASSES = frozenset({"read_only", "write_delete", "interactive"})
+
+#: Версия словаря, начиная с которой раздел ``tools`` обязателен. Словари версии 1 его не имеют и
+#: остаются валидными: клиент старого формата продолжает читать одни группы.
+TOOL_INDEX_SINCE = 2
+
+
+def check_tool_index(path: Path, document: dict[str, Any]) -> None:
+    """Проверить раздел ``tools`` словаря разрешений: состав, имена, классы.
+
+    Инвариант один: множество имён в ``tools`` и объединение групповых ``tools`` совпадают
+    побуквенно **в обе стороны**. Проверяется он здесь, при сборке каталога, а не подразумевается:
+    расхождение не ломает разбор и молча доезжает до пользователя — инструмент без строки в
+    ``tools`` просто исчезнет с экрана разрешений (и останется в умолчании своей группы, о котором
+    человека не спросили), а имя без группы окажется на экране без умолчания.
+
+    Словари до версии 2 раздела не имеют и проверку проходят: инвариант появляется вместе с
+    разделом, а не задним числом.
+    """
+    version = document.get("version")
+    index = document.get("tools")
+    if index is None:
+        if isinstance(version, int) and version >= TOOL_INDEX_SINCE:
+            raise BuildError(
+                f"{path}: version: {version} — обязателен раздел tools "
+                f"(имя и класс на каждый инструмент из групп)"
+            )
+        return
+    if not isinstance(index, dict):
+        raise BuildError(f"{path}: раздел tools — объект «имя инструмента: {{title, class}}»")
+
+    problems: list[str] = []
+    for name, item in index.items():
+        where = f"tools.{name}"
+        if not isinstance(item, dict):
+            problems.append(f"{where}: ожидается объект с полями title, class")
+            continue
+        title = item.get("title")
+        if not isinstance(title, str) or not title.strip():
+            problems.append(f"{where}.title: нужно непустое человеческое имя инструмента")
+        klass = item.get("class")
+        if klass not in TOOL_CLASSES:
+            problems.append(
+                f"{where}.class: {klass!r} — ожидается один из "
+                f"{', '.join(sorted(TOOL_CLASSES))}"
+            )
+
+    grouped: set[str] = set()
+    for position, group in enumerate(document.get("groups") or []):
+        if not isinstance(group, dict):
+            continue
+        for name in group.get("tools") or []:
+            if isinstance(name, str):
+                grouped.add(name)
+            else:
+                problems.append(
+                    f"groups[{position}].tools: {name!r} — имя инструмента должно быть строкой"
+                )
+
+    extra = sorted(set(index) - grouped)
+    missing = sorted(grouped - set(index))
+    if extra:
+        problems.append(
+            "в tools есть имена, которых нет ни в одной группе (у них не будет умолчания): "
+            + ", ".join(extra)
+        )
+    if missing:
+        problems.append(
+            "в группах есть инструменты без имени и класса (их не покажет экран разрешений): "
+            + ", ".join(missing)
+        )
+    if problems:
+        raise BuildError(f"{path}: словарь разрешений собран неверно:\n  " + "\n  ".join(problems))
+
 
 def load_permission_groups(directory: Path) -> dict[str, Any]:
     """Прочитать ``<directory>/<alias>.yaml`` для всех alias. Нет каталога — пустой словарь.
 
     Файл кладётся в карточку **дословно**: клиент разбирает его своими правилами (S-V20) и сам
-    решает, что делать с незнакомым форматом. Проверяется здесь ровно одно — что это объект YAML:
-    список или строка в поле ``permission_groups`` не деградируют у клиента мягко, а выглядят как
-    испорченный каталог.
+    решает, что делать с незнакомым форматом. Проверяется здесь то, что клиент проверить не может:
+    что это объект YAML (список или строка в поле ``permission_groups`` не деградируют у клиента
+    мягко, а выглядят как испорченный каталог) и что раздел ``tools`` описывает ровно те
+    инструменты, что перечислены в группах (``check_tool_index``).
     """
     if not directory.is_dir():
         return {}
@@ -167,6 +250,7 @@ def load_permission_groups(directory: Path) -> dict[str, Any]:
             raise BuildError(f"{path}: файл пуст")
         if not isinstance(document, dict):
             raise BuildError(f"{path}: ожидается объект с полями version, groups")
+        check_tool_index(path, document)
         result[alias] = document
     return result
 
