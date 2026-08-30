@@ -10,6 +10,7 @@ defaults:
 
 servers:
   - alias: tag
+    type: "MCP"
     title: "ТЭГ (Mattermost)"
     description: "Сообщения, каналы, треды, поиск, файлы корпоративного мессенджера ТЭГ."
     owner: "Мирослав Шишенков"
@@ -26,6 +27,7 @@ servers:
         readwrite: { write_mode: confirm }
 
   - alias: gitlab
+    type: "MCP"
     title: "GitLab (coderepo.corp.tander.ru)"
     description: "Репозитории, merge requests, issues, пайплайны GitLab coderepo."
     owner: "AI Lab"
@@ -64,6 +66,7 @@ servers:
         - { id: admin, title: "Админ: лейблы, майлстоуны, участники", preset: none }
 
   - alias: gitlab-platform
+    type: "MCP"
     title: "GitLab Platform (gitlab.platform.corp)"
     description: "Репозитории, merge requests, issues, пайплайны GitLab Platform."
     owner: "AI Lab"
@@ -89,6 +92,7 @@ servers:
     permission_model: { $ref: "#/servers/gitlab/permission_model" }
 
   - alias: jira
+    type: "MCP"
     title: "Jira"
     description: "Задачи, проекты, спринты и Service Desk Jira (jira.corp.tander.ru)."
     owner: "AI Lab"
@@ -121,6 +125,7 @@ servers:
         - { id: jira_write, title: "Создание и изменение задач", preset: readwrite }
 
   - alias: confluence
+    type: "MCP"
     title: "Confluence"
     description: "Поиск и чтение страниц, комментарии и вложения Confluence (it-portal.corp.tander.ru)."
     owner: "AI Lab"
