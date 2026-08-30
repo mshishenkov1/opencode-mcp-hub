@@ -89,6 +89,7 @@ servers:
           tools: ["*"]
 
   - alias: gitlab
+    type: "MCP"
     title: "GitLab (coderepo.corp.tander.ru)"
     description: "Репозитории, merge requests, issues, пайплайны GitLab coderepo."
     owner: "AI Lab"
@@ -127,6 +128,7 @@ servers:
         - { id: admin, title: "Админ: лейблы, майлстоуны, участники", preset: none }
 
   - alias: gitlab-platform
+    type: "MCP"
     title: "GitLab Platform (gitlab.platform.corp)"
     description: "Репозитории, merge requests, issues, пайплайны GitLab Platform."
     owner: "AI Lab"
