@@ -511,7 +511,19 @@ class LoginService:
                         details={"key_alias": alias, "reason": "relogin", "outcome": alias_outcome},
                     )
                 )
-            await session.execute(sa_delete(ApiKey).where(ApiKey.id.in_([row[0] for row in rows])))
+            await session.execute(
+                sa_delete(ApiKey).where(
+                    # Страховка (открытый хвост «страховка user_id перед sa_delete»): удаление
+                    # уже адресовано пользователем через отбор rows выше (ApiKey.user_id == user_id
+                    # в select), но между отбором и удалением остаётся id.in_([...]) — расширь
+                    # кто-то отбор или переиспользуй список id в другом контексте, и удаление
+                    # ушло бы за пределы пользователя. Второй предикат ничего не меняет на
+                    # сегодняшних данных (id уже принадлежат user_id), только не даёт будущей
+                    # правке тихо это сломать.
+                    ApiKey.id.in_([row[0] for row in rows]),
+                    ApiKey.user_id == user_id,
+                )
+            )
         for _, key_sha256, _alias in rows:
             await invalidate_key_cache(self.kv, key_sha256)
 
