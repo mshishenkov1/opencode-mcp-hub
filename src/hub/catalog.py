@@ -189,6 +189,9 @@ class ServerModel(_Strict):
     credential_headers: dict[str, HeaderValue] | None = None
     static_headers: dict[str, HeaderValue] | None = None
     permission_model: PermissionModel
+    # R-C7.1: сквозной тип коннектора карточки — Hub его не читает и не подставляет, отдаёт
+    # дословно клиенту (тот же принцип, что и у прочих сквозных полей карточки).
+    type: str | None = None
 
     @model_validator(mode="after")
     def _mode_requirements(self) -> ServerModel:
@@ -264,7 +267,7 @@ class ServerEntry:
     def public_view(self, public_url: str) -> dict[str, Any]:
         """Публичное представление сервера (R-C6): без секретов и внутренних URL."""
         m = self.model
-        return {
+        view: dict[str, Any] = {
             "alias": m.alias,
             "title": m.title,
             "description": m.description,
@@ -277,6 +280,10 @@ class ServerEntry:
             "permission_model": self.public_permission_model(),
             "auth_kind": "oauth2",
         }
+        # R-C7.1: сквозной тип коннектора — отдаётся дословно только у карточек, объявивших его.
+        if m.type is not None:
+            view["type"] = m.type
+        return view
 
 
 @dataclass(frozen=True)
