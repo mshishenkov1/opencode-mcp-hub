@@ -28,6 +28,8 @@ logger = logging.getLogger("hub.catalog")
 
 # Spec 1.1, R-C1: alias — 1–32 символа, ^[a-z][a-z0-9-]{0,31}$ (односимвольные alias из AC-54/AC-55 валидны).
 ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# CSS-цвет подложки значка-монограммы карточки: #RRGGBB, шесть шестнадцатеричных цифр.
+ICON_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 # R-U1: идентификатор способа подключения в auth_methods.
 AUTH_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 ENV_REF_RE = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
@@ -328,6 +330,9 @@ class ServerModel(_Strict):
     contact: str | None = None
     docs_url: str | None = None
     icon: str | None = None
+    # CSS-цвет подложки значка-монограммы: #RRGGBB. Необязательное: карточка без него
+    # грузится и публикуется ровно как раньше (AC-22).
+    icon_color: str | None = Field(default=None, pattern=ICON_COLOR_RE.pattern)
     status: ServerStatus
     audience: list[str] = Field(min_length=1)
     mode: ServerMode
@@ -848,6 +853,9 @@ class ServerEntry:
         # Короткая суть — только у карточек, объявивших её: без поля состав представления прежний.
         if m.summary is not None:
             view["summary"] = m.summary
+        # Цвет подложки значка — только у карточек, объявивших его: без поля состав прежний.
+        if m.icon_color is not None:
+            view["icon_color"] = m.icon_color
         # R-C6/R-U8 (решение 69): ключ auth_methods есть только у серверов, объявивших его в каталоге.
         if m.auth_methods is not None:
             view["auth_methods"] = self.public_auth_methods()
