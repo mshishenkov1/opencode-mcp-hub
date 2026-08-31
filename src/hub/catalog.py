@@ -329,6 +329,9 @@ class ServerModel(_Strict):
     owner: str = Field(min_length=1)
     contact: str | None = None
     docs_url: str | None = None
+    # Человеческая подпись ссылки docs_url (напр. «внутренний портал»), а не адрес.
+    # Необязательное: карточка без него грузится и публикуется ровно как раньше (AC-22).
+    docs_label: str | None = Field(default=None, min_length=1)
     icon: str | None = None
     # CSS-цвет подложки значка-монограммы: #RRGGBB. Необязательное: карточка без него
     # грузится и публикуется ровно как раньше (AC-22).
@@ -853,6 +856,9 @@ class ServerEntry:
         # Короткая суть — только у карточек, объявивших её: без поля состав представления прежний.
         if m.summary is not None:
             view["summary"] = m.summary
+        # Подпись ссылки docs_url — только у карточек, объявивших её: без поля состав прежний.
+        if m.docs_label is not None:
+            view["docs_label"] = m.docs_label
         # Цвет подложки значка — только у карточек, объявивших его: без поля состав прежний.
         if m.icon_color is not None:
             view["icon_color"] = m.icon_color
