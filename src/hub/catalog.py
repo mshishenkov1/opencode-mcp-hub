@@ -175,6 +175,9 @@ class AuthOAuth2(_Strict):
 class ServerModel(_Strict):
     alias: str = Field(pattern=ALIAS_RE.pattern)
     title: str = Field(min_length=1)
+    # Короткая суть коннектора одной строкой — то, что витрина показывает под названием.
+    # Необязательное: карточка без него грузится и публикуется ровно как раньше (AC-22).
+    summary: str | None = Field(default=None, min_length=1)
     description: str = Field(min_length=1)
     owner: str = Field(min_length=1)
     contact: str | None = None
@@ -280,6 +283,9 @@ class ServerEntry:
             "permission_model": self.public_permission_model(),
             "auth_kind": "oauth2",
         }
+        # Короткая суть — только у карточек, объявивших её: без поля состав представления прежний.
+        if m.summary is not None:
+            view["summary"] = m.summary
         # R-C7.1: сквозной тип коннектора — отдаётся дословно только у карточек, объявивших его.
         if m.type is not None:
             view["type"] = m.type
