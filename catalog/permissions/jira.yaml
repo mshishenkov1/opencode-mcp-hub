@@ -1,0 +1,246 @@
+# Словарь разрешений коннектора Jira (S-V20 спецификации форка OpenCode).
+#
+# Файл подключается к карточке alias `jira` полем `permission_groups` и разбирается клиентом
+# функцией parsePermissionGroups. Имя файла = alias коннектора.
+#
+# Состав — 49 инструментов, снятых протоколом MCP с боевого
+# mcp-atlassian.ailab-copilot-prod.corp.tander.ru (2026-08-31): ровно та поверхность, которую
+# сервер объявляет без фильтра. На конкретной установке заголовок `Enabled-Groups`
+# (permission_model карточки) может отдавать пользователю меньше инструментов — словарь описывает
+# коннектор целиком, а не то, что включено у одного человека. `rest` страхует инструменты,
+# которые появятся у сервера после публикации этого словаря.
+#
+# version: 2 — раздел `tools` со строкой на каждый инструмент: человеческое имя и класс риска, из
+# которых клиент строит экран разрешений по классам, а не по группам. Умолчание инструмента
+# берётся из его группы. Классы: `read_only` — ничего не меняет; `write_delete` — меняет или
+# удаляет данные в Jira; `interactive` — действие вовне или запуск чужого кода. Класс берётся по
+# существу инструмента, а не по группе.
+#
+# Совпадение состава `tools` и объединения групповых `tools` проверяется при сборке статического
+# каталога (scripts/build-static-catalog.py, check_tool_index) — расхождение останавливает сборку.
+# Hub подставляет файл в карточку целиком (src/hub/catalog.py, _apply_permission_files) и этой
+# проверки не выполняет, поэтому файл в обоих деревьях держится побайтово одинаковым.
+version: 2
+groups:
+  - id: issues_read
+    title: "Читать задачи, их историю и сроки"
+    description: "Поля задачи, комментарии и списанное время, история изменений и переходов, сроки и SLA, наблюдатели, заполненные формы ProForma и связанный с задачей код: ветки, коммиты и pull request'ы. Ничего не меняет."
+    default: allow
+    tools: [jira_get_issue, jira_get_issue_dates, jira_get_issue_sla, jira_batch_get_changelogs, jira_get_transitions, jira_get_worklog, jira_get_issue_watchers, jira_get_link_types, jira_get_issue_development_info, jira_get_issues_development_info, jira_get_issue_proforma_forms, jira_get_proforma_form_details]
+  - id: search
+    title: "Искать задачи и разбираться в полях Jira"
+    description: "Поиск задач запросом JQL, задачи выбранного проекта, поиск полей по названию и допустимые значения полей. Показывает только то, что вам и так доступно в Jira."
+    default: allow
+    tools: [jira_search, jira_get_project_issues, jira_search_fields, jira_get_field_options]
+  - id: projects_read
+    title: "Смотреть проекты, их компоненты, версии и карточки коллег"
+    description: "Список доступных проектов, компоненты и версии выпуска проекта, профиль сотрудника в Jira: как к нему обращаться и по какому адресу он заведён."
+    default: allow
+    tools: [jira_get_all_projects, jira_get_project_components, jira_get_project_versions, jira_get_user_profile]
+  - id: boards_read
+    title: "Смотреть доски и спринты"
+    description: "Доски по названию, проекту или типу, задачи на доске, спринты доски и их состав. Планирование не меняет."
+    default: allow
+    tools: [jira_get_agile_boards, jira_get_board_issues, jira_get_sprints_from_board, jira_get_sprint_issues]
+  - id: service_desk_read
+    title: "Смотреть очереди Service Desk и заявки в них"
+    description: "Service Desk проекта, его очереди и заявки в очереди. Отвечать заявителю и менять заявки не позволяет."
+    default: allow
+    tools: [jira_get_service_desk_for_project, jira_get_service_desk_queues, jira_get_queue_issues]
+  - id: attachments_read
+    title: "Открывать вложения и картинки задач"
+    description: "Скачивание файлов, приложенных к задаче, и показ приложенных изображений. Содержимое вложения попадает в переписку с ассистентом; в самой Jira ничего не меняется."
+    default: allow
+    tools: [jira_download_attachments, jira_get_issue_images]
+  - id: issues_write
+    title: "Создавать задачи и менять их, включая статус"
+    description: "Новая задача или подзадача, правка полей существующей и перевод её в другой статус. Всё сделанное видно коллегам как ваши действия и уходит подписчикам задачи уведомлением."
+    default: ask
+    tools: [jira_create_issue, jira_update_issue, jira_transition_issue]
+  - id: comments_and_worklog
+    title: "Комментировать задачи и списывать время от вашего имени"
+    description: "Новый комментарий, правка уже написанного и запись списанного времени. Появляется в задаче за вашей подписью и попадает в отчёты по трудозатратам."
+    default: ask
+    tools: [jira_add_comment, jira_edit_comment, jira_add_worklog]
+  - id: links_write
+    title: "Связывать задачи между собой и с внешними ссылками"
+    description: "Привязка задачи к эпику, связь двух задач (например «блокирует») и ссылка на внешний ресурс или страницу Confluence в панели ссылок задачи. Связь видна всем, кто открывает задачу."
+    default: ask
+    tools: [jira_link_to_epic, jira_create_issue_link, jira_create_remote_issue_link]
+  - id: watchers_write
+    title: "Подписывать людей на задачи"
+    description: "Добавление наблюдателя: человек начинает получать уведомления обо всех изменениях задачи, не спросив вас об этом."
+    default: ask
+    tools: [jira_add_watcher]
+  - id: planning_write
+    title: "Вести спринты и версии выпуска"
+    description: "Создание спринта, изменение его названия, дат и состояния (в том числе запуск и закрытие), набор задач в спринт и новая версия выпуска в проекте. Меняет планы всей команды."
+    default: ask
+    tools: [jira_create_sprint, jira_update_sprint, jira_add_issues_to_sprint, jira_create_version]
+  - id: forms_write
+    title: "Заполнять формы ProForma в задачах"
+    description: "Запись ответов в поля формы ProForma, приложенной к задаче. Ответы уходят в задачу за вашей подписью и часто служат основанием для согласования."
+    default: ask
+    tools: [jira_update_proforma_form_answers]
+  - id: batch_create
+    title: "Создавать задачи и версии пачками"
+    description: "Создание сразу многих задач или версий одним вызовом. Отдельная от штучного создания возможность: ошибка в шаблоне порождает десятки задач, которые придётся разбирать вручную."
+    default: deny
+    tools: [jira_batch_create_issues, jira_batch_create_versions]
+  - id: destructive
+    title: "Удалять задачи, связи и наблюдателей"
+    description: "Необратимое: удаление задачи вместе с комментариями и вложениями, снятие связи между задачами и отписка человека от задачи. Вернуть удалённое средствами Jira нельзя."
+    default: deny
+    tools: [jira_delete_issue, jira_remove_issue_link, jira_remove_watcher]
+tools:
+  jira_get_issue:
+    title: "Открывать задачу и её поля"
+    class: read_only
+  jira_get_issue_dates:
+    title: "Смотреть даты задачи и историю смены статусов"
+    class: read_only
+  jira_get_issue_sla:
+    title: "Считать сроки задачи и время в каждом статусе"
+    class: read_only
+  jira_batch_get_changelogs:
+    title: "Смотреть историю изменений сразу нескольких задач"
+    class: read_only
+  jira_get_transitions:
+    title: "Узнавать, в какие статусы можно перевести задачу"
+    class: read_only
+  jira_get_worklog:
+    title: "Смотреть списанное в задаче время"
+    class: read_only
+  jira_get_issue_watchers:
+    title: "Смотреть, кто следит за задачей"
+    class: read_only
+  jira_get_link_types:
+    title: "Смотреть, какими бывают связи между задачами"
+    class: read_only
+  jira_get_issue_development_info:
+    title: "Смотреть код, связанный с задачей: ветки, коммиты, pull request'ы"
+    class: read_only
+  jira_get_issues_development_info:
+    title: "Смотреть связанный код сразу по нескольким задачам"
+    class: read_only
+  jira_get_issue_proforma_forms:
+    title: "Смотреть, какие формы ProForma приложены к задаче"
+    class: read_only
+  jira_get_proforma_form_details:
+    title: "Открывать форму ProForma с вопросами и ответами"
+    class: read_only
+  jira_search:
+    title: "Искать задачи по JQL"
+    class: read_only
+  jira_get_project_issues:
+    title: "Смотреть задачи проекта"
+    class: read_only
+  jira_search_fields:
+    title: "Искать поля Jira по названию"
+    class: read_only
+  jira_get_field_options:
+    title: "Смотреть допустимые значения поля"
+    class: read_only
+  jira_get_all_projects:
+    title: "Смотреть список доступных вам проектов"
+    class: read_only
+  jira_get_project_components:
+    title: "Смотреть компоненты проекта"
+    class: read_only
+  jira_get_project_versions:
+    title: "Смотреть версии выпуска проекта"
+    class: read_only
+  jira_get_user_profile:
+    title: "Смотреть карточку сотрудника в Jira"
+    class: read_only
+  jira_get_agile_boards:
+    title: "Находить доски по названию, проекту или типу"
+    class: read_only
+  jira_get_board_issues:
+    title: "Смотреть задачи на доске"
+    class: read_only
+  jira_get_sprints_from_board:
+    title: "Смотреть спринты доски"
+    class: read_only
+  jira_get_sprint_issues:
+    title: "Смотреть задачи спринта"
+    class: read_only
+  jira_get_service_desk_for_project:
+    title: "Узнавать, какой Service Desk у проекта"
+    class: read_only
+  jira_get_service_desk_queues:
+    title: "Смотреть очереди Service Desk"
+    class: read_only
+  jira_get_queue_issues:
+    title: "Смотреть заявки в очереди Service Desk"
+    class: read_only
+  jira_download_attachments:
+    title: "Скачивать вложения задачи"
+    class: read_only
+  jira_get_issue_images:
+    title: "Открывать картинки, приложенные к задаче"
+    class: read_only
+  jira_create_issue:
+    title: "Создавать задачу"
+    class: write_delete
+  jira_update_issue:
+    title: "Менять поля задачи"
+    class: write_delete
+  jira_transition_issue:
+    title: "Переводить задачу в другой статус"
+    class: write_delete
+  jira_add_comment:
+    title: "Комментировать задачу от вашего имени"
+    class: write_delete
+  jira_edit_comment:
+    title: "Править комментарий в задаче"
+    class: write_delete
+  jira_add_worklog:
+    title: "Списывать время в задаче от вашего имени"
+    class: write_delete
+  jira_link_to_epic:
+    title: "Привязывать задачу к эпику"
+    class: write_delete
+  jira_create_issue_link:
+    title: "Связывать две задачи между собой"
+    class: write_delete
+  jira_create_remote_issue_link:
+    title: "Добавлять в задачу ссылку на внешний ресурс"
+    class: write_delete
+  jira_add_watcher:
+    title: "Подписывать человека на задачу"
+    class: write_delete
+  jira_create_sprint:
+    title: "Заводить спринт на доске"
+    class: write_delete
+  jira_update_sprint:
+    title: "Менять спринт: название, даты, состояние"
+    class: write_delete
+  jira_add_issues_to_sprint:
+    title: "Набирать задачи в спринт"
+    class: write_delete
+  jira_create_version:
+    title: "Заводить версию выпуска в проекте"
+    class: write_delete
+  jira_update_proforma_form_answers:
+    title: "Заполнять ответы в форме ProForma"
+    class: write_delete
+  jira_batch_create_issues:
+    title: "Создавать задачи пачкой"
+    class: write_delete
+  jira_batch_create_versions:
+    title: "Создавать версии выпуска пачкой"
+    class: write_delete
+  jira_delete_issue:
+    title: "Удалять задачу"
+    class: write_delete
+  jira_remove_issue_link:
+    title: "Убирать связь между задачами"
+    class: write_delete
+  jira_remove_watcher:
+    title: "Отписывать человека от задачи"
+    class: write_delete
+rest:
+  title: "Остальные возможности Jira"
+  description: "Инструменты коннектора, не попавшие ни в одну группу, — например появившиеся у сервера после публикации этого словаря."
+  default: ask
