@@ -12,6 +12,7 @@ servers:
   - alias: tag
     type: "MCP"
     title: "ТЭГ (Mattermost)"
+    summary: "Каналы, треды, поиск и файлы корпоративного мессенджера"
     description: "Сообщения, каналы, треды, поиск, файлы корпоративного мессенджера ТЭГ."
     owner: "Мирослав Шишенков"
     contact: "https://tag.magnit.ru"
@@ -91,6 +92,7 @@ servers:
   - alias: gitlab
     type: "MCP"
     title: "GitLab (coderepo.corp.tander.ru)"
+    summary: "Репозитории, merge requests, задачи и пайплайны"
     description: "Репозитории, merge requests, issues, пайплайны GitLab coderepo."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
@@ -130,6 +132,7 @@ servers:
   - alias: gitlab-platform
     type: "MCP"
     title: "GitLab Platform (gitlab.platform.corp)"
+    summary: "Репозитории, merge requests, задачи и пайплайны"
     description: "Репозитории, merge requests, issues, пайплайны GitLab Platform."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
@@ -156,6 +159,7 @@ servers:
   - alias: jira
     type: "MCP"
     title: "Jira"
+    summary: "Задачи, проекты, спринты и заявки Service Desk"
     description: "Задачи, проекты, спринты и Service Desk Jira (jira.corp.tander.ru)."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
@@ -207,6 +211,7 @@ servers:
   - alias: confluence
     type: "MCP"
     title: "Confluence"
+    summary: "Поиск, чтение, комментарии и вложения базы знаний"
     description: "Поиск и чтение страниц, комментарии и вложения Confluence (it-portal.corp.tander.ru)."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
