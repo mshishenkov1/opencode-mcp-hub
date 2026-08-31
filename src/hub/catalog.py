@@ -320,6 +320,9 @@ _AUTH_METHOD_TYPES = {"oauth2", "user_token"}
 class ServerModel(_Strict):
     alias: str = Field(pattern=ALIAS_RE.pattern)
     title: str = Field(min_length=1)
+    # Короткая суть коннектора одной строкой — то, что страница показывает под названием.
+    # Необязательное: карточка без него грузится и публикуется ровно как раньше (AC-22).
+    summary: str | None = Field(default=None, min_length=1)
     description: str = Field(min_length=1)
     owner: str = Field(min_length=1)
     contact: str | None = None
@@ -842,6 +845,9 @@ class ServerEntry:
             "permission_model": self.public_permission_model(),
             "auth_kind": self.public_auth_kind(),
         }
+        # Короткая суть — только у карточек, объявивших её: без поля состав представления прежний.
+        if m.summary is not None:
+            view["summary"] = m.summary
         # R-C6/R-U8 (решение 69): ключ auth_methods есть только у серверов, объявивших его в каталоге.
         if m.auth_methods is not None:
             view["auth_methods"] = self.public_auth_methods()
