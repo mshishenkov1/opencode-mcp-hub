@@ -11,7 +11,7 @@ defaults:
 servers:
   - alias: tag
     type: "MCP"
-    title: "ТЭГ"
+    title: "Tag"
     summary: "Каналы, треды, поиск и опросы корпоративного мессенджера"
     icon_color: "#1F4C86"
     description: "ТЭГ — корпоративный мессенджер Магнита. Подключив его, вы даёте ассистенту доступ ровно к тому, что видите сами: свои каналы и команды, переписку и треды, поиск по сообщениям и файлам, карточки коллег, вложения и результаты опросов. Чужих личных переписок коннектор не открывает — права наследуются от вашей учётной записи в ТЭГ.\n\nЧто это даёт. Спросить, чем закончилось обсуждение в канале, пока вас не было. Найти сообщение, которое вы точно писали, но не помните где. Собрать тред в короткий пересказ перед встречей. Отправить сообщение, поставить реакцию, создать опрос — если разрешите записывающие инструменты; по умолчанию они спрашивают."
@@ -89,75 +89,6 @@ servers:
                   "browse_public_channels", "summarize_*", "download_file"]
         readwrite:
           tools: ["*"]
-
-  - alias: gitlab
-    type: "MCP"
-    title: "GitLab Coderepo"
-    summary: "Репозитории, merge requests, задачи и пайплайны"
-    icon_color: "#E24329"
-    description: "GitLab Coderepo: merge-реквесты, пайплайны, issues и файлы репозиториев, к которым у вас есть доступ.\n\nЧто это даёт. Понять, почему покраснела сборка, не открывая браузер. Собрать список своих merge-реквестов и того, что в них просят поправить. Найти, в каком коммите изменилось поведение."
-    owner: "AI Lab"
-    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
-    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
-    status: beta   # ga — после выдачи OAuth-приложения администраторами
-    audience: ["all"]
-    mode: facade
-    upstream_url: "https://mcp-gitlab.ailab-copilot-prod.corp.tander.ru/mcp"
-    auth:
-      type: oauth2
-      authorize_url: "https://coderepo.corp.tander.ru/oauth/authorize"
-      token_url: "https://coderepo.corp.tander.ru/oauth/token"
-      revoke_url: "https://coderepo.corp.tander.ru/oauth/revoke"
-      client_id: "${GITLAB_OAUTH_CLIENT_ID}"
-      client_secret: "env:GITLAB_OAUTH_CLIENT_SECRET"
-      pkce: true
-      scopes:
-        readonly: ["read_api", "read_user", "read_repository"]
-        readwrite: ["api", "read_user"]
-    credential_headers:
-      Authorization: "Bearer {{access_token}}"
-    permission_model:
-      kind: header_groups
-      header: Enabled-Groups
-      always: ["core"]
-      groups:
-        - { id: code_review, title: "Code review: дискуссии в MR, approve", preset: readonly }
-        - { id: devops, title: "DevOps: пайплайны, джобы, окружения", preset: readonly }
-        - { id: users, title: "Пользователи и события проекта", preset: readonly }
-        - { id: repo_write, title: "Запись: файлы, ветки, MR", preset: readwrite }
-        - { id: issue_management, title: "Issues: создание и редактирование", preset: readwrite }
-        - { id: releases, title: "Релизы", preset: readwrite }
-        - { id: wiki, title: "Wiki", preset: readwrite }
-        - { id: draft_notes, title: "Черновики комментариев", preset: readwrite }
-        - { id: admin, title: "Админ: лейблы, майлстоуны, участники", preset: none }
-
-  - alias: gitlab-platform
-    type: "MCP"
-    title: "GitLab Платформа"
-    summary: "Репозитории, merge requests, задачи и пайплайны"
-    icon_color: "#E24329"
-    description: "GitLab Платформы: merge-реквесты, пайплайны, issues и файлы репозиториев, к которым у вас есть доступ. Ассистент читает описание задачи, разбирает упавший пайплайн и предлагает правку прямо в ветке.\n\nЧто это даёт. Понять, почему покраснела сборка, не открывая браузер. Собрать список своих merge-реквестов и того, что в них просят поправить."
-    owner: "AI Lab"
-    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
-    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
-    status: beta   # ga — после выдачи OAuth-приложения администраторами
-    audience: ["all"]
-    mode: facade
-    upstream_url: "https://mcp-gitlab-platform.ailab-copilot-prod.corp.tander.ru/mcp"
-    auth:
-      type: oauth2
-      authorize_url: "https://gitlab.platform.corp/oauth/authorize"
-      token_url: "https://gitlab.platform.corp/oauth/token"
-      revoke_url: "https://gitlab.platform.corp/oauth/revoke"
-      client_id: "${GITLAB_PLATFORM_OAUTH_CLIENT_ID}"
-      client_secret: "env:GITLAB_PLATFORM_OAUTH_CLIENT_SECRET"
-      pkce: true
-      scopes:
-        readonly: ["read_api", "read_user", "read_repository"]
-        readwrite: ["api", "read_user"]
-    credential_headers:
-      Authorization: "Bearer {{access_token}}"
-    permission_model: { $ref: "#/servers/gitlab/permission_model" }
 
   - alias: jira
     type: "MCP"

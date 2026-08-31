@@ -80,7 +80,7 @@ async def test_repo_catalog_loads_at_start(
     await seed_user_with_key(hub.app, "sk-ok")
     catalog = (await hub.get("/api/catalog", headers=bearer("sk-ok"))).json()
     aliases = [s["alias"] for s in catalog["servers"]]
-    assert aliases == ["tag", "gitlab", "gitlab-platform", "jira", "confluence"]
+    assert aliases == ["tag", "jira", "confluence"]  # GitLab убран из каталога решением заказчика 31.08
 
 
 # Переменные, которые каталог репозитория объявляет внутри **недоступного** способа: без них
@@ -127,7 +127,7 @@ async def test_missing_variable_drops_the_server_from_the_repo_catalog(
     catalog = (await hub.get("/api/catalog", headers=bearer("sk-ok"))).json()
     aliases = [s["alias"] for s in catalog["servers"]]
     assert "tag" not in aliases, "сервер без переменной обязан выпасть из каталога"
-    assert aliases == ["gitlab", "gitlab-platform", "jira", "confluence"]
+    assert aliases == ["jira", "confluence"]  # GitLab убран из каталога решением заказчика 31.08
 
 
 @pytest.mark.ac("AC-07")
