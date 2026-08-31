@@ -95,7 +95,7 @@ servers:
     title: "GitLab Coderepo"
     summary: "Репозитории, merge requests, задачи и пайплайны"
     icon_color: "#E24329"
-    description: "Репозитории, merge requests, issues, пайплайны GitLab coderepo."
+    description: "GitLab Coderepo: merge-реквесты, пайплайны, issues и файлы репозиториев, к которым у вас есть доступ.\n\nЧто это даёт. Понять, почему покраснела сборка, не открывая браузер. Собрать список своих merge-реквестов и того, что в них просят поправить. Найти, в каком коммите изменилось поведение."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
