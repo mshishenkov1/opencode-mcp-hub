@@ -266,3 +266,54 @@ servers:
         readwrite:
           tools:
             - "*"
+
+  - alias: gitlab
+    type: "MCP"
+    title: "GitLab"
+    summary: "Проекты, репозитории, MR, коммиты и задачи GitLab"
+    icon_color: "#FC6D26"
+    description: "GitLab — корпоративная платформа управления кодом Магнита. Подключив его, вы даёте доступ к вашим проектам и репозиториям: поиск проектов, чтение файлов и дерева репозитория, ветки и коммиты, merge requests и их диффы, задачи и комментарии.\n\nЧто это даёт: Найти проект и посмотреть его структуру. Прочитать файл из репозитория без клонирования. Собрать изменения из merge request в короткий пересказ. Посмотреть историю коммитов по ветке, кастомные автоматизации."
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/gitlab-mcp-oblachno"
+    docs_label: "портал AI Lab"
+    status: beta
+    audience: ["all"]
+    mode: facade
+    upstream_url: "${GITLAB_MCP_URL}"
+    auth_methods:
+      - id: corp_oauth
+        title: "Корпоративная авторизация GitLab"
+        available: false
+        unavailable_reason: "OAuth-приложение GitLab ещё не выдано администраторами"
+        type: oauth2
+        authorize_url: "https://gitlab.corp.tander.ru/oauth/authorize"
+        token_url: "https://gitlab.corp.tander.ru/oauth/token"
+        client_id: "${GITLAB_OAUTH_CLIENT_ID}"
+        client_secret: "env:GITLAB_OAUTH_CLIENT_SECRET"
+        pkce: true
+        scopes:
+          readonly: ["read_api"]
+          readwrite: ["api"]
+      - id: personal_token
+        title: "Персональный токен GitLab"
+        type: user_token
+        field:
+          label: "Персональный токен GitLab"
+          hint: "GitLab → Preferences → Access Tokens → Create token (scope: read_api или api)"
+          docs_url: "https://gitlab.corp.tander.ru/-/user_settings/personal_access_tokens"
+          secret: true
+        verify:
+          url: "https://gitlab.corp.tander.ru/api/v4/user"
+          method: GET
+          headers:
+            Private-Token: "{{access_token}}"
+          account_field: username
+    credential_headers:
+      Private-Token: "{{access_token}}"
+    permission_model:
+      kind: header_groups
+      header: Enabled-Groups
+      groups:
+        - { id: core, title: "Чтение проектов, репозиториев и MR", preset: readonly }
+        - { id: code_review, title: "Комментарии и ревью MR", preset: readwrite }
