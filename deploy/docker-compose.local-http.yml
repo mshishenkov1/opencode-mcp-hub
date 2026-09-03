@@ -6,3 +6,7 @@ services:
       - "8080:8000"
     environment:
       HUB_PUBLIC_URL: http://localhost:8080
+      HUB_REPLICAS: 1
+  tag-mcp:
+    ports:
+      - "8001:8000"

@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Архитектура витрины коннекторов — текущая схема</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface-2: #232733;
+    --border: #2e3344;
+    --text: #e4e6eb;
+    --text-dim: #8b90a0;
+    --accent: #6366f1;
+    --accent-2: #818cf8;
+    --green: #22c55e;
+    --green-dim: #16a34a;
+    --orange: #f59e0b;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --cyan: #06b6d4;
+    --radius: 12px;
+    --mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.5;
+    padding: 40px 20px;
+  }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  h2 { font-size: 20px; font-weight: 600; color: var(--accent-2); margin-bottom: 16px; }
+  .subtitle { color: var(--text-dim); font-size: 15px; margin-bottom: 40px; }
+  .section { margin-bottom: 60px; }
+  .grid { display: grid; gap: 20px; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    position: relative;
+  }
+  .card-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-body { font-size: 13px; color: var(--text-dim); }
+  .card-body code { font-family: var(--mono); font-size: 12px; color: var(--accent-2); }
+  .layer {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 0;
+  }
+  .layer-header {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .layer-content { display: flex; gap: 16px; flex-wrap: wrap; }
+  .node {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    flex: 1;
+    min-width: 200px;
+  }
+  .node-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .node-detail { font-size: 12px; color: var(--text-dim); }
+  .node-detail code { font-family: var(--mono); color: var(--accent-2); font-size: 11px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-facade { background: rgba(99,102,241,0.15); color: var(--accent-2); }
+  .badge-local { background: rgba(6,182,212,0.15); color: var(--cyan); }
+  .badge-hub { background: rgba(59,130,246,0.15); color: var(--blue); }
+  .badge-secure { background: rgba(34,197,94,0.15); color: var(--green); }
+  .badge-danger { background: rgba(239,68,68,0.15); color: var(--red); }
+  .arrow-down {
+    text-align: center;
+    font-size: 24px;
+    color: var(--border);
+    margin: 8px 0;
+    line-height: 1;
+  }
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    font-size: 13px;
+  }
+  .flow-step {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .flow-arrow { color: var(--text-dim); font-size: 18px; }
+  .flow-num {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--text-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td code { font-family: var(--mono); color: var(--accent-2); font-size: 12px; }
+  .callout {
+    background: rgba(99,102,241,0.08);
+    border-left: 3px solid var(--accent);
+    padding: 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .callout-warn {
+    background: rgba(245,158,11,0.08);
+    border-left-color: var(--orange);
+  }
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .stack > .layer:not(:last-child) {
+    border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+  .stack > .layer:not(:first-child) {
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .pill {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Архитектура витрины коннекторов</h1>
+<p class="subtitle">Текущая схема: direct-token, facade-проксирование через Hub, локальные MCP-серверы<br>
+Версия документа: 2026-09-01 · Корпоративный форк OpenCode</p>
+
+<!-- LEGEND -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> Hub (корпоративный шлюз)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--cyan)"></div> Локальный MCP-сервер</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Шифрование / сейф</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div> Корпоративная система</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div> Desktop-приложение</div>
+</div>
+
+<!-- ============ LAYER 1: DESKTOP ============ -->
+<div class="section">
+  <h2>1. Слои системы</h2>
+  <div class="stack">
+
+    <!-- Desktop -->
+    <div class="layer">
+      <div class="layer-header">
+        <span style="color:var(--blue)">●</span> Слой клиента — Desktop-приложение OpenCode Magnit
+      </div>
+      <div class="layer-content">
+        <div class="node">
+          <div class="node-title">Electron-оболочка</div>
+          <div class="node-detail">
+            Сборка <code>OPENCODE_CHANNEL=magnit</code><br>
+            Вшитые константы: <code>CORP_HUB_URL</code>, <code>CORP_CONFIG</code><br>
+            appId: <code>ai.opencode.desktop.magnit</code>
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">opencode CLI (встроенный)</div>
+          <div class="node-detail">
+            HTTP-сервер на <code>localhost:&lt;random&gt;</code><br>
+            API: <code>/corp/catalog</code>, <code>/corp/connect-token</code><br>
+            Кэш каталога в <code>~/.local/share/opencode/</code>
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">Web-UI (SolidJS)</div>
+          <div class="node-detail">
+            Витрина коннекторов, карточки, диалоги<br>
+            <code>VITE_OPENCODE_CORP_HUB_URL</code> → признаки corp-режима<br>
+            Тексты i18n — русский по умолчанию
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">↓ HTTPS (localhost) ↓</div>
+
+    <!-- Hub -->
+    <div class="layer">
+      <div class="layer-header">
+        <span style="color:var(--accent)">●</span> Слой корпоративного шлюза — MCP Hub
+      </div>
+      <div class="layer-content">
+        <div class="node">
+          <div class="node-title">Hub API (FastAPI / Uvicorn)</div>
+          <div class="node-detail">
+            <code>POST /api/me/connections/{alias}/token</code> — подключение<br>
+            <code>DELETE /api/me/connections/{alias}</code> — отключение<br>
+            <code>GET /api/catalog</code> — каталог с состоянием карточек<br>
+            <code>POST /mcp/{alias}</code> — MCP-проксирование (JSON-RPC)
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">PostgreSQL</div>
+          <div class="node-detail">
+            Таблицы: connections, tokens, sessions<br>
+            Шифрование токенов: AES-GCM (<code>HUB_ENCRYPTION_KEY</code>)<br>
+            JWT-подпись: <code>HUB_SECRET_KEY</code>
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">Redis</div>
+          <div class="node-detail">
+            Rate-limiting, SSE-сессии, кэш каталога<br>
+            DB 0 — Hub, DB 1 — TAG-MCP
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">Caddy (TLS-прокси)</div>
+          <div class="node-detail">
+            Прод: <code>:8443 → :8000</code> (TLS, корп. CA)<br>
+            Локально: <code>:8080 → :8000</code> (plain HTTP)<br>
+            Корп. CA: <code>tander-ca-bundle.pem</code>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">↓ HTTP / HTTPS (корпоративная сеть) ↓</div>
+
+    <!-- MCP servers -->
+    <div class="layer">
+      <div class="layer-header">
+        <span style="color:var(--cyan)">●</span> Слой MCP-серверов — фасадные и локальные
+      </div>
+      <div class="layer-content">
+        <div class="node">
+          <div class="node-title">TAG-MCP <span class="badge badge-facade">facade</span></div>
+          <div class="node-detail">
+            Docker-контейнер, <code>http://tag-mcp:8000/mcp</code><br>
+            Mattermost-бот, 77 инструментов<br>
+            Auth: passthrough (токен в каждом запросе)
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">Jira MCP <span class="badge badge-facade">facade</span></div>
+          <div class="node-detail">
+            Внешний сервер: <code>mcp-atlassian.ailab-copilot-prod.corp.tander.ru/mcp</code><br>
+            49 инструментов, Confluence: 24 инструмента<br>
+            Auth: personal-token в HTTP-заголовке
+          </div>
+        </div>
+        <div class="node">
+          <div class="node-title">Outlook EWS MCP <span class="badge badge-local">local</span></div>
+          <div class="node-detail">
+            Локальный процесс: <code>localhost:8081/mcp</code> (SSE)<br>
+            56 инструментов (почта, календарь, контакты)<br>
+            Auth: креды из HTTP-заголовков (NTLM)
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">↓ HTTPS / EWS / API (корпоративная сеть) ↓</div>
+
+    <!-- Corporate systems -->
+    <div class="layer">
+      <div class="layer-header">
+        <span style="color:var(--orange)">●</span> Слой корпоративных систем
+      </div>
+      <div class="layer-content">
+        <div class="node">
+          <div class="node-title">TAG (Mattermost)</div>
+          <div class="node-detail"><code>tag.magnit.ru</code> · API v4</div>
+        </div>
+        <div class="node">
+          <div class="node-title">Jira + Confluence</div>
+          <div class="node-detail"><code>it-portal.corp.tander.ru</code> · On-Prem Data Center</div>
+        </div>
+        <div class="node">
+          <div class="node-title">Microsoft Exchange</div>
+          <div class="node-detail"><code>mail.magnit.ru/EWS/Exchange.asmx</code> · NTLM</div>
+        </div>
+        <div class="node">
+          <div class="node-title">LiteLLM (AI-шлюз)</div>
+          <div class="node-detail"><code>llmlite.ailab-copilot-prod.corp.tander.ru/v1</code><br>Модель: MagnitCopilot</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============ FLOW: DIRECT-TOKEN ============ -->
+<div class="section">
+  <h2>2. Поток подключения коннектора (direct-token)</h2>
+  <div class="card">
+    <div class="card-title">Пример: пользователь подключает Jira через персональный токен</div>
+    <div class="card-body">
+
+    <div class="flow">
+      <div class="flow-num">1</div>
+      <div class="flow-step">Пользователь открывает витрину коннекторов в Desktop</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">opencode CLI: <code>GET /corp/catalog</code></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Hub: <code>GET /api/catalog</code> (Bearer key)</div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">2</div>
+      <div class="flow-step">UI рисует карточку Jira (mode: facade, auth: personal_token)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Пользователь вводит Jira PAT в поле «Токен»</div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">3</div>
+      <div class="flow-step">UI: <code>POST /corp/connect-token</code> с паролем</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">opencode CLI: <code>verify()</code> — HTTP-запрос на Jira API</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Jira: <code>GET /rest/api/3/myself</code> с заголовком <code>Authorization: Bearer &lt;PAT&gt;</code></div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">4</div>
+      <div class="flow-step">Verify OK (200 + account)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">opencode CLI: <code>POST /api/me/connections/jira/token</code> на Hub</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Hub шифрует токен (AES-GCM) → PostgreSQL</div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">5</div>
+      <div class="flow-step">Hub отвечает <code>status: connected</code></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">opencode CLI: регистрирует MCP-сервер <code>http://localhost:8080/mcp/jira</code></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">UI показывает статус «Подключено»</div>
+    </div>
+
+    <div class="callout">
+      <strong>Ключевой момент:</strong> verify выполняется из opencode CLI (на машине пользователя), а не из Hub.
+      Hub только хранит зашифрованный токен и подставляет его в заголовки при проксировании MCP-запросов.
+    </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ============ FLOW: MCP PROXY ============ -->
+<div class="section">
+  <h2>3. Поток MCP-вызова (проксирование через Hub)</h2>
+  <div class="card">
+    <div class="card-title">Пример: ассистент вызывает инструмент <code>jira_search</code></div>
+    <div class="card-body">
+
+    <div class="flow">
+      <div class="flow-num">1</div>
+      <div class="flow-step">AI-модель возвращает tool_call: <code>jira_search</code></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">opencode CLI отправляет JSON-RPC на MCP-сервер Jira</div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">2</div>
+      <div class="flow-step">MCP-сервер Jira = <code>http://localhost:8080/mcp/jira</code> (Hub)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Hub: авторизация (Bearer access-token)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Hub: извлекает зашифрованный PAT из PostgreSQL</div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">3</div>
+      <div class="flow-step">Hub: дешифрует PAT, подставляет в <code>credential_headers</code></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Hub: проксирует JSON-RPC на <code>mcp-atlassian.../mcp</code></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Jira MCP: выполняет <code>jira_search</code> с заголовком <code>Authorization: Bearer &lt;PAT&gt;</code></div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-num">4</div>
+      <div class="flow-step">Jira API отвечает данными</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Hub: фильтрует инструменты по permission_groups</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">opencode CLI получает результат</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">AI-модель формирует ответ</div>
+    </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ============ SECRETS ============ -->
+<div class="section">
+  <h2>4. Хранение секретов</h2>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-title">🔑 Токены пользователя (PAT, пароли)</div>
+      <div class="card-body">
+        <p><strong>Где:</strong> PostgreSQL, таблица <code>connections</code>, колонка <code>token</code></p>
+        <p><strong>Как:</strong> AES-256-GCM, ключ <code>HUB_ENCRYPTION_KEY</code> (env)</p>
+        <p><strong>Жизнь:</strong> до отключения пользователем</p>
+        <p><strong>Доступ:</strong> только Hub-процесс</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🎫 Access-токен Hub (API key)</div>
+      <div class="card-body">
+        <p><strong>Где:</strong> <code>~/.local/share/opencode/auth.json</code> (права 0600)</p>
+        <p><strong>Как:</strong> plaintext, но привязан к SSO-сессии</p>
+        <p><strong>Жизнь:</strong> до выхода из SSO</p>
+        <p><strong>Формат:</strong> <code>sk-...</code> (LiteLLM-совместимый)</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🔒 Подпись JWT</div>
+      <div class="card-body">
+        <p><strong>Где:</strong> env <code>HUB_SECRET_KEY</code></p>
+        <p><strong>Как:</strong> HS256, срок жизни access-token</p>
+        <p><strong>Назначение:</strong> подпись MCP-proxy-токенов</p>
+        <p><strong>Ротация:</strong> вручную, с инвалидацией всех сессий</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout callout-warn">
+    <strong>Важно:</strong> Пароли Exchange (NTLM) не кэшируются на диске. Hub передаёт их в
+    HTTP-заголовках в каждом MCP-запросе, а локальный outlook-ews-mcp держит их в памяти
+    только на время вызова. После ответа креды удаляются из ContextVar.
+  </div>
+</div>
+
+<!-- ============ DEPLOY ============ -->
+<div class="section">
+  <h2>5. Развёртывание на серверах компании</h2>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">Стенд разработки (localhost)</div>
+      <div class="card-body">
+        <table>
+          <tr><th>Компонент</th><th>Адрес</th></tr>
+          <tr><td>Hub</td><td><code>localhost:8080</code></td></tr>
+          <tr><td>PostgreSQL</td><td>Docker, порт 5432</td></tr>
+          <tr><td>Redis</td><td>Docker, порт 6379</td></tr>
+          <tr><td>Caddy (TLS)</td><td>отключён</td></tr>
+          <tr><td>TAG-MCP</td><td>Docker, <code>tag-mcp:8000</code></td></tr>
+          <tr><td>Outlook MCP</td><td>Локальный процесс, <code>:8081</code></td></tr>
+          <tr><td>Jira/Confluence MCP</td><td>Внешний контур</td></tr>
+        </table>
+        <p style="margin-top:12px"><code>docker compose -p hubi3 -f docker-compose.yml -f docker-compose.local-http.yml up -d</code></p>
+        <p><code>HUB_REPLICAS=1</code> (один инстанс для dev)</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Продуктив (корпоративные серверы)</div>
+      <div class="card-body">
+        <table>
+          <tr><th>Компонент</th><th>Адрес</th></tr>
+          <tr><td>Hub (×2)</td><td><code>hub.ailab-copilot-prod.corp.tander.ru:8443</code></td></tr>
+          <tr><td>PostgreSQL</td><td>StatefulSet, PVC</td></tr>
+          <tr><td>Redis</td><td>StatefulSet, PVC</td></tr>
+          <tr><td>Caddy (TLS)</td><td>Корп. сертификат, <code>:8443</code></td></tr>
+          <tr><td>TAG-MCP</td><td>Deployment, <code>tag-mcp:8000</code></td></tr>
+          <tr><td>Jira/Confluence MCP</td><td><code>mcp-atlassian.ailab-copilot-prod.corp.tander.ru</code></td></tr>
+          <tr><td>Outlook MCP</td><td>Sidecar или выделенный pod</td></tr>
+          <tr><td>LiteLLM</td><td><code>llmlite.ailab-copilot-prod.corp.tander.ru</code></td></tr>
+        </table>
+        <p style="margin-top:12px">Деплой через Helm-чарт: <code>deploy/helm/opencode-mcp-hub/</code></p>
+        <p><code>HUB_REPLICAS=2</code> (отказоустойчивость)</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Сетевая схема продуктива:</strong><br>
+    Desktop → Caddy (8443/TLS) → Hub (8000) → MCP-серверы → Корпоративные системы<br>
+    Все соединения внутри кластера — plain HTTP. Внешний трафик — только через Caddy с TLS.
+    Корпоративный CA (<code>tander-ca-bundle.pem</code>) монтируется во все контейнеры.
+  </div>
+</div>
+
+<!-- ============ PERMISSIONS ============ -->
+<div class="section">
+  <h2>6. Модель разрешений</h2>
+  <div class="card">
+    <div class="card-title">Два уровня контроля</div>
+    <div class="card-body">
+      <table>
+        <tr>
+          <th>Уровень</th>
+          <th>Где настраивается</th>
+          <th>Что контролирует</th>
+          <th>Пример</th>
+        </tr>
+        <tr>
+          <td><strong>tool_filter</strong></td>
+          <td><code>catalog.yaml → permission_model.presets</code></td>
+          <td>Какие инструменты доступны при preset readonly / readwrite</td>
+          <td>Outlook: readonly = 22 инструмента, readwrite = все 56</td>
+        </tr>
+        <tr>
+          <td><strong>header_groups</strong></td>
+          <td><code>catalog.yaml → permission_model.groups</code> + <code>permissions/{alias}.yaml</code></td>
+          <td>Группы инструментов с default allow/ask/deny</td>
+          <td>Jira: read = allow, write = ask, admin = deny</td>
+        </tr>
+        <tr>
+          <td><strong>runtime ask</strong></td>
+          <td>Desktop UI (пользователь)</td>
+          <td>Подтверждение перед каждым write-вызовом</td>
+          <td>«Отправить письмо? [Да] [Нет]»</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

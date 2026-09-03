@@ -11,10 +11,10 @@ defaults:
 servers:
   - alias: tag
     type: "MCP"
-    title: "ТЭГ"
+    title: "Tag"
     summary: "Каналы, треды, поиск и опросы корпоративного мессенджера"
     icon_color: "#1F4C86"
-    description: "ТЭГ — корпоративный мессенджер Магнита. Подключив его, вы даёте ассистенту доступ ровно к тому, что видите сами: свои каналы и команды, переписку и треды, поиск по сообщениям и файлам, карточки коллег, вложения и результаты опросов. Чужих личных переписок коннектор не открывает — права наследуются от вашей учётной записи в ТЭГ.\n\nЧто это даёт. Спросить, чем закончилось обсуждение в канале, пока вас не было. Найти сообщение, которое вы точно писали, но не помните где. Собрать тред в короткий пересказ перед встречей. Отправить сообщение, поставить реакцию, создать опрос — если разрешите записывающие инструменты; по умолчанию они спрашивают."
+    description: "Tag — корпоративный мессенджер Магнита. Подключив его, вы даёте доступ ровно к тому, что видите сами: свои каналы и команды, переписку и треды, поиск по сообщениям и файлам, карточки коллег, вложения и результаты опросов.\n\nЧто это даёт: Спросить, чем закончилось обсуждение в канале, пока вас не было. Найти сообщение, которое вы точно писали, но не помните где. Собрать тред в короткий пересказ перед встречей. Отправить сообщение, поставить реакцию, создать опрос, кастомные автоматизации."
     owner: "Платформа"
     contact: "https://tag.magnit.ru"
     docs_url: "https://github.com/mshishenkov1/magnit-tag-mcp"
@@ -96,7 +96,7 @@ servers:
     title: "Jira"
     summary: "Задачи, проекты, спринты и заявки Service Desk"
     icon_color: "#1868DB"
-    description: "Задачи Jira: поиск, чтение, комментарии и переходы по статусам в проектах, куда у вас есть доступ.\n\nЧто это даёт. Собрать свои задачи на спринт одним вопросом, вытащить историю обсуждения задачи, оформить описание по шаблону команды."
+    description: "Jira — корпоративская система управления задачами и проектами Магнита. Подключив его, вы даёте доступ к вашим проектам и спринтам: поиск и чтение задач, комментарии, переходы по статусам, фильтры и дашборды.\n\nЧто это даёт: Собрать свои задачи на спринт одним вопросом. Вытащить историю обсуждения задачи и комментарии коллег. Оформить описание задачи по шаблону команды. Создать задачу или перевести по статусу, кастомные автоматизации."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/atlassian-mcp-oblachno"
@@ -150,7 +150,7 @@ servers:
     title: "Confluence"
     summary: "Поиск, чтение, комментарии и вложения базы знаний"
     icon_color: "#1868DB"
-    description: "База знаний Confluence: поиск по пространствам, чтение страниц и вложений, к которым у вас есть доступ.\n\nЧто это даёт. Найти регламент, на который все ссылаются, и получить из него ответ, а не ссылку. Собрать выжимку из длинной страницы."
+    description: "Confluence — корпоративная база знаний Магнита. Подключив его, вы даёте доступ к вашим пространствам: поиск по страницам, чтение и вложения, комментарии и метки, к которым у вас есть доступ.\n\nЧто это даёт: найти регламент, на который все ссылаются, и получить из него ответ, а не ссылку. Собрать выжимку из длинной страницы или пространства. Добавить комментарий или создать страницу, кастомные автоматизации."
     owner: "AI Lab"
     contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
     docs_url: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru/docs/mcp/atlassian-mcp-oblachno"
@@ -200,3 +200,69 @@ servers:
       groups:
         - { id: confluence_read, title: "Чтение страниц и поиск", preset: readonly }
         - { id: confluence_write, title: "Создание и редактирование страниц", preset: readwrite }
+
+  - alias: outlook
+    type: "MCP"
+    title: "Outlook"
+    summary: "Почта, календарь, контакты и переговорные корпоративного Exchange"
+    icon_color: "#0078D4"
+    description: "Outlook — корпоративная почта и календарь Магнита на Microsoft Exchange. Подключив его, вы даёте доступ к вашему ящику: входящие и папки, поиск писем, чтение и отправка, календарь и встречи, контакты, переговорные комнаты.\n\nЧто это даёт: Найти письмо по теме или отправителю и получить его текст. Собрать тред переписки в пересказ. Проверить календарь на сегодня и найти свободное окно для встречи. Отправить письмо или создать встречу, кастомные автоматизации."
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://github.com/viartemev/outlook-ews-mcp"
+    docs_label: "GitHub"
+    status: "beta"
+    audience: ['all']
+    mode: facade
+    upstream_url: "${OUTLOOK_MCP_URL}"
+    auth_methods:
+      - id: corp_password
+        title: "Корпоративная учётная запись"
+        type: user_token
+        field:
+          label: "Пароль корпоративной учётной записи"
+          hint: "Пароль от учётной записи CORP\\<ваш логин> — тот же, что для входа в Windows"
+          secret: true
+        verify:
+          url: "http://127.0.0.1:8000/health"
+          method: GET
+          headers:
+            X-Verify: "outlook"
+          expect_status: 200
+          require_account: false
+    credential_headers:
+      X-Exchange-Username: "CORP\\shishenkov_ma"
+      X-Exchange-Password: "{{access_token}}"
+      X-Exchange-Server: "https://mail.magnit.ru/EWS/Exchange.asmx"
+      X-Exchange-Auth-Type: "NTLM"
+      X-Exchange-Email: "shishenkov_ma@magnit.ru"
+    permission_model:
+      kind: tool_filter
+      presets:
+        readonly:
+          tools:
+            - ping_exchange
+            - get_mailbox_info
+            - list_delegates
+            - list_inbox_rules
+            - get_out_of_office
+            - list_emails
+            - get_email
+            - get_email_mime
+            - get_thread
+            - search_emails
+            - list_categories
+            - list_folders
+            - get_attachment
+            - list_events
+            - get_event
+            - find_free_slots
+            - get_my_availability
+            - list_calendars
+            - list_room_lists
+            - list_rooms
+            - search_contacts
+            - get_contact
+        readwrite:
+          tools:
+            - "*"

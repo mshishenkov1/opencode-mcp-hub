@@ -1,0 +1,118 @@
+# Словарь разрешений коннектора Confluence (S-V20 спецификации форка OpenCode).
+#
+# Состав — 24 инструмента, снятых протоколом MCP с боевого
+# mcp-atlassian.ailab-copilot-prod.corp.tander.ru (2026-09-01): ровно та поверхность, которую
+# сервер объявляет без фильтра. На конкретной установке заголовок `Enabled-Groups`
+# (permission_model карточки) может отдавать пользователю меньше инструментов — словарь описывает
+# коннектор целиком, а не то, что включено у одного человека. `rest` страхует инструменты,
+# которые появятся у сервера после публикации этого словаря.
+#
+# version: 2 — раздел `tools` со строкой на каждый инструмент: человеческое имя и класс риска, из
+# которых клиент строит экран разрешений по классам, а не по группам. Умолчание инструмента
+# берётся из его группы. Классы: `read_only` — ничего не меняет; `write_delete` — меняет или
+# удаляет данные в Confluence; `interactive` — действие вовне или запуск чужого кода. Класс берётся
+# по существу инструмента, а не по группе.
+#
+# Совпадение состава `tools` и объединения групповых `tools` проверяется при сборке статического
+# каталога (scripts/build-static-catalog.py, check_tool_index) — расхождение останавливает сборку.
+# Hub подставляет файл в карточку целиком (src/hub/catalog.py, _apply_permission_files) и этой
+# проверки не выполняет, поэтому файл в обоих деревьях держится побайтово одинаковым.
+version: 2
+groups:
+  - id: pages_read
+    title: "Читать страницы, их историю и вложения"
+    description: "Содержимое страницы по ID или заголовку, дочерние страницы, история версий и diff, вложения и их загрузка, метки и комментарии, просмотры страницы. Ничего не меняет."
+    default: allow
+    tools: [confluence_get_page, confluence_get_page_children, confluence_get_page_diff, confluence_get_page_history, confluence_get_page_images, confluence_get_page_views, confluence_get_attachments, confluence_download_attachment, confluence_download_content_attachments, confluence_get_comments, confluence_get_labels, confluence_get_space_page_tree]
+  - id: search
+    title: "Искать страницы и сотрудников"
+    description: "Поиск контента по словам или CQL, поиск сотрудников по CQL. Показывает только то, что вам и так доступно в Confluence."
+    default: allow
+    tools: [confluence_search, confluence_search_user]
+  - id: pages_write
+    title: "Создавать и редактировать страницы, комментарии и вложения"
+    description: "Создание и обновление страниц, добавление комментариев и ответов на них, добавление меток, перемещение страниц между родителями и пространствами, загрузка вложений."
+    default: ask
+    tools: [confluence_create_page, confluence_update_page, confluence_add_comment, confluence_reply_to_comment, confluence_add_label, confluence_move_page, confluence_upload_attachment, confluence_upload_attachments]
+  - id: destructive
+    title: "Удалять страницы и вложения"
+    description: "Безвозвратное удаление страниц и вложений. Действие нельзя отменить."
+    default: deny
+    tools: [confluence_delete_page, confluence_delete_attachment]
+rest:
+  title: "Остальные возможности Confluence"
+  description: "Инструменты коннектора, не попавшие ни в одну группу, — например появившиеся у сервера после публикации этого словаря."
+  default: ask
+tools:
+  confluence_get_page:
+    title: "Читать страницу целиком"
+    class: read_only
+  confluence_get_page_children:
+    title: "Смотреть дочерние страницы"
+    class: read_only
+  confluence_get_page_diff:
+    title: "Сравнивать версии страницы"
+    class: read_only
+  confluence_get_page_history:
+    title: "Смотреть историю версий страницы"
+    class: read_only
+  confluence_get_page_images:
+    title: "Смотреть изображения на странице"
+    class: read_only
+  confluence_get_page_views:
+    title: "Смотреть, кто просматривал страницу"
+    class: read_only
+  confluence_get_attachments:
+    title: "Смотреть вложения страницы"
+    class: read_only
+  confluence_download_attachment:
+    title: "Скачивать вложение страницы"
+    class: read_only
+  confluence_download_content_attachments:
+    title: "Скачивать все вложения страницы"
+    class: read_only
+  confluence_get_comments:
+    title: "Смотреть комментарии страницы"
+    class: read_only
+  confluence_get_labels:
+    title: "Смотреть метки страницы"
+    class: read_only
+  confluence_get_space_page_tree:
+    title: "Смотреть дерево страниц пространства"
+    class: read_only
+  confluence_search:
+    title: "Искать страницы по словам или CQL"
+    class: read_only
+  confluence_search_user:
+    title: "Искать сотрудников"
+    class: read_only
+  confluence_create_page:
+    title: "Создавать страницу"
+    class: write_delete
+  confluence_update_page:
+    title: "Обновлять страницу"
+    class: write_delete
+  confluence_add_comment:
+    title: "Комментировать страницу от вашего имени"
+    class: write_delete
+  confluence_reply_to_comment:
+    title: "Отвечать на комментарий"
+    class: write_delete
+  confluence_add_label:
+    title: "Добавлять метку на страницу"
+    class: write_delete
+  confluence_move_page:
+    title: "Перемещать страницу между родителями и пространствами"
+    class: write_delete
+  confluence_upload_attachment:
+    title: "Загружать вложение на страницу"
+    class: write_delete
+  confluence_upload_attachments:
+    title: "Загружать несколько вложений"
+    class: write_delete
+  confluence_delete_page:
+    title: "Удалять страницу"
+    class: write_delete
+  confluence_delete_attachment:
+    title: "Удалять вложение"
+    class: write_delete

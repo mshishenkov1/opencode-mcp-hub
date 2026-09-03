@@ -1,0 +1,229 @@
+# Словарь разрешений коннектора Outlook (S-V20 спецификации форка OpenCode).
+#
+# Состав — 56 инструментов, снятых с src/outlook_mcp/tool_specs.py
+# outlook-ews-mcp (https://github.com/viartemev/outlook-ews-mcp, 2026-09-01).
+#
+# version: 2 — раздел `tools` со строкой на каждый инструмент: человеческое имя и класс риска, из
+# которых клиент строит экран разрешений по классам, а не по группам. Умолчание инструмента
+# берётся из его группы. Классы: `read_only` — ничего не меняет; `write_delete` — меняет или
+# удаляет данные в Exchange.
+#
+# Совпадение состава `tools` и объединения групповых `tools` проверяется при сборке статического
+# каталога (scripts/build-static-catalog.py, check_tool_index) — расхождение останавливает сборку.
+# Hub подставляет файл в карточку целиком (src/hub/catalog.py, _apply_permission_files) и этой
+# проверки не выполняет, поэтому файл в обоих деревьях держится побайтово одинаковым.
+version: 2
+groups:
+  - id: system_read
+    title: "Проверка связи и данные ящика"
+    description: "Проверка доступности Exchange, метаданные ящика, делегаты, правила входящих, статус отсутствия в офисе. Ничего не меняет."
+    default: allow
+    tools: [ping_exchange, get_mailbox_info, list_delegates, list_inbox_rules, get_out_of_office]
+  - id: email_read
+    title: "Читать письма, папки и вложения"
+    description: "Список писем в папке, поиск по теме/телу/отправителю, чтение письма целиком, треды переписки, raw MIME, список папок, категории, скачивание вложений."
+    default: allow
+    tools: [list_emails, get_email, get_email_mime, get_thread, search_emails, list_categories, list_folders, get_attachment]
+  - id: calendar_read
+    title: "Смотреть календарь, встречи и комнаты"
+    description: "Список событий, информация о встрече, свободные слоты, доступность, список календарей, поиск переговорных комнат."
+    default: allow
+    tools: [list_events, get_event, find_free_slots, get_my_availability, list_calendars, list_room_lists, list_rooms]
+  - id: contacts_read
+    title: "Искать и читать контакты"
+    description: "Поиск контактов и чтение карточки контакта. Ничего не меняет."
+    default: allow
+    tools: [search_contacts, get_contact]
+  - id: email_write
+    title: "Отправлять, перемещать и удалять письма"
+    description: "Отправка, ответ, пересылка, создание черновика, перемещение, копирование, удаление, отметка прочтения, категории, создание и удаление папок."
+    default: ask
+    tools: [send_email, reply_email, forward_email, create_draft, update_draft, send_draft, move_email, copy_email, move_emails, copy_emails, delete_email, delete_emails, mark_email, categorize_email, mark_emails, categorize_emails, create_folder, rename_folder, delete_folder, add_attachment, delete_attachment]
+  - id: calendar_write
+    title: "Создавать и менять встречи в календаре"
+    description: "Создание, обновление, удаление встреч, ответы на приглашения."
+    default: ask
+    tools: [create_event, update_event, delete_event, delete_events, respond_to_invite, respond_to_invites]
+  - id: contacts_write
+    title: "Создавать и менять контакты"
+    description: "Создание, обновление и удаление личных контактов."
+    default: ask
+    tools: [create_contact, update_contact, delete_contact]
+  - id: system_write
+    title: "Менять правила, отсутствие в офисе"
+    description: "Создание, изменение, удаление правил входящих; настройка автоматического ответа (отсутствие в офисе). Внимание: управление правилами через EWS может затереть правила, созданные в Outlook."
+    default: deny
+    tools: [create_inbox_rule, update_inbox_rule, delete_inbox_rule, set_out_of_office]
+rest:
+  title: "Остальные возможности Outlook"
+  description: "Инструменты коннектора, не попавшие ни в одну группу, — например появившиеся у сервера после публикации этого словаря."
+  default: ask
+tools:
+  ping_exchange:
+    title: "Проверять связь с Exchange"
+    class: read_only
+  get_mailbox_info:
+    title: "Смотреть данные вашего ящика"
+    class: read_only
+  list_delegates:
+    title: "Смотреть, кому делегирован ваш ящик"
+    class: read_only
+  list_inbox_rules:
+    title: "Смотреть правила входящих"
+    class: read_only
+  get_out_of_office:
+    title: "Смотреть статус отсутствия в офисе"
+    class: read_only
+  list_emails:
+    title: "Смотреть список писем в папке"
+    class: read_only
+  get_email:
+    title: "Читать письмо целиком"
+    class: read_only
+  get_email_mime:
+    title: "Экспортировать письмо в MIME"
+    class: read_only
+  get_thread:
+    title: "Читать тред переписки целиком"
+    class: read_only
+  search_emails:
+    title: "Искать письма по теме, телу или отправителю"
+    class: read_only
+  list_categories:
+    title: "Смотреть категории писем"
+    class: read_only
+  list_folders:
+    title: "Смотреть список папок ящика"
+    class: read_only
+  get_attachment:
+    title: "Скачивать вложение из письма"
+    class: read_only
+  list_events:
+    title: "Смотреть список встреч в календаре"
+    class: read_only
+  get_event:
+    title: "Читать встречу целиком"
+    class: read_only
+  find_free_slots:
+    title: "Искать свободные слоты для встречи"
+    class: read_only
+  get_my_availability:
+    title: "Смотреть вашу доступность"
+    class: read_only
+  list_calendars:
+    title: "Смотреть список ваших календарей"
+    class: read_only
+  list_room_lists:
+    title: "Смотреть списки переговорных комнат"
+    class: read_only
+  list_rooms:
+    title: "Смотреть переговорные комнаты"
+    class: read_only
+  search_contacts:
+    title: "Искать контакты"
+    class: read_only
+  get_contact:
+    title: "Читать карточку контакта"
+    class: read_only
+  create_inbox_rule:
+    title: "Создавать правило входящих"
+    class: write_delete
+  update_inbox_rule:
+    title: "Изменять правило входящих"
+    class: write_delete
+  delete_inbox_rule:
+    title: "Удалять правило входящих"
+    class: write_delete
+  set_out_of_office:
+    title: "Настраивать отсутствие в офисе"
+    class: write_delete
+  send_email:
+    title: "Отправлять письмо от вашего имени"
+    class: write_delete
+  reply_email:
+    title: "Отвечать на письмо"
+    class: write_delete
+  forward_email:
+    title: "Пересылать письмо"
+    class: write_delete
+  move_email:
+    title: "Перемещать письмо в папку"
+    class: write_delete
+  copy_email:
+    title: "Копировать письмо в папку"
+    class: write_delete
+  move_emails:
+    title: "Перемещать письма в папку"
+    class: write_delete
+  copy_emails:
+    title: "Копировать письма в папку"
+    class: write_delete
+  delete_emails:
+    title: "Удалять письма"
+    class: write_delete
+  delete_email:
+    title: "Удалять письмо"
+    class: write_delete
+  mark_email:
+    title: "Отмечать письмо прочитанным или непрочитанным"
+    class: write_delete
+  categorize_email:
+    title: "Назначать категорию письму"
+    class: write_delete
+  mark_emails:
+    title: "Отмечать письма прочитанными или непрочитанными"
+    class: write_delete
+  categorize_emails:
+    title: "Назначать категорию письмам"
+    class: write_delete
+  create_folder:
+    title: "Создавать папку в ящике"
+    class: write_delete
+  rename_folder:
+    title: "Переименовывать папку"
+    class: write_delete
+  delete_folder:
+    title: "Удалять папку"
+    class: write_delete
+  create_draft:
+    title: "Создавать черновик письма"
+    class: write_delete
+  update_draft:
+    title: "Изменять черновик письма"
+    class: write_delete
+  send_draft:
+    title: "Отправлять черновик"
+    class: write_delete
+  add_attachment:
+    title: "Добавлять вложение к письму"
+    class: write_delete
+  delete_attachment:
+    title: "Удалять вложение из письма"
+    class: write_delete
+  create_event:
+    title: "Создавать встречу в календаре"
+    class: write_delete
+  update_event:
+    title: "Изменять встречу"
+    class: write_delete
+  delete_event:
+    title: "Удалять встречу"
+    class: write_delete
+  respond_to_invite:
+    title: "Отвечать на приглашение"
+    class: write_delete
+  delete_events:
+    title: "Удалять встречи"
+    class: write_delete
+  respond_to_invites:
+    title: "Отвечать на приглашения"
+    class: write_delete
+  create_contact:
+    title: "Создавать контакт"
+    class: write_delete
+  update_contact:
+    title: "Изменять контакт"
+    class: write_delete
+  delete_contact:
+    title: "Удалять контакт"
+    class: write_delete

@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Инструкция: добавление нового коннектора</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface-2: #232733;
+    --border: #2e3344;
+    --text: #e4e6eb;
+    --text-dim: #8b90a0;
+    --accent: #6366f1;
+    --accent-2: #818cf8;
+    --green: #22c55e;
+    --orange: #f59e0b;
+    --cyan: #06b6d4;
+    --radius: 12px;
+    --mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.6;
+    padding: 40px 20px;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  h2 { font-size: 20px; font-weight: 600; color: var(--accent-2); margin-top: 40px; margin-bottom: 16px; }
+  h3 { font-size: 16px; font-weight: 600; margin-top: 24px; margin-bottom: 12px; }
+  .subtitle { color: var(--text-dim); font-size: 15px; margin-bottom: 40px; }
+  p { margin-bottom: 12px; font-size: 14px; }
+  code {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--surface-2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent-2);
+  }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+  }
+  .step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .step-num {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .step-content { flex: 1; }
+  .step-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  .step-body { font-size: 14px; color: var(--text-dim); }
+  .callout {
+    background: rgba(99,102,241,0.08);
+    border-left: 3px solid var(--accent);
+    padding: 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .callout-warn {
+    background: rgba(245,158,11,0.08);
+    border-left-color: var(--orange);
+  }
+  .callout-ok {
+    background: rgba(34,197,94,0.08);
+    border-left-color: var(--green);
+  }
+  ul, ol { margin-left: 24px; margin-bottom: 12px; font-size: 14px; }
+  li { margin-bottom: 6px; }
+  .file-tree {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-dim);
+  }
+  .file-tree .dir { color: var(--accent-2); font-weight: 600; }
+  .file-tree .file { color: var(--text); }
+  .file-tree .new { color: var(--green); }
+  .file-tree .highlight { background: rgba(99,102,241,0.12); border-radius: 3px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Инструкция: добавление нового коннектора в витрину</h1>
+<p class="subtitle">
+  Пошаговое руководство для администраторов и разработчиков<br>
+  Версия: 2026-09-01 · Для корпоративного форка OpenCode
+</p>
+
+<div class="callout">
+  <strong>Кратко:</strong> чтобы добавить коннектор, нужно 4 шага — описать сервер в <code>catalog.yaml</code>,
+  создать файл разрешений в <code>permissions/</code>, скопировать оба файла в Hub-контейнер,
+  и перезапустить Hub. После этого коннектор появится в витрине у всех пользователей.
+</div>
+
+<!-- FILE TREE -->
+<h2>Структура файлов Hub</h2>
+<div class="file-tree">
+<span class="dir">opencode-mcp-hub-i3/</span>
+├── <span class="file">catalog.yaml</span> <span class="highlight">← каталог всех коннекторов</span>
+├── <span class="dir">permissions/</span>
+│   ├── <span class="file">tag.yaml</span>
+│   ├── <span class="file">jira.yaml</span>
+│   ├── <span class="file">confluence.yaml</span>
+│   ├── <span class="file">outlook.yaml</span>
+│   └── <span class="new file">{новый_коннектор}.yaml</span> <span class="highlight">← создать</span>
+├── <span class="dir">deploy/</span>
+│   ├── <span class="file">.env</span> <span class="highlight">← переменные окружения</span>
+│   ├── <span class="file">docker-compose.yml</span>
+│   └── <span class="file">docker-compose.local-http.yml</span>
+└── <span class="dir">src/hub/</span>
+</div>
+
+<!-- STEP 1 -->
+<h2>Шаг 1. Описать сервер в catalog.yaml</h2>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content">
+    <div class="step-title">Добавить запись в каталог</div>
+    <div class="step-body">
+      <p>Откройте <code>~/Documents/opencode-mcp-hub-i3/catalog.yaml</code> и добавьте новый элемент в массив <code>servers</code>.</p>
+
+      <h3>Шаблон для facade-сервера (с personal_token)</h3>
+      <pre><code>  - alias: gitlab                    # уникальный идентификатор
+    type: "MCP"
+    title: "GitLab"                   # название в витрине
+    summary: "Merge requests, issues, pipelines"
+    icon_color: "#FC6D26"             # цвет иконки (hex)
+    description: |
+      GitLab — система управления репозиториями Магнита.
+      Подключив его, вы даёте ассистенту доступ к MR, issues,
+      pipeline и коду проектов.
+    owner: "AI Lab"
+    contact: "https://copilot-portal.ailab-copilot-prod.corp.tander.ru"
+    docs_url: "https://docs.gitlab.com"
+    docs_label: "GitLab Docs"
+    status: "beta"                    # beta | ga
+    audience: ['all']                 # ['all'] или список групп
+    mode: facade                      # facade (через Hub) | native (напрямую)
+    upstream_url: "${GITLAB_MCP_URL}" # адрес MCP-сервера
+    auth_methods:
+      - id: personal_token
+        title: "Personal Access Token"
+        type: user_token
+        field:
+          label: "GitLab PAT"
+          hint: "Создайте токен в GitLab → Settings → Access Tokens"
+          secret: true
+        verify:
+          url: "https://gitlab.corp.tander.ru/api/v4/user"
+          method: GET
+          headers:
+            PRIVATE-TOKEN: "{{access_token}}"
+          account_field: "username"
+          require_account: true
+    credential_headers:
+      PRIVATE-TOKEN: "{{access_token}}"
+    permission_model:
+      kind: tool_filter
+      presets:
+        readonly:
+          tools:
+            - list_projects
+            - get_project
+            - list_merge_requests
+            - get_merge_request
+            - list_issues
+            - search_code
+        readwrite:
+          tools:
+            - "*"</code></pre>
+
+      <h3>Поля catalog.yaml — справка</h3>
+      <ul>
+        <li><code>alias</code> — уникальный идентификатор, используется в URL и API</li>
+        <li><code>mode: facade</code> — Hub проксирует запросы, подставляя токен</li>
+        <li><code>upstream_url</code> — адрес MCP-сервера (может быть env-переменная <code>${...}</code>)</li>
+        <li><code>auth_methods[].type: user_token</code> — direct-token (PAT/пароль)</li>
+        <li><code>auth_methods[].type: oauth2</code> — OAuth flow (будущее)</li>
+        <li><code>auth_methods[].verify</code> — как Hub проверяет токен при подключении</li>
+        <li><code>credential_headers</code> — заголовки, которые Hub подставляет при проксировании</li>
+        <li><code>permission_model.kind: tool_filter</code> — фильтр по списку инструментов</li>
+        <li><code>permission_model.kind: header_groups</code> — группы с allow/ask/deny</li>
+      </ul>
+
+      <div class="callout-warn callout">
+        <strong>Важно:</strong> <code>verify.url</code> выполняется из Docker-контейнера Hub.
+        Используйте <code>127.0.0.1:8000</code> для self-check или корпоративный DNS-адрес для внешних систем.
+        Не используйте <code>localhost:8080</code> — это порт хоста, недоступный из контейнера.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STEP 2 -->
+<h2>Шаг 2. Создать файл разрешений</h2>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content">
+    <div class="step-title">Создать permissions/{alias}.yaml</div>
+    <div class="step-body">
+      <p>Файл разрешений описывает инструменты коннектора и их классы (read_only / write_delete).</p>
+      <pre><code># permissions/gitlab.yaml
+# version: 2 — раздел `tools` со строкой на каждый инструмент.
+version: 2
+groups:
+  - id: project_read
+    title: "Читать проекты и код"
+    description: "Список проектов, MR, issues, поиск по коду."
+    default: allow
+    tools:
+      - list_projects
+      - get_project
+      - list_merge_requests
+      - get_merge_request
+      - list_issues
+      - search_code
+  - id: project_write
+    title: "Создавать и менять MR, issues"
+    description: "Создание MR, комментариев, issues, назначение ревьюеров."
+    default: ask
+    tools:
+      - create_merge_request
+      - update_merge_request
+      - create_issue
+      - update_issue
+      - add_comment
+  - id: ci_write
+    title: "Запуск pipeline и jobs"
+    description: "Запуск и перезапуск CI/CD pipeline."
+    default: deny
+    tools:
+      - run_pipeline
+      - retry_job
+      - cancel_job
+rest:
+  title: "Остальные инструменты"
+  description: "Появятся в будущем или экспериментальные."
+  default: ask
+tools:
+  list_projects:
+    title: "Список проектов"
+    class: read_only
+  get_project:
+    title: "Данные проекта"
+    class: read_only
+  list_merge_requests:
+    title: "Список MR"
+    class: read_only
+  get_merge_request:
+    title: "Данные MR"
+    class: read_only
+  list_issues:
+    title: "Список issues"
+    class: read_only
+  search_code:
+    title: "Поиск по коду"
+    class: read_only
+  create_merge_request:
+    title: "Создать MR"
+    class: write_delete
+  update_merge_request:
+    title: "Обновить MR"
+    class: write_delete
+  create_issue:
+    title: "Создать issue"
+    class: write_delete
+  update_issue:
+    title: "Обновить issue"
+    class: write_delete
+  add_comment:
+    title: "Комментарий"
+    class: write_delete
+  run_pipeline:
+    title: "Запустить pipeline"
+    class: write_delete
+  retry_job:
+    title: "Перезапустить job"
+    class: write_delete
+  cancel_job:
+    title: "Отменить job"
+    class: write_delete</code></pre>
+
+      <h3>Правила разрешений</h3>
+      <ul>
+        <li><code>default: allow</code> — инструмент работает без подтверждения</li>
+        <li><code>default: ask</code> — UI спрашивает пользователя перед каждым вызовом</li>
+        <li><code>default: deny</code> — инструмент заблокирован</li>
+        <li><code>class: read_only</code> — не меняет данные (для preset readonly)</li>
+        <li><code>class: write_delete</code> — меняет или удаляет данные (для preset readwrite)</li>
+        <li><code>rest.default</code> — применяется к инструментам, которых нет в файле</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- STEP 3 -->
+<h2>Шаг 3. Добавить env-переменные (если нужно)</h2>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content">
+    <div class="step-title">Добавить переменную в .env</div>
+    <div class="step-body">
+      <p>Если <code>upstream_url</code> использует <code>${...}</code>, добавьте переменную в <code>deploy/.env</code>:</p>
+      <pre><code># deploy/.env
+GITLAB_MCP_URL=http://host.docker.internal:8082/mcp</code></pre>
+      <p>Для локального MCP-сервера (на машине разработчика) используйте <code>host.docker.internal</code>.
+      Для серверного MCP — внутренний Docker DNS или корпоративный адрес.</p>
+    </div>
+  </div>
+</div>
+
+<!-- STEP 4 -->
+<h2>Шаг 4. Загрузить в Hub и перезапустить</h2>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content">
+    <div class="step-title">Скопировать файлы и перезапустить Hub</div>
+    <div class="step-body">
+      <pre><code># Скопировать файл разрешений в контейнер
+docker cp ~/Documents/opencode-mcp-hub-i3/permissions/gitlab.yaml \
+  hubi3-hub-1:/app/permissions/gitlab.yaml
+
+# Перезапустить Hub (catalog.yaml примонтирован как bind mount)
+docker restart hubi3-hub-1
+
+# Дождаться запуска
+sleep 5
+
+# Проверить, что коннектор появился
+KEY=$(python3 -c "import json; d=json.load(open('$HOME/.local/share/opencode/auth.json')); print(d['magnit_prod']['key'])")
+curl -s "http://localhost:8080/api/catalog" \
+  -H "Authorization: Bearer $KEY" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for s in d.get('servers', []):
+    print(f'  {s[\"alias\"]}: {s.get(\"connection\",{}).get(\"status\",\"not_connected\")}')
+"</code></pre>
+
+      <div class="callout-ok callout">
+        <strong>Готово!</strong> Коннектор появился в каталоге. Все пользователи увидят его в витрине
+        при следующем запуске Desktop-приложения (или после обновления кэша каталога).
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STEP 5 -->
+<h2>Шаг 5. Запустить MCP-сервер (если локальный)</h2>
+<div class="step">
+  <div class="step-num">5</div>
+  <div class="step-content">
+    <div class="step-title">Запустить MCP-сервер коннектора</div>
+    <div class="step-body">
+      <p>Если MCP-сервер работает локально (как outlook-ews-mcp), запустите его:</p>
+      <pre><code>cd /path/to/gitlab-mcp
+source .venv/bin/activate
+nohup env MCP_TRANSPORT=sse MCP_SSE_HOST=0.0.0.0 MCP_SSE_PORT=8082 \
+  gitlab-mcp > /tmp/gitlab-mcp.log 2>&1 &</code></pre>
+      <p>Для серверного развёртывания — добавьте сервис в <code>docker-compose.yml</code> или Helm-чарт.</p>
+    </div>
+  </div>
+</div>
+
+<!-- CHECKLIST -->
+<h2>Чек-лист</h2>
+<div class="callout">
+  <ol>
+    <li>☑ Запись в <code>catalog.yaml</code>: alias, title, mode, upstream_url, auth_methods, verify, credential_headers, permission_model</li>
+    <li>☑ Файл <code>permissions/{alias}.yaml</code>: группы, инструменты, классы</li>
+    <li>☑ Переменная <code>{ALIAS}_MCP_URL</code> в <code>deploy/.env</code></li>
+    <li>☑ <code>docker cp permissions/{alias}.yaml hubi3-hub-1:/app/permissions/</code></li>
+    <li>☑ <code>docker restart hubi3-hub-1</code></li>
+    <li>☑ Проверка: <code>GET /api/catalog</code> показывает новый коннектор</li>
+    <li>☑ MCP-сервер запущен и доступен по <code>upstream_url</code></li>
+    <li>☑ Verify URL доступен из Docker-контейнера Hub</li>
+  </ol>
+</div>
+
+<!-- TROUBLESHOOTING -->
+<h2>Частые проблемы</h2>
+
+<h3>Коннектор не появился в каталоге</h3>
+<ul>
+  <li>Проверьте логи: <code>docker logs hubi3-hub-1 2>&amp;1 | grep -i error</code></li>
+  <li>Возможно, YAML невалидный — Hub молча дропает сервер с ошибкой схемы</li>
+  <li>Проверьте, что <code>upstream_url</code> раскрывается (env-переменная существует в контейнере)</li>
+</ul>
+
+<h3>Подключение зависает</h3>
+<ul>
+  <li><code>verify.url</code> недоступен из контейнера Hub — используйте <code>127.0.0.1:8000/health</code> для self-check или корпоративный DNS</li>
+  <li>Не используйте <code>localhost:8080</code> в verify — это порт хоста, недоступный из контейнера</li>
+</ul>
+
+<h3>Инструменты не показываются (tools: 0)</h3>
+<ul>
+  <li>Файл <code>permissions/{alias}.yaml</code> не скопирован в контейнер</li>
+  <li>Имена инструментов в файле не совпадают с именами в MCP-сервере</li>
+  <li>Hub не перезапущен после копирования permissions</li>
+</ul>
+
+<h3>MCP-вызовы возвращают ошибку</h3>
+<ul>
+  <li>Проверьте, что MCP-сервер запущен и отвечает по <code>upstream_url</code></li>
+  <li>Проверьте, что <code>credential_headers</code> корректно подставляют токен</li>
+  <li>Проверьте логи MCP-сервера</li>
+</ul>
+
+</div>
+</body>
+</html>
